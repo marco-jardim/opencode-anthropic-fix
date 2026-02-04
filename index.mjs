@@ -468,10 +468,10 @@ export async function AnthropicAuthPlugin({ client }) {
             expires: auth.expires,
           });
 
-          // If we bootstrapped from auth.json and have no stored accounts,
-          // save to create the accounts file
+          // If we bootstrapped from auth.json and have no stored accounts file,
+          // save immediately to create it (debounced save may not fire in time)
           if (accountManager.getAccountCount() > 0) {
-            accountManager.requestSaveToDisk();
+            await accountManager.saveToDisk();
           }
 
           return {
@@ -651,7 +651,7 @@ export async function AnthropicAuthPlugin({ client }) {
       methods: [
         {
           // H1: Claude Pro/Max OAuth — now with multi-account support
-          label: "Claude Pro/Max",
+          label: "Claude Pro/Max (multi-account)",
           type: "oauth",
           authorize: async () => {
             // Check for existing accounts
@@ -700,15 +700,19 @@ export async function AnthropicAuthPlugin({ client }) {
                 const credentials = await exchange(code, verifier);
                 if (credentials.type === "failed") return credentials;
 
-                // Add to account pool
-                if (accountManager) {
-                  accountManager.addAccount(
-                    credentials.refresh,
-                    credentials.access,
-                    credentials.expires,
-                  );
-                  await accountManager.saveToDisk();
+                // Initialize AccountManager if not yet loaded (first login —
+                // loader() hasn't run yet because auth hasn't completed)
+                if (!accountManager) {
+                  accountManager = await AccountManager.load(config, null);
                 }
+
+                // Add to account pool and persist immediately
+                accountManager.addAccount(
+                  credentials.refresh,
+                  credentials.access,
+                  credentials.expires,
+                );
+                await accountManager.saveToDisk();
 
                 return credentials;
               },
