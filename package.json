@@ -2,8 +2,13 @@
   "name": "opencode-anthropic-auth",
   "version": "0.0.13",
   "main": "./index.mjs",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "devDependencies": {
-    "@opencode-ai/plugin": "^0.4.45"
+    "@opencode-ai/plugin": "^0.4.45",
+    "vitest": "^4.0.18"
   },
   "dependencies": {
     "@openauthjs/openauth": "^0.4.3"
