@@ -7,7 +7,12 @@
   },
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "plugin:link": "node scripts/install.mjs link",
+    "plugin:copy": "node scripts/install.mjs copy",
+    "plugin:uninstall": "node scripts/install.mjs uninstall",
+    "cli:install": "npm link",
+    "cli:uninstall": "npm unlink -g"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^0.4.45",
