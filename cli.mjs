@@ -14,13 +14,14 @@
  *   disable <N>       Disable an account (skipped in rotation)
  *   remove <N>        Remove an account permanently
  *   reset <N|all>     Clear rate-limit / failure tracking
+ *   strategy [name]   Show or change account selection strategy
  *   config            Show current configuration and file paths
  *   manage            Interactive account management menu
  *   help              Show this help message
  */
 
 import { loadAccounts, saveAccounts, getStoragePath } from "./lib/storage.mjs";
-import { loadConfig, getConfigPath, getConfigDir } from "./lib/config.mjs";
+import { loadConfig, saveConfig, getConfigPath, getConfigDir, VALID_STRATEGIES } from "./lib/config.mjs";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 
@@ -565,6 +566,68 @@ export async function cmdConfig() {
 }
 
 /**
+ * Show or change the account selection strategy.
+ * @param {string} [arg] - New strategy name, or undefined to show current
+ * @returns {Promise<number>} exit code
+ */
+export async function cmdStrategy(arg) {
+  const config = loadConfig();
+
+  if (!arg) {
+    // Show current strategy with descriptions
+    console.log(c.bold("Account Selection Strategy"));
+    console.log(c.dim("─".repeat(45)));
+    console.log("");
+
+    const descriptions = {
+      sticky: "Stay on one account until it fails or is rate-limited",
+      "round-robin": "Rotate through accounts on every request",
+      hybrid: "Prefer healthy accounts, rotate when degraded",
+    };
+
+    for (const s of VALID_STRATEGIES) {
+      const current = s === config.account_selection_strategy;
+      const marker = current ? c.green("▸ ") : "  ";
+      const name = current ? c.bold(c.cyan(s)) : c.dim(s);
+      const desc = current ? descriptions[s] : c.dim(descriptions[s]);
+      console.log(`${marker}${pad(name, 16)}${desc}`);
+    }
+
+    console.log("");
+    console.log(c.dim(`Change with: anthropic-auth strategy <${VALID_STRATEGIES.join("|")}>`));
+
+    if (process.env.OPENCODE_ANTHROPIC_STRATEGY) {
+      console.log(c.yellow(`\nNote: OPENCODE_ANTHROPIC_STRATEGY=${process.env.OPENCODE_ANTHROPIC_STRATEGY} overrides config file at runtime.`));
+    }
+
+    return 0;
+  }
+
+  // Normalize input
+  const normalized = arg.toLowerCase().trim();
+
+  if (!VALID_STRATEGIES.includes(normalized)) {
+    console.error(c.red(`Error: invalid strategy '${arg}'.`));
+    console.error(c.dim(`Valid strategies: ${VALID_STRATEGIES.join(", ")}`));
+    return 1;
+  }
+
+  if (normalized === config.account_selection_strategy && !process.env.OPENCODE_ANTHROPIC_STRATEGY) {
+    console.log(c.dim(`Strategy is already '${normalized}'.`));
+    return 0;
+  }
+
+  saveConfig({ account_selection_strategy: normalized });
+  console.log(c.green(`Strategy changed to '${normalized}'.`));
+
+  if (process.env.OPENCODE_ANTHROPIC_STRATEGY) {
+    console.log(c.yellow(`Note: OPENCODE_ANTHROPIC_STRATEGY=${process.env.OPENCODE_ANTHROPIC_STRATEGY} will override this at runtime.`));
+  }
+
+  return 0;
+}
+
+/**
  * Interactive account management menu.
  *
  * Operates on raw storage (not AccountManager) to avoid stale-state issues.
@@ -609,7 +672,9 @@ export async function cmdManage() {
         console.log(`  ${c.bold(String(num))}. ${label}${active}${disabled}`);
       }
       console.log("");
-      console.log(c.dim("Commands: (s)witch N, (e)nable N, (d)isable N, (r)emove N, (R)eset N, (q)uit"));
+      const currentStrategy = loadConfig().account_selection_strategy;
+      console.log(c.dim(`Strategy: ${currentStrategy}`));
+      console.log(c.dim("Commands: (s)witch N, (e)nable N, (d)isable N, (r)emove N, (R)eset N, s(t)rategy, (q)uit"));
 
       const answer = await rl.question(c.dim("> "));
       const trimmed = answer.trim();
@@ -717,8 +782,26 @@ export async function cmdManage() {
           }
           break;
         }
+        case "t":
+        case "strategy": {
+          console.log(c.dim(`Current: ${loadConfig().account_selection_strategy}`));
+          console.log(c.dim(`Options: ${VALID_STRATEGIES.join(", ")}`));
+          const stratAnswer = await rl.question(c.dim("New strategy: "));
+          const strat = stratAnswer.trim().toLowerCase();
+          if (!strat) {
+            console.log(c.dim("Cancelled."));
+            break;
+          }
+          if (!VALID_STRATEGIES.includes(strat)) {
+            console.log(c.red(`Invalid strategy. Choose: ${VALID_STRATEGIES.join(", ")}`));
+            break;
+          }
+          saveConfig({ account_selection_strategy: strat });
+          console.log(c.green(`Strategy changed to '${strat}'.`));
+          break;
+        }
         default:
-          console.log(c.red("Unknown command. Try 's', 'e', 'd', 'r', 'R', or 'q'."));
+          console.log(c.red("Unknown command. Try 's', 'e', 'd', 'r', 'R', 't', or 'q'."));
       }
     }
   } finally {
@@ -746,7 +829,8 @@ ${c.dim("Commands:")}
   ${pad(c.cyan("enable") + " <N>", 18)}Enable a disabled account
   ${pad(c.cyan("disable") + " <N>", 18)}Disable an account (skipped in rotation)
   ${pad(c.cyan("remove") + " <N>", 18)}Remove an account permanently
-  ${pad(c.cyan("reset") + " <N|all>", 18)}Clear rate-limit / failure tracking
+   ${pad(c.cyan("reset") + " <N|all>", 18)}Clear rate-limit / failure tracking
+  ${pad(c.cyan("strategy") + " [name]", 18)}Show or change selection strategy
   ${pad(c.cyan("config"), 18)}Show configuration and file paths
   ${pad(c.cyan("manage"), 18)}Interactive account management menu
   ${pad(c.cyan("help"), 18)}Show this help message
@@ -760,6 +844,8 @@ ${c.dim("Examples:")}
   ${bin} switch 2          ${c.dim("# Make account 2 active")}
   ${bin} disable 3         ${c.dim("# Temporarily disable account 3")}
   ${bin} reset all         ${c.dim("# Clear all rate-limit tracking")}
+  ${bin} strategy           ${c.dim("# Show current strategy")}
+  ${bin} strategy sticky    ${c.dim("# Switch to sticky mode")}
   ${bin} status            ${c.dim("# One-liner for shell prompt")}
 
 ${c.dim("Files:")}
@@ -812,6 +898,9 @@ export async function main(argv) {
       return cmdRemove(arg, { force });
     case "reset":
       return cmdReset(arg);
+    case "strategy":
+    case "strat":
+      return cmdStrategy(arg);
     case "config":
     case "cfg":
       return cmdConfig();

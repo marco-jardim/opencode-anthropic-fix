@@ -76,6 +76,7 @@ async function exchange(code, verifier) {
     refresh: json.refresh_token,
     access: json.access_token,
     expires: Date.now() + json.expires_in * 1000,
+    email: json.account?.email_address || undefined,
   };
 }
 
@@ -95,10 +96,10 @@ async function promptAccountMenu(accountManager) {
   try {
     console.log(`\n${accounts.length} account(s) configured:`);
     for (const acc of accounts) {
-      const label = acc.email || `Account ${acc.index + 1}`;
+      const name = acc.email || `Account ${acc.index + 1}`;
       const active = acc.index === currentIndex ? " (active)" : "";
       const disabled = !acc.enabled ? " [disabled]" : "";
-      console.log(`  ${acc.index + 1}. ${label}${active}${disabled}`);
+      console.log(`  ${acc.index + 1}. ${name}${active}${disabled}`);
     }
     console.log("");
 
@@ -129,9 +130,9 @@ async function promptManageAccounts(accountManager) {
   try {
     console.log("\nManage accounts:");
     for (const acc of accounts) {
-      const label = acc.email || `Account ${acc.index + 1}`;
+      const name = acc.email || `Account ${acc.index + 1}`;
       const status = acc.enabled ? "enabled" : "disabled";
-      console.log(`  ${acc.index + 1}. ${label} [${status}]`);
+      console.log(`  ${acc.index + 1}. ${name} [${status}]`);
     }
     console.log("");
 
@@ -711,6 +712,7 @@ export async function AnthropicAuthPlugin({ client }) {
                   credentials.refresh,
                   credentials.access,
                   credentials.expires,
+                  credentials.email,
                 );
                 await accountManager.saveToDisk();
 

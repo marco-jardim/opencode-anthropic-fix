@@ -244,7 +244,7 @@ describe("cmdList", () => {
     loadAccounts.mockResolvedValue(makeStorage());
     const code = await cmdList();
     expect(code).toBe(0);
-    expect(output.text()).toContain("hybrid");
+    expect(output.text()).toContain("sticky");
   });
 });
 
@@ -280,7 +280,7 @@ describe("cmdStatus", () => {
     expect(text).toContain("anthropic:");
     expect(text).toContain("3 accounts");
     expect(text).toContain("2 active");
-    expect(text).toContain("strategy: hybrid");
+    expect(text).toContain("strategy: sticky");
     expect(text).toContain("next: #1");
   });
 
@@ -624,7 +624,7 @@ describe("cmdConfig", () => {
 
     const text = output.text();
     expect(text).toContain("Anthropic Auth Configuration");
-    expect(text).toContain("hybrid");
+    expect(text).toContain("sticky");
     expect(text).toContain("300s");
     expect(text).toContain("3600s");
     expect(text).toContain("off"); // debug
