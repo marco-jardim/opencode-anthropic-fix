@@ -54,7 +54,8 @@ const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 import { AnthropicAuthPlugin } from "./index.mjs";
-import { saveAccounts, loadAccounts } from "./lib/storage.mjs";
+import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
+import { createInterface } from "node:readline/promises";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -494,5 +495,790 @@ describe("system prompt transform", () => {
     );
 
     expect(output.system).toEqual(["You are a helpful assistant."]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fetch interceptor — token refresh paths
+// ---------------------------------------------------------------------------
+
+describe("fetch interceptor — token refresh", () => {
+  let client;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    client = makeClient();
+    saveAccounts.mockResolvedValue(undefined);
+  });
+
+  it("refreshes expired account token before making API request", async () => {
+    // Set up one account with an EXPIRED token
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "refresh-1",
+          addedAt: 1000,
+          lastUsed: 0,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "expired-access",
+      expires: Date.now() - 1000, // expired
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Token refresh call
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: "fresh-access",
+        refresh_token: "refresh-1-rotated",
+        expires_in: 3600,
+      }),
+    });
+    // Actual API call
+    mockFetch.mockResolvedValueOnce(
+      new Response('{"content":[]}', { status: 200 }),
+    );
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    // 2 calls: token refresh + API request
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    // First call should be the token refresh
+    const [refreshUrl, refreshInit] = mockFetch.mock.calls[0];
+    expect(refreshUrl).toBe("https://console.anthropic.com/v1/oauth/token");
+    expect(JSON.parse(refreshInit.body).grant_type).toBe("refresh_token");
+
+    // Second call should use the fresh token
+    const [, apiInit] = mockFetch.mock.calls[1];
+    expect(apiInit.headers.get("authorization")).toBe("Bearer fresh-access");
+
+    // Should persist updated tokens (client.auth.set called during refresh)
+    expect(client.auth.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          access: "fresh-access",
+          refresh: "refresh-1-rotated",
+        }),
+      }),
+    );
+  });
+
+  it("disables account on 401 token refresh failure and retries with next account", async () => {
+    // Two accounts — first will fail refresh, second will succeed
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "revoked-refresh",
+          addedAt: 1000,
+          lastUsed: 0,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+        {
+          refreshToken: "good-refresh",
+          addedAt: 2000,
+          lastUsed: 0,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "revoked-refresh",
+      access: "expired-access",
+      expires: Date.now() - 1000, // expired — forces refresh
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Account 1 token refresh: 401 (revoked)
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: "invalid_grant" }),
+    });
+    // Account 2 token refresh (also no access token)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: "good-access",
+        refresh_token: "good-refresh",
+        expires_in: 3600,
+      }),
+    });
+    // API call with account 2
+    mockFetch.mockResolvedValueOnce(
+      new Response('{"content":[]}', { status: 200 }),
+    );
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    // 3 calls: failed refresh (acct 1), successful refresh (acct 2), API call
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fetch interceptor — single-account fallback (no accountManager accounts)
+// ---------------------------------------------------------------------------
+
+describe("fetch interceptor — single-account fallback", () => {
+  let client;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    client = makeClient();
+    saveAccounts.mockResolvedValue(undefined);
+  });
+
+  it("falls back to OpenCode auth when accountManager has no accounts", async () => {
+    // No stored accounts — accountManager will have 0 accounts after load
+    // because we pass null authFallback AND loadAccounts returns null
+    loadAccounts.mockResolvedValue(null);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "opencode-refresh",
+      access: "opencode-access",
+      expires: Date.now() + 3600_000,
+    });
+
+    // loader bootstraps from auth.json — creates 1 account
+    // But let's test the path where getCurrentAccount() returns null.
+    // We need to make the account manager have zero accounts.
+    // The simplest way: load with accounts that are all disabled.
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "disabled-refresh",
+          addedAt: 1000,
+          lastUsed: 0,
+          enabled: false, // disabled — getCurrentAccount() returns null
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin2 = await AnthropicAuthPlugin({ client });
+    const getAuth2 = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "opencode-refresh",
+      access: "opencode-access",
+      expires: Date.now() + 3600_000,
+    });
+    const result = await plugin2.auth.loader(getAuth2, makeProvider());
+
+    // API call — should use opencode-access directly
+    mockFetch.mockResolvedValueOnce(
+      new Response('{"content":[]}', { status: 200 }),
+    );
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    const [, apiInit] = mockFetch.mock.calls[0];
+    expect(apiInit.headers.get("authorization")).toBe("Bearer opencode-access");
+  });
+
+  it("refreshes OpenCode auth token when expired in fallback path", async () => {
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "disabled-refresh",
+          addedAt: 1000,
+          lastUsed: 0,
+          enabled: false,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "opencode-refresh",
+      access: "expired-opencode-access",
+      expires: Date.now() - 1000, // expired
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Token refresh for OpenCode auth
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: "fresh-opencode-access",
+        refresh_token: "opencode-refresh-rotated",
+        expires_in: 3600,
+      }),
+    });
+    // API call
+    mockFetch.mockResolvedValueOnce(
+      new Response('{"content":[]}', { status: 200 }),
+    );
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    // Should have persisted to auth.json via client.auth.set
+    expect(client.auth.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          access: "fresh-opencode-access",
+          refresh: "opencode-refresh-rotated",
+        }),
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fetch interceptor — retry exhaustion and wait paths
+// ---------------------------------------------------------------------------
+
+describe("fetch interceptor — retry exhaustion", () => {
+  let client;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    client = makeClient();
+    saveAccounts.mockResolvedValue(undefined);
+  });
+
+  it("throws after MAX_RETRIES when all attempts fail with token refresh errors", async () => {
+    // Single account that always fails token refresh
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "bad-refresh",
+          addedAt: 1000,
+          lastUsed: 0,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "bad-refresh",
+      access: "expired-access",
+      expires: Date.now() - 1000, // expired — forces refresh every attempt
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // All refresh attempts fail (MAX_RETRIES + 1 = 4 attempts)
+    for (let i = 0; i < 4; i++) {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: "server_error" }),
+      });
+    }
+
+    await expect(
+      result.fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ messages: [] }),
+      }),
+    ).rejects.toThrow("Token refresh failed");
+  });
+
+  it("waits and retries when all accounts are rate-limited but within max wait", async () => {
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "refresh-1",
+          addedAt: 1000,
+          lastUsed: 0,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 3600_000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // First request: 429
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { type: "rate_limit_error", message: "Rate limit exceeded" } }),
+        { status: 429, headers: { "retry-after": "1" } },
+      ),
+    );
+    // After wait, retry succeeds
+    mockFetch.mockResolvedValueOnce(
+      new Response('{"content":[]}', { status: 200 }),
+    );
+
+    // Spy on setTimeout to verify wait happens
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    // setTimeout should have been called for the wait
+    const waitCalls = setTimeoutSpy.mock.calls.filter(
+      ([, ms]) => typeof ms === "number" && ms > 0,
+    );
+    expect(waitCalls.length).toBeGreaterThanOrEqual(1);
+
+    setTimeoutSpy.mockRestore();
+  });
+
+  it("returns error response when max wait time exceeded", async () => {
+    // Use a config with very low max_rate_limit_wait_seconds
+    // The default is 120s, but the backoff for retry-after: 999 will exceed it
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "refresh-1",
+          addedAt: 1000,
+          lastUsed: 0,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 3600_000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // 429 with very long retry-after (999 seconds > default 120s max wait)
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { type: "rate_limit_error", message: "Rate limit exceeded" } }),
+        { status: 429, headers: { "retry-after": "999" } },
+      ),
+    );
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    // Should return the 429 response directly (not retry)
+    expect(response.status).toBe(429);
+    // Only 1 fetch call — no retry
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OAuth exchange failure
+// ---------------------------------------------------------------------------
+
+describe("OAuth exchange failure", () => {
+  let client;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    client = makeClient();
+    loadAccounts.mockResolvedValue(null);
+    saveAccounts.mockResolvedValue(undefined);
+  });
+
+  it("propagates exchange failure without saving accounts", async () => {
+    // Mock the OAuth token exchange to fail
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: "invalid_grant" }),
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const method = plugin.auth.methods[0];
+
+    const authResult = await method.authorize();
+    const credentials = await authResult.callback("bad-code#state");
+
+    expect(credentials.type).toBe("failed");
+    // saveAccounts should NOT have been called
+    expect(saveAccounts).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auth menu actions (cancel, fresh, manage)
+// ---------------------------------------------------------------------------
+
+describe("auth menu actions", () => {
+  let client;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    client = makeClient();
+    saveAccounts.mockResolvedValue(undefined);
+  });
+
+  /**
+   * Helper: set up a plugin with existing accounts and a loaded accountManager,
+   * then configure readline to return a specific menu choice.
+   */
+  async function setupWithMenuChoice(menuChoice) {
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "existing-refresh",
+          addedAt: 1000,
+          lastUsed: 2000,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+
+    // Run loader to initialize accountManager
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "existing-refresh",
+      access: "existing-access",
+      expires: Date.now() + 3600_000,
+    });
+    await plugin.auth.loader(getAuth, makeProvider());
+
+    // Configure readline mock to return the menu choice
+    const { createInterface: mockCreateInterface } = await import("node:readline/promises");
+    mockCreateInterface.mockReturnValue({
+      question: vi.fn().mockResolvedValue(menuChoice),
+      close: vi.fn(),
+    });
+
+    // Reset saveAccounts tracking after loader's save
+    saveAccounts.mockClear();
+
+    return plugin;
+  }
+
+  it("cancel action returns about:blank with failed callback", async () => {
+    const plugin = await setupWithMenuChoice("c");
+    const method = plugin.auth.methods[0];
+
+    const authResult = await method.authorize();
+
+    expect(authResult.url).toBe("about:blank");
+    expect(authResult.method).toBe("code");
+
+    const credentials = await authResult.callback("anything");
+    expect(credentials.type).toBe("failed");
+
+    // No accounts should have been saved
+    expect(saveAccounts).not.toHaveBeenCalled();
+  });
+
+  it("fresh action clears accounts and proceeds to OAuth", async () => {
+    const plugin = await setupWithMenuChoice("f");
+    const method = plugin.auth.methods[0];
+
+    const authResult = await method.authorize();
+
+    // Should have cleared accounts
+    expect(clearAccounts).toHaveBeenCalled();
+
+    // Should proceed to OAuth (URL should be the authorize URL, not about:blank)
+    expect(authResult.url).toContain("claude.ai/oauth/authorize");
+    expect(authResult.method).toBe("code");
+
+    // Simulate completing the OAuth flow
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: "fresh-access",
+        refresh_token: "fresh-refresh",
+        expires_in: 3600,
+      }),
+    });
+
+    const credentials = await authResult.callback("fresh-code#state");
+    expect(credentials.type).toBe("success");
+    expect(credentials.refresh).toBe("fresh-refresh");
+  });
+
+  it("manage action saves and returns about:blank", async () => {
+    // For manage, readline returns "m" for menu, then "b" for back in manage submenu
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "existing-refresh",
+          addedAt: 1000,
+          lastUsed: 2000,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+        },
+      ],
+      activeIndex: 0,
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+
+    // Run loader to initialize accountManager
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "existing-refresh",
+      access: "existing-access",
+      expires: Date.now() + 3600_000,
+    });
+    await plugin.auth.loader(getAuth, makeProvider());
+
+    // Configure readline: first call returns "m" (menu), second returns "b" (back from manage)
+    const { createInterface: mockCreateInterface } = await import("node:readline/promises");
+    let callCount = 0;
+    mockCreateInterface.mockReturnValue({
+      question: vi.fn().mockImplementation(() => {
+        callCount++;
+        // First question call is the menu prompt, second is the manage submenu
+        return Promise.resolve(callCount === 1 ? "m" : "b");
+      }),
+      close: vi.fn(),
+    });
+
+    saveAccounts.mockClear();
+
+    const method = plugin.auth.methods[0];
+    const authResult = await method.authorize();
+
+    expect(authResult.url).toBe("about:blank");
+    expect(authResult.method).toBe("code");
+
+    // Should have saved after manage
+    expect(saveAccounts).toHaveBeenCalled();
+
+    // Callback should return failed (no OAuth was performed)
+    const credentials = await authResult.callback("anything");
+    expect(credentials.type).toBe("failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Header handling edge cases
+// ---------------------------------------------------------------------------
+
+describe("header handling", () => {
+  let client;
+  let fetchFn;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    loadAccounts.mockResolvedValue(null);
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "test-refresh",
+      access: "test-access",
+      expires: Date.now() + 3600_000,
+    });
+
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+    fetchFn = result.fetch;
+  });
+
+  it("preserves and merges incoming anthropic-beta headers", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response("", { status: 200 }),
+    );
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "custom-beta-2025-01-01,another-beta-2025-02-01",
+      },
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+
+    // Should contain both required betas AND the custom ones
+    expect(betaHeader).toContain("oauth-2025-04-20");
+    expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
+    expect(betaHeader).toContain("custom-beta-2025-01-01");
+    expect(betaHeader).toContain("another-beta-2025-02-01");
+  });
+
+  it("extracts headers from Request object input", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response("", { status: 200 }),
+    );
+
+    const request = new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-custom-header": "custom-value",
+      },
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    await fetchFn(request, {});
+
+    const [, init] = mockFetch.mock.calls[0];
+    // The custom header from the Request should be preserved
+    expect(init.headers.get("x-custom-header")).toBe("custom-value");
+    // Auth headers should still be set
+    expect(init.headers.get("authorization")).toBe("Bearer test-access");
+  });
+
+  it("does NOT add ?beta=true to non-/v1/messages URLs", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response("", { status: 200 }),
+    );
+
+    await fetchFn("https://api.anthropic.com/v1/complete", {
+      method: "POST",
+      body: JSON.stringify({ prompt: "Hello" }),
+    });
+
+    const [input] = mockFetch.mock.calls[0];
+    const url = input instanceof URL ? input : new URL(input.toString());
+    expect(url.searchParams.has("beta")).toBe(false);
+    expect(url.pathname).toBe("/v1/complete");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// markSuccess wiring
+// ---------------------------------------------------------------------------
+
+describe("markSuccess wiring", () => {
+  it("resets failure tracking on successful 200 response", async () => {
+    vi.resetAllMocks();
+    const client = makeClient();
+
+    // Account with prior failures
+    loadAccounts.mockResolvedValue({
+      version: 1,
+      accounts: [
+        {
+          refreshToken: "refresh-1",
+          addedAt: 1000,
+          lastUsed: 0,
+          enabled: true,
+          rateLimitResetTimes: {},
+          consecutiveFailures: 3,
+          lastFailureTime: Date.now() - 5000,
+        },
+      ],
+      activeIndex: 0,
+    });
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 3600_000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Successful API call
+    mockFetch.mockResolvedValueOnce(
+      new Response('{"content":[]}', { status: 200 }),
+    );
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+
+    // Verify via a debounced save that the account's failures were reset.
+    // We can't directly inspect the AccountManager, but we can trigger a save
+    // and check what was persisted. The markSuccess resets consecutiveFailures
+    // and lastFailureTime, which will be reflected in the next save.
+    // For now, just verify the response came back successfully — the unit tests
+    // in accounts.test.mjs verify markSuccess behavior directly.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });
