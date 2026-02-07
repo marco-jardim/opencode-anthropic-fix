@@ -2,8 +2,18 @@
   "name": "opencode-anthropic-auth",
   "version": "0.0.13",
   "main": "./index.mjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "install:link": "node scripts/install.mjs link",
+    "install:copy": "npm run build && node scripts/install.mjs copy",
+    "uninstall": "node scripts/install.mjs uninstall"
+  },
   "devDependencies": {
-    "@opencode-ai/plugin": "^0.4.45"
+    "@opencode-ai/plugin": "^0.4.45",
+    "esbuild": "^0.27.3",
+    "vitest": "^4.0.18"
   },
   "dependencies": {
     "@openauthjs/openauth": "^0.4.3"
