@@ -32,21 +32,19 @@ import { stdin, stdout } from "node:process";
 // Color helpers — zero dependencies, respects NO_COLOR / TTY
 // ---------------------------------------------------------------------------
 
-let USE_COLOR =
-  !process.env.NO_COLOR &&
-  process.stdout.isTTY !== false;
+let USE_COLOR = !process.env.NO_COLOR && process.stdout.isTTY !== false;
 
 /** @param {string} code @param {string} text @returns {string} */
 const ansi = (code, text) => (USE_COLOR ? `\x1b[${code}m${text}\x1b[0m` : text);
 
 const c = {
-  bold:    (/** @type {string} */ t) => ansi("1", t),
-  dim:     (/** @type {string} */ t) => ansi("2", t),
-  green:   (/** @type {string} */ t) => ansi("32", t),
-  yellow:  (/** @type {string} */ t) => ansi("33", t),
-  cyan:    (/** @type {string} */ t) => ansi("36", t),
-  red:     (/** @type {string} */ t) => ansi("31", t),
-  gray:    (/** @type {string} */ t) => ansi("90", t),
+  bold: (/** @type {string} */ t) => ansi("1", t),
+  dim: (/** @type {string} */ t) => ansi("2", t),
+  green: (/** @type {string} */ t) => ansi("32", t),
+  yellow: (/** @type {string} */ t) => ansi("33", t),
+  cyan: (/** @type {string} */ t) => ansi("36", t),
+  red: (/** @type {string} */ t) => ansi("31", t),
+  gray: (/** @type {string} */ t) => ansi("90", t),
 };
 
 // ---------------------------------------------------------------------------
@@ -102,7 +100,7 @@ function shortPath(p) {
  * @returns {string}
  */
 function stripAnsi(str) {
-  return str.replace(/\x1b\[[0-9;]*m/g, "");
+  return str.replace(/\x1b\[[0-9;]*m/g, ""); // eslint-disable-line no-control-regex
 }
 
 /**
@@ -296,9 +294,7 @@ export async function cmdList() {
   const now = Date.now();
 
   // Fetch usage quotas for all enabled accounts in parallel
-  const usageResults = await Promise.allSettled(
-    stored.accounts.map((acc) => ensureTokenAndFetchUsage(acc)),
-  );
+  const usageResults = await Promise.allSettled(stored.accounts.map((acc) => ensureTokenAndFetchUsage(acc)));
 
   // If any tokens were refreshed, persist them back to disk
   let anyRefreshed = false;
@@ -316,11 +312,11 @@ export async function cmdList() {
   // Header
   console.log(
     "  " +
-    pad(c.dim("#"), 5) +
-    pad(c.dim("Account"), 22) +
-    pad(c.dim("Status"), 14) +
-    pad(c.dim("Failures"), 11) +
-    c.dim("Rate Limit"),
+      pad(c.dim("#"), 5) +
+      pad(c.dim("Account"), 22) +
+      pad(c.dim("Status"), 14) +
+      pad(c.dim("Failures"), 11) +
+      c.dim("Rate Limit"),
   );
   console.log(c.dim("  " + "─".repeat(62)));
 
@@ -367,14 +363,7 @@ export async function cmdList() {
     }
 
     // Render account header line
-    console.log(
-      "  " +
-      pad(c.bold(num), 5) +
-      pad(label, 22) +
-      pad(status, 14) +
-      pad(failures, 11) +
-      rateLimit,
-    );
+    console.log("  " + pad(c.bold(num), 5) + pad(label, 22) + pad(status, 14) + pad(failures, 11) + rateLimit);
 
     // Render usage quota lines for enabled accounts
     if (acc.enabled) {
@@ -621,9 +610,7 @@ export async function cmdRemove(arg, opts = {}) {
     }
     const rl = createInterface({ input: stdin, output: stdout });
     try {
-      const answer = await rl.question(
-        `Remove account #${n} (${label})? This cannot be undone. [y/N]: `,
-      );
+      const answer = await rl.question(`Remove account #${n} (${label})? This cannot be undone. [y/N]: `);
       if (answer.trim().toLowerCase() !== "y") {
         console.log(c.dim("Cancelled."));
         return 0;
@@ -803,7 +790,11 @@ export async function cmdStrategy(arg) {
     console.log(c.dim(`Change with: opencode-anthropic-auth strategy <${VALID_STRATEGIES.join("|")}>`));
 
     if (process.env.OPENCODE_ANTHROPIC_STRATEGY) {
-      console.log(c.yellow(`\nNote: OPENCODE_ANTHROPIC_STRATEGY=${process.env.OPENCODE_ANTHROPIC_STRATEGY} overrides config file at runtime.`));
+      console.log(
+        c.yellow(
+          `\nNote: OPENCODE_ANTHROPIC_STRATEGY=${process.env.OPENCODE_ANTHROPIC_STRATEGY} overrides config file at runtime.`,
+        ),
+      );
     }
 
     return 0;
@@ -827,7 +818,11 @@ export async function cmdStrategy(arg) {
   console.log(c.green(`Strategy changed to '${normalized}'.`));
 
   if (process.env.OPENCODE_ANTHROPIC_STRATEGY) {
-    console.log(c.yellow(`Note: OPENCODE_ANTHROPIC_STRATEGY=${process.env.OPENCODE_ANTHROPIC_STRATEGY} will override this at runtime.`));
+    console.log(
+      c.yellow(
+        `Note: OPENCODE_ANTHROPIC_STRATEGY=${process.env.OPENCODE_ANTHROPIC_STRATEGY} will override this at runtime.`,
+      ),
+    );
   }
 
   return 0;
@@ -863,17 +858,21 @@ export async function cmdStats() {
   console.log(c.bold("Anthropic Account Usage"));
   console.log(
     "  " +
-    pad(c.dim("#"), W.num) +
-    pad(c.dim("Account"), W.name) +
-    rpad(c.dim("Requests"), W.val) +
-    rpad(c.dim("Input"), W.val) +
-    rpad(c.dim("Output"), W.val) +
-    rpad(c.dim("Cache R"), W.val) +
-    rpad(c.dim("Cache W"), W.val),
+      pad(c.dim("#"), W.num) +
+      pad(c.dim("Account"), W.name) +
+      rpad(c.dim("Requests"), W.val) +
+      rpad(c.dim("Input"), W.val) +
+      rpad(c.dim("Output"), W.val) +
+      rpad(c.dim("Cache R"), W.val) +
+      rpad(c.dim("Cache W"), W.val),
   );
   console.log(RULE);
 
-  let totReq = 0, totIn = 0, totOut = 0, totCR = 0, totCW = 0;
+  let totReq = 0,
+    totIn = 0,
+    totOut = 0,
+    totCR = 0,
+    totCW = 0;
   let oldestReset = Infinity;
 
   for (let i = 0; i < stored.accounts.length; i++) {
@@ -886,13 +885,13 @@ export async function cmdStats() {
 
     console.log(
       "  " +
-      pad(num, W.num) +
-      pad(name, W.name) +
-      rpad(String(s.requests), W.val) +
-      rpad(fmtTokens(s.inputTokens), W.val) +
-      rpad(fmtTokens(s.outputTokens), W.val) +
-      rpad(fmtTokens(s.cacheReadTokens), W.val) +
-      rpad(fmtTokens(s.cacheWriteTokens), W.val),
+        pad(num, W.num) +
+        pad(name, W.name) +
+        rpad(String(s.requests), W.val) +
+        rpad(fmtTokens(s.inputTokens), W.val) +
+        rpad(fmtTokens(s.outputTokens), W.val) +
+        rpad(fmtTokens(s.cacheReadTokens), W.val) +
+        rpad(fmtTokens(s.cacheWriteTokens), W.val),
     );
 
     totReq += s.requests;
@@ -905,16 +904,18 @@ export async function cmdStats() {
 
   if (stored.accounts.length > 1) {
     console.log(RULE);
-    console.log(c.bold(
-      "  " +
-      pad("", W.num) +
-      pad("Total", W.name) +
-      rpad(String(totReq), W.val) +
-      rpad(fmtTokens(totIn), W.val) +
-      rpad(fmtTokens(totOut), W.val) +
-      rpad(fmtTokens(totCR), W.val) +
-      rpad(fmtTokens(totCW), W.val),
-    ));
+    console.log(
+      c.bold(
+        "  " +
+          pad("", W.num) +
+          pad("Total", W.name) +
+          rpad(String(totReq), W.val) +
+          rpad(fmtTokens(totIn), W.val) +
+          rpad(fmtTokens(totOut), W.val) +
+          rpad(fmtTokens(totCR), W.val) +
+          rpad(fmtTokens(totCW), W.val),
+      ),
+    );
   }
 
   console.log("");
@@ -1037,7 +1038,10 @@ export async function cmdManage() {
       const isReset = rawCmd === "R" || cmd === "reset";
 
       if (isReset) {
-        if (isNaN(num)) { console.log(c.red("Usage: R <number>")); continue; }
+        if (isNaN(num)) {
+          console.log(c.red("Usage: R <number>"));
+          continue;
+        }
         stored.accounts[idx].rateLimitResetTimes = {};
         stored.accounts[idx].consecutiveFailures = 0;
         stored.accounts[idx].lastFailureTime = null;
@@ -1049,7 +1053,10 @@ export async function cmdManage() {
       switch (cmd) {
         case "s":
         case "switch": {
-          if (isNaN(num)) { console.log(c.red("Usage: s <number>")); break; }
+          if (isNaN(num)) {
+            console.log(c.red("Usage: s <number>"));
+            break;
+          }
           if (!accounts[idx].enabled) {
             console.log(c.yellow(`Account ${num} is disabled. Enable it first.`));
             break;
@@ -1062,7 +1069,10 @@ export async function cmdManage() {
         }
         case "e":
         case "enable": {
-          if (isNaN(num)) { console.log(c.red("Usage: e <number>")); break; }
+          if (isNaN(num)) {
+            console.log(c.red("Usage: e <number>"));
+            break;
+          }
           if (accounts[idx].enabled) {
             console.log(c.dim(`Account ${num} is already enabled.`));
             break;
@@ -1074,7 +1084,10 @@ export async function cmdManage() {
         }
         case "d":
         case "disable": {
-          if (isNaN(num)) { console.log(c.red("Usage: d <number>")); break; }
+          if (isNaN(num)) {
+            console.log(c.red("Usage: d <number>"));
+            break;
+          }
           if (!accounts[idx].enabled) {
             console.log(c.dim(`Account ${num} is already disabled.`));
             break;
@@ -1096,7 +1109,10 @@ export async function cmdManage() {
         }
         case "r":
         case "remove": {
-          if (isNaN(num)) { console.log(c.red("Usage: r <number>")); break; }
+          if (isNaN(num)) {
+            console.log(c.red("Usage: r <number>"));
+            break;
+          }
           const removeLabel = accounts[idx].email || `Account ${num}`;
           const confirm = await rl.question(`Remove #${num} (${removeLabel})? [y/N]: `);
           if (confirm.trim().toLowerCase() === "y") {

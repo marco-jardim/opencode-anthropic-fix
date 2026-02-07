@@ -93,9 +93,9 @@ function captureOutput() {
     logs,
     errors,
     /** Get all log output as a single string (ANSI stripped) */
-    text: () => logs.join("\n").replace(/\x1b\[[0-9;]*m/g, ""),
+    text: () => logs.join("\n").replace(/\x1b\[[0-9;]*m/g, ""), // eslint-disable-line no-control-regex
     /** Get all error output as a single string (ANSI stripped) */
-    errorText: () => errors.join("\n").replace(/\x1b\[[0-9;]*m/g, ""),
+    errorText: () => errors.join("\n").replace(/\x1b\[[0-9;]*m/g, ""), // eslint-disable-line no-control-regex
     restore: () => {
       console.log = origLog;
       console.error = origError;
@@ -193,7 +193,7 @@ describe("formatTimeAgo", () => {
 
 /** Strip ANSI escape codes for test assertions. */
 function stripAnsi(str) {
-  return str.replace(/\x1b\[[0-9;]*m/g, "");
+  return str.replace(/\x1b\[[0-9;]*m/g, ""); // eslint-disable-line no-control-regex
 }
 
 // ---------------------------------------------------------------------------
@@ -679,9 +679,7 @@ describe("cmdSwitch", () => {
     expect(output.text()).toContain("#2");
 
     // Verify saveAccounts was called with updated activeIndex
-    expect(saveAccounts).toHaveBeenCalledWith(
-      expect.objectContaining({ activeIndex: 1 }),
-    );
+    expect(saveAccounts).toHaveBeenCalledWith(expect.objectContaining({ activeIndex: 1 }));
   });
 
   it("rejects invalid account number", async () => {
@@ -1367,7 +1365,14 @@ describe("cmdResetStats", () => {
   it("resets stats for all accounts", async () => {
     const storage = makeStorage();
     storage.accounts = [storage.accounts[0]];
-    storage.accounts[0].stats = { requests: 100, inputTokens: 50000, outputTokens: 20000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 };
+    storage.accounts[0].stats = {
+      requests: 100,
+      inputTokens: 50000,
+      outputTokens: 20000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      lastReset: 1000,
+    };
     loadAccounts.mockResolvedValue(storage);
 
     const code = await cmdResetStats("all");
@@ -1383,7 +1388,14 @@ describe("cmdResetStats", () => {
   it("resets stats for a single account", async () => {
     const storage = makeStorage();
     storage.accounts = [storage.accounts[0]];
-    storage.accounts[0].stats = { requests: 100, inputTokens: 50000, outputTokens: 20000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 };
+    storage.accounts[0].stats = {
+      requests: 100,
+      inputTokens: 50000,
+      outputTokens: 20000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      lastReset: 1000,
+    };
     loadAccounts.mockResolvedValue(storage);
 
     const code = await cmdResetStats("1");
@@ -1404,7 +1416,14 @@ describe("cmdResetStats", () => {
   it("resets all accounts when no argument given", async () => {
     const storage = makeStorage();
     storage.accounts = [storage.accounts[0]];
-    storage.accounts[0].stats = { requests: 50, inputTokens: 10000, outputTokens: 5000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 };
+    storage.accounts[0].stats = {
+      requests: 50,
+      inputTokens: 10000,
+      outputTokens: 5000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      lastReset: 1000,
+    };
     loadAccounts.mockResolvedValue(storage);
 
     const code = await cmdResetStats();

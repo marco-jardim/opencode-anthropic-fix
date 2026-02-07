@@ -4,11 +4,7 @@ import { stdin, stdout } from "node:process";
 import { AccountManager } from "./lib/accounts.mjs";
 import { loadConfig, CLIENT_ID } from "./lib/config.mjs";
 import { loadAccounts, clearAccounts } from "./lib/storage.mjs";
-import {
-  isAccountSpecificError,
-  parseRateLimitReason,
-  parseRetryAfterHeader,
-} from "./lib/backoff.mjs";
+import { isAccountSpecificError, parseRateLimitReason, parseRetryAfterHeader } from "./lib/backoff.mjs";
 
 // CLIENT_ID imported from lib/config.mjs
 
@@ -22,20 +18,12 @@ import {
 async function authorize(mode) {
   const pkce = await generatePKCE();
 
-  const url = new URL(
-    `https://${mode === "console" ? "console.anthropic.com" : "claude.ai"}/oauth/authorize`,
-  );
+  const url = new URL(`https://${mode === "console" ? "console.anthropic.com" : "claude.ai"}/oauth/authorize`);
   url.searchParams.set("code", "true");
   url.searchParams.set("client_id", CLIENT_ID);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set(
-    "redirect_uri",
-    "https://console.anthropic.com/oauth/code/callback",
-  );
-  url.searchParams.set(
-    "scope",
-    "org:create_api_key user:profile user:inference",
-  );
+  url.searchParams.set("redirect_uri", "https://console.anthropic.com/oauth/code/callback");
+  url.searchParams.set("scope", "org:create_api_key user:profile user:inference");
   url.searchParams.set("code_challenge", pkce.challenge);
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("state", pkce.verifier);
@@ -103,9 +91,7 @@ async function promptAccountMenu(accountManager) {
     console.log("");
 
     while (true) {
-      const answer = await rl.question(
-        "(a)dd new, (f)resh start, (m)anage, (c)ancel? [a/f/m/c]: ",
-      );
+      const answer = await rl.question("(a)dd new, (f)resh start, (m)anage, (c)ancel? [a/f/m/c]: ");
       const normalized = answer.trim().toLowerCase();
       if (normalized === "a" || normalized === "add") return "add";
       if (normalized === "f" || normalized === "fresh") return "fresh";
@@ -136,9 +122,7 @@ async function promptManageAccounts(accountManager) {
     console.log("");
 
     while (true) {
-      const answer = await rl.question(
-        "Enter account number to toggle, (d)N to delete (e.g. d1), or (b)ack: ",
-      );
+      const answer = await rl.question("Enter account number to toggle, (d)N to delete (e.g. d1), or (b)ack: ");
       const normalized = answer.trim().toLowerCase();
 
       if (normalized === "b" || normalized === "back") return;
@@ -160,9 +144,7 @@ async function promptManageAccounts(accountManager) {
       const num = parseInt(normalized, 10);
       if (!isNaN(num) && num >= 1 && num <= accounts.length) {
         const newState = accountManager.toggleAccount(num - 1);
-        console.log(
-          `Account ${num} is now ${newState ? "enabled" : "disabled"}.`,
-        );
+        console.log(`Account ${num} is now ${newState ? "enabled" : "disabled"}.`);
         continue;
       }
 
@@ -220,13 +202,8 @@ function buildRequestHeaders(input, requestInit, accessToken) {
     .map((b) => b.trim())
     .filter(Boolean);
 
-  const requiredBetas = [
-    "oauth-2025-04-20",
-    "interleaved-thinking-2025-05-14",
-  ];
-  const mergedBetas = [
-    ...new Set([...requiredBetas, ...incomingBetasList]),
-  ].join(",");
+  const requiredBetas = ["oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
+  const mergedBetas = [...new Set([...requiredBetas, ...incomingBetasList])].join(",");
 
   requestHeaders.set("authorization", `Bearer ${accessToken}`);
   requestHeaders.set("anthropic-beta", mergedBetas);
@@ -258,9 +235,7 @@ function transformRequestBody(body) {
         if (item.type === "text" && item.text) {
           return {
             ...item,
-            text: item.text
-              .replace(/OpenCode/g, "Claude Code")
-              .replace(/(?<!\/)opencode/gi, "Claude"),
+            text: item.text.replace(/OpenCode/g, "Claude Code").replace(/(?<!\/)opencode/gi, "Claude"),
           };
         }
         return item;
@@ -292,7 +267,7 @@ function transformRequestBody(body) {
       });
     }
     return JSON.stringify(parsed);
-  } catch (e) {
+  } catch {
     // ignore parse errors
     return body;
   }
@@ -318,16 +293,9 @@ function transformRequestUrl(input) {
     requestUrl = null;
   }
 
-  if (
-    requestUrl &&
-    requestUrl.pathname === "/v1/messages" &&
-    !requestUrl.searchParams.has("beta")
-  ) {
+  if (requestUrl && requestUrl.pathname === "/v1/messages" && !requestUrl.searchParams.has("beta")) {
     requestUrl.searchParams.set("beta", "true");
-    requestInput =
-      input instanceof Request
-        ? new Request(requestUrl.toString(), input)
-        : requestUrl;
+    requestInput = input instanceof Request ? new Request(requestUrl.toString(), input) : requestUrl;
   }
 
   return { requestInput, requestUrl };
@@ -502,10 +470,7 @@ function transformResponse(response, onUsage, onAccountError) {
 
         if (
           onUsage &&
-          (stats.inputTokens > 0 ||
-            stats.outputTokens > 0 ||
-            stats.cacheReadTokens > 0 ||
-            stats.cacheWriteTokens > 0)
+          (stats.inputTokens > 0 || stats.outputTokens > 0 || stats.cacheReadTokens > 0 || stats.cacheWriteTokens > 0)
         ) {
           onUsage(stats);
         }
@@ -568,20 +533,17 @@ function formatSwitchReason(status, reason) {
  * @throws {Error} If refresh fails
  */
 async function refreshAccountToken(account, client) {
-  const response = await fetch(
-    "https://console.anthropic.com/v1/oauth/token",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        grant_type: "refresh_token",
-        refresh_token: account.refreshToken,
-        client_id: CLIENT_ID,
-      }),
+  const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
     },
-  );
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: account.refreshToken,
+      client_id: CLIENT_ID,
+    }),
+  });
 
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
@@ -716,12 +678,10 @@ export async function AnthropicAuthPlugin({ client }) {
   return {
     // A1-A4: System prompt transform (unchanged)
     "experimental.chat.system.transform": (input, output) => {
-      const prefix =
-        "You are Claude Code, Anthropic's official CLI for Claude.";
+      const prefix = "You are Claude Code, Anthropic's official CLI for Claude.";
       if (input.model?.providerID === "anthropic") {
         output.system.unshift(prefix);
-        if (output.system[1])
-          output.system[1] = prefix + "\n\n" + output.system[1];
+        if (output.system[1]) output.system[1] = prefix + "\n\n" + output.system[1];
       }
     },
     auth: {
@@ -770,14 +730,11 @@ export async function AnthropicAuthPlugin({ client }) {
               const body = transformRequestBody(requestInit.body);
               const { requestInput, requestUrl } = transformRequestUrl(input);
               const requestMethod = String(
-                requestInit.method ||
-                (requestInput instanceof Request ? requestInput.method : "POST"),
+                requestInit.method || (requestInput instanceof Request ? requestInput.method : "POST"),
               ).toUpperCase();
-              let showUsageToast = false;
+              let showUsageToast;
               try {
-                showUsageToast =
-                  new URL(requestUrl).pathname === "/v1/messages" &&
-                  requestMethod === "POST";
+                showUsageToast = new URL(requestUrl).pathname === "/v1/messages" && requestMethod === "POST";
               } catch {
                 showUsageToast = false;
               }
@@ -804,9 +761,7 @@ export async function AnthropicAuthPlugin({ client }) {
                   if (currentIndex !== lastToastedIndex) {
                     const name = account.email || `Account ${currentIndex + 1}`;
                     const total = accountManager.getAccountCount();
-                    const msg = total > 1
-                      ? `Claude: ${name} (${currentIndex + 1}/${total})`
-                      : `Claude: ${name}`;
+                    const msg = total > 1 ? `Claude: ${name} (${currentIndex + 1}/${total})` : `Claude: ${name}`;
                     await toast(msg, "info", { debounceKey: "account-usage" });
                     lastToastedIndex = currentIndex;
                   }
@@ -826,11 +781,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 // Determine access token
                 let accessToken;
                 // Per-account token refresh
-                if (
-                  !account.access ||
-                  !account.expires ||
-                  account.expires < Date.now()
-                ) {
+                if (!account.access || !account.expires || account.expires < Date.now()) {
                   try {
                     accessToken = await refreshAccountTokenSingleFlight(account);
                     // Persist updated tokens (especially if refresh token rotated)
@@ -840,14 +791,9 @@ export async function AnthropicAuthPlugin({ client }) {
                     accountManager.markFailure(account);
                     // Disable account on terminal refresh errors
                     const msg = err instanceof Error ? err.message : String(err);
-                    const status =
-                      typeof err === "object" && err && "status" in err
-                        ? Number(err.status)
-                        : NaN;
+                    const status = typeof err === "object" && err && "status" in err ? Number(err.status) : NaN;
                     const errorCode =
-                      typeof err === "object" && err && "errorCode" in err
-                        ? String(err.errorCode || "")
-                        : "";
+                      typeof err === "object" && err && "errorCode" in err ? String(err.errorCode || "") : "";
                     const shouldDisable =
                       status === 400 ||
                       status === 401 ||
@@ -873,11 +819,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 }
 
                 // Build headers with the selected account's token
-                const requestHeaders = buildRequestHeaders(
-                  input,
-                  requestInit,
-                  accessToken,
-                );
+                const requestHeaders = buildRequestHeaders(input, requestInit, accessToken);
 
                 // Execute the request
                 let response;
@@ -888,9 +830,7 @@ export async function AnthropicAuthPlugin({ client }) {
                     headers: requestHeaders,
                   });
                 } catch (err) {
-                  const fetchError = err instanceof Error
-                    ? err
-                    : new Error(String(err));
+                  const fetchError = err instanceof Error ? err : new Error(String(err));
 
                   if (accountManager && account) {
                     accountManager.markFailure(account);
@@ -917,10 +857,7 @@ export async function AnthropicAuthPlugin({ client }) {
 
                   if (isAccountSpecificError(response.status, errorBody)) {
                     // Account-specific: mark this account, try the next one
-                    const reason = parseRateLimitReason(
-                      response.status,
-                      errorBody,
-                    );
+                    const reason = parseRateLimitReason(response.status, errorBody);
                     const retryAfterMs = parseRetryAfterHeader(response);
                     const authOrPermissionIssue = reason === "AUTH_FAILED";
 
@@ -936,11 +873,7 @@ export async function AnthropicAuthPlugin({ client }) {
                       reason,
                     });
 
-                    accountManager.markRateLimited(
-                      account,
-                      reason,
-                      authOrPermissionIssue ? null : retryAfterMs,
-                    );
+                    accountManager.markRateLimited(account, reason, authOrPermissionIssue ? null : retryAfterMs);
 
                     const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
                     const total = accountManager.getAccountCount();
@@ -970,11 +903,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 }
 
                 // Wire usage tracking and mid-stream error detection for SSE responses only.
-                const shouldInspectStream =
-                  response.ok &&
-                  account &&
-                  accountManager &&
-                  isEventStreamResponse(response);
+                const shouldInspectStream = response.ok && account && accountManager && isEventStreamResponse(response);
 
                 const usageCallback = shouldInspectStream
                   ? (/** @type {UsageStats} */ usage) => {
@@ -998,9 +927,7 @@ export async function AnthropicAuthPlugin({ client }) {
 
               // All accounts tried
               if (lastError) throw lastError;
-              throw new Error(
-                "All accounts exhausted — no account could serve this request",
-              );
+              throw new Error("All accounts exhausted — no account could serve this request");
             },
           };
         }
@@ -1015,11 +942,7 @@ export async function AnthropicAuthPlugin({ client }) {
           authorize: async () => {
             // Check for existing accounts
             const stored = await loadAccounts();
-            if (
-              stored &&
-              stored.accounts.length > 0 &&
-              accountManager
-            ) {
+            if (stored && stored.accounts.length > 0 && accountManager) {
               const action = await promptAccountMenu(accountManager);
 
               if (action === "cancel") {
@@ -1102,16 +1025,13 @@ export async function AnthropicAuthPlugin({ client }) {
               callback: async (code) => {
                 const credentials = await exchange(code, verifier);
                 if (credentials.type === "failed") return credentials;
-                const result = await fetch(
-                  `https://api.anthropic.com/api/oauth/claude_cli/create_api_key`,
-                  {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      authorization: `Bearer ${credentials.access}`,
-                    },
+                const result = await fetch(`https://api.anthropic.com/api/oauth/claude_cli/create_api_key`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    authorization: `Bearer ${credentials.access}`,
                   },
-                ).then((r) => r.json());
+                }).then((r) => r.json());
                 return { type: "success", key: result.raw_key };
               },
             };

@@ -14,14 +14,7 @@
  */
 
 import { existsSync, lstatSync, readlinkSync } from "node:fs";
-import {
-  mkdir,
-  symlink,
-  unlink,
-  rm,
-  copyFile,
-  chmod,
-} from "node:fs/promises";
+import { mkdir, symlink, unlink, rm, copyFile, chmod } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -42,8 +35,7 @@ const CLI_BIN_NAME = "opencode-anthropic-auth";
  * @returns {string}
  */
 function getPluginDir() {
-  const configHome =
-    process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
   return join(configHome, "opencode", "plugin");
 }
 
