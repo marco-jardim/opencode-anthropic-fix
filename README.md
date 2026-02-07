@@ -111,34 +111,41 @@ The CLI lets you manage accounts outside of OpenCode.
 opencode-anthropic-auth [command] [args]
 ```
 
-| Command                | Description                              |
-| ---------------------- | ---------------------------------------- |
-| `list`                 | Show all accounts with status (default)  |
-| `status`               | Compact one-liner for scripts/prompts    |
-| `switch <N>`           | Set account N as active                  |
-| `enable <N>`           | Enable a disabled account                |
-| `disable <N>`          | Disable an account (skipped in rotation) |
-| `remove <N>`           | Remove an account permanently            |
-| `reset <N\|all>`       | Clear rate-limit / failure tracking      |
-| `stats`                | Show per-account token usage statistics  |
-| `reset-stats [N\|all]` | Reset usage statistics                   |
-| `strategy [name]`      | Show or change selection strategy        |
-| `config`               | Show configuration and file paths        |
-| `manage`               | Interactive account management menu      |
-| `help`                 | Show help                                |
+| Command                | Description                                                   |
+| ---------------------- | ------------------------------------------------------------- |
+| `list`                 | Show all accounts with status and live usage quotas (default) |
+| `status`               | Compact one-liner for scripts/prompts                         |
+| `switch <N>`           | Set account N as active                                       |
+| `enable <N>`           | Enable a disabled account                                     |
+| `disable <N>`          | Disable an account (skipped in rotation)                      |
+| `remove <N>`           | Remove an account permanently                                 |
+| `reset <N\|all>`       | Clear rate-limit / failure tracking                           |
+| `stats`                | Show per-account token usage statistics                       |
+| `reset-stats [N\|all]` | Reset usage statistics                                        |
+| `strategy [name]`      | Show or change selection strategy                             |
+| `config`               | Show configuration and file paths                             |
+| `manage`               | Interactive account management menu                           |
+| `help`                 | Show help                                                     |
 
 ### Examples
 
 ```bash
-# See account status
+# See account status (includes live usage quotas)
 opencode-anthropic-auth list
 
 # Output:
 # Anthropic Multi-Account Status
-# ──────────────────────────────────────────────────────────────
 #   #    Account               Status        Failures   Rate Limit
+#   ──────────────────────────────────────────────────────────────
 #   1    alice@example.com     ● active      0          —
+#        5h            █████░░░░░ 45%  resets in 2h 30m
+#        7d            █████░░░░░ 45%  resets in 4d 16h
+#        Sonnet 7d     ░░░░░░░░░░  0%
+#
 #   2    bob@example.com       ● ready       0          —
+#        5h            ███░░░░░░░ 31%  resets in 30m
+#        7d            ███████░░░ 70%  resets in 19h 31m
+#        Sonnet 7d     █░░░░░░░░░ 11%  resets in 2d 10h
 #
 # Strategy: sticky | 2 of 2 enabled
 # Storage: ~/.config/opencode/anthropic-accounts.json

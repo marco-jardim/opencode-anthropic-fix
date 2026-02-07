@@ -2,7 +2,7 @@ import { generatePKCE } from "@openauthjs/openauth/pkce";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { AccountManager } from "./lib/accounts.mjs";
-import { loadConfig } from "./lib/config.mjs";
+import { loadConfig, CLIENT_ID } from "./lib/config.mjs";
 import { loadAccounts, clearAccounts } from "./lib/storage.mjs";
 import {
   isAccountSpecificError,
@@ -10,7 +10,7 @@ import {
   parseRetryAfterHeader,
 } from "./lib/backoff.mjs";
 
-const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+// CLIENT_ID imported from lib/config.mjs
 
 // ---------------------------------------------------------------------------
 // OAuth helpers (unchanged from original)

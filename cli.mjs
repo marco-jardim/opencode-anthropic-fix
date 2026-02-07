@@ -23,7 +23,7 @@
  */
 
 import { loadAccounts, saveAccounts, getStoragePath, createDefaultStats } from "./lib/storage.mjs";
-import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES } from "./lib/config.mjs";
+import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES, CLIENT_ID } from "./lib/config.mjs";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -67,7 +67,10 @@ export function formatDuration(ms) {
   if (minutes < 60) return remainSec > 0 ? `${minutes}m ${remainSec}s` : `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   const remainMin = minutes % 60;
-  return remainMin > 0 ? `${hours}h ${remainMin}m` : `${hours}h`;
+  if (hours < 24) return remainMin > 0 ? `${hours}h ${remainMin}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remainHours = hours % 24;
+  return remainHours > 0 ? `${days}d ${remainHours}h` : `${days}d`;
 }
 
 /**
@@ -125,11 +128,159 @@ function rpad(str, width) {
 }
 
 // ---------------------------------------------------------------------------
+// Usage quota helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Refresh an account's OAuth access token.
+ * Mutates the account object in-place and returns the new access token.
+ * @param {{ refreshToken: string, access?: string, expires?: number }} account
+ * @returns {Promise<string | null>}
+ */
+export async function refreshAccessToken(account) {
+  try {
+    const resp = await fetch("https://console.anthropic.com/v1/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: account.refreshToken,
+        client_id: CLIENT_ID,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    account.access = json.access_token;
+    account.expires = Date.now() + json.expires_in * 1000;
+    if (json.refresh_token) account.refreshToken = json.refresh_token;
+    return json.access_token;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch usage quotas from the Anthropic OAuth usage endpoint.
+ * @param {string} accessToken
+ * @returns {Promise<Record<string, any> | null>}
+ */
+export async function fetchUsage(accessToken) {
+  try {
+    const resp = await fetch("https://api.anthropic.com/api/oauth/usage", {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "anthropic-beta": "oauth-2025-04-20",
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return null;
+    return resp.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ensure an account has a valid access token and fetch its usage data.
+ * @param {{ refreshToken: string, access?: string, expires?: number, enabled: boolean }} account
+ * @returns {Promise<{ usage: Record<string, any> | null, tokenRefreshed: boolean }>}
+ */
+export async function ensureTokenAndFetchUsage(account) {
+  if (!account.enabled) return { usage: null, tokenRefreshed: false };
+
+  let token = account.access;
+  let tokenRefreshed = false;
+
+  if (!token || !account.expires || account.expires < Date.now()) {
+    token = await refreshAccessToken(account);
+    tokenRefreshed = !!token;
+    if (!token) return { usage: null, tokenRefreshed: false };
+  }
+
+  const usage = await fetchUsage(token);
+  return { usage, tokenRefreshed };
+}
+
+/**
+ * Render a progress bar of a given width for a utilization percentage (0–100).
+ * @param {number} utilization - percentage (0 to 100)
+ * @param {number} [width=10] - bar character width
+ * @returns {string}
+ */
+export function renderBar(utilization, width = 10) {
+  const pct = Math.max(0, Math.min(100, utilization));
+  const filled = Math.round((pct / 100) * width);
+  const empty = width - filled;
+
+  let bar;
+  if (pct >= 90) {
+    bar = c.red("█".repeat(filled)) + c.dim("░".repeat(empty));
+  } else if (pct >= 70) {
+    bar = c.yellow("█".repeat(filled)) + c.dim("░".repeat(empty));
+  } else {
+    bar = c.green("█".repeat(filled)) + c.dim("░".repeat(empty));
+  }
+  return bar;
+}
+
+/**
+ * Format an ISO 8601 reset timestamp as a relative duration from now.
+ * @param {string} isoString
+ * @returns {string}
+ */
+export function formatResetTime(isoString) {
+  const resetMs = new Date(isoString).getTime();
+  const remaining = resetMs - Date.now();
+  if (remaining <= 0) return "now";
+  return formatDuration(remaining);
+}
+
+/**
+ * Known usage quota buckets and their display labels.
+ * Order determines display order.
+ */
+const QUOTA_BUCKETS = [
+  { key: "five_hour", label: "5h" },
+  { key: "seven_day", label: "7d" },
+  { key: "seven_day_sonnet", label: "Sonnet 7d" },
+  { key: "seven_day_opus", label: "Opus 7d" },
+  { key: "seven_day_oauth_apps", label: "OAuth Apps 7d" },
+  { key: "seven_day_cowork", label: "Cowork 7d" },
+];
+
+const USAGE_INDENT = "       ";
+const USAGE_LABEL_WIDTH = 13;
+
+/**
+ * Render usage quota lines for an account.
+ * Returns an array of pre-formatted strings (one per non-null bucket).
+ * @param {Record<string, any>} usage
+ * @returns {string[]}
+ */
+export function renderUsageLines(usage) {
+  const lines = [];
+  for (const { key, label } of QUOTA_BUCKETS) {
+    const bucket = usage[key];
+    if (!bucket || bucket.utilization == null) continue;
+
+    const pct = bucket.utilization;
+    const bar = renderBar(pct);
+    const pctStr = pad(String(Math.round(pct)) + "%", 4);
+    const reset = bucket.resets_at ? c.dim(`resets in ${formatResetTime(bucket.resets_at)}`) : "";
+
+    lines.push(`${USAGE_INDENT}${pad(label, USAGE_LABEL_WIDTH)} ${bar} ${pctStr}${reset ? ` ${reset}` : ""}`);
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
 /**
- * List all accounts with full status table.
+ * List all accounts with full status table and live usage quotas.
  * @returns {Promise<number>} exit code
  */
 export async function cmdList() {
@@ -143,6 +294,22 @@ export async function cmdList() {
 
   const config = loadConfig();
   const now = Date.now();
+
+  // Fetch usage quotas for all enabled accounts in parallel
+  const usageResults = await Promise.allSettled(
+    stored.accounts.map((acc) => ensureTokenAndFetchUsage(acc)),
+  );
+
+  // If any tokens were refreshed, persist them back to disk
+  let anyRefreshed = false;
+  for (const result of usageResults) {
+    if (result.status === "fulfilled" && result.value.tokenRefreshed) {
+      anyRefreshed = true;
+    }
+  }
+  if (anyRefreshed) {
+    await saveAccounts(stored).catch(() => {});
+  }
 
   console.log(c.bold("Anthropic Multi-Account Status"));
 
@@ -199,6 +366,7 @@ export async function cmdList() {
       }
     }
 
+    // Render account header line
     console.log(
       "  " +
       pad(c.bold(num), 5) +
@@ -207,6 +375,24 @@ export async function cmdList() {
       pad(failures, 11) +
       rateLimit,
     );
+
+    // Render usage quota lines for enabled accounts
+    if (acc.enabled) {
+      const result = usageResults[i];
+      const usage = result.status === "fulfilled" ? result.value.usage : null;
+      if (usage) {
+        const lines = renderUsageLines(usage);
+        for (const line of lines) {
+          console.log(line);
+        }
+      } else {
+        console.log(c.dim(`${USAGE_INDENT}quotas: unavailable`));
+      }
+    }
+
+    if (i < stored.accounts.length - 1) {
+      console.log("");
+    }
   }
 
   console.log("");

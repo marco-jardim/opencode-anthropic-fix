@@ -42,6 +42,12 @@ vi.mock("node:readline/promises", () => ({
 import {
   formatDuration,
   formatTimeAgo,
+  renderBar,
+  formatResetTime,
+  renderUsageLines,
+  refreshAccessToken,
+  fetchUsage,
+  ensureTokenAndFetchUsage,
   cmdList,
   cmdStatus,
   cmdSwitch,
@@ -56,6 +62,18 @@ import {
   main,
 } from "./cli.mjs";
 import { loadAccounts, saveAccounts } from "./lib/storage.mjs";
+
+// ---------------------------------------------------------------------------
+// Global fetch mock — prevents real HTTP calls and speeds up tests
+// ---------------------------------------------------------------------------
+const mockFetch = vi.fn();
+vi.stubGlobal("fetch", mockFetch);
+
+beforeEach(() => {
+  mockFetch.mockReset();
+  // Default: all fetches fail gracefully (usage endpoints return null)
+  mockFetch.mockResolvedValue({ ok: false, status: 500 });
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -149,6 +167,11 @@ describe("formatDuration", () => {
     expect(formatDuration(3_600_000)).toBe("1h");
     expect(formatDuration(5_400_000)).toBe("1h 30m");
   });
+
+  it("formats long durations as days", () => {
+    expect(formatDuration(86_400_000)).toBe("1d");
+    expect(formatDuration(112 * 3_600_000)).toBe("4d 16h");
+  });
 });
 
 describe("formatTimeAgo", () => {
@@ -168,15 +191,272 @@ describe("formatTimeAgo", () => {
   });
 });
 
+/** Strip ANSI escape codes for test assertions. */
+function stripAnsi(str) {
+  return str.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+// ---------------------------------------------------------------------------
+// Usage formatting helpers
+// ---------------------------------------------------------------------------
+
+describe("renderBar", () => {
+  it("renders empty bar at 0%", () => {
+    const bar = stripAnsi(renderBar(0, 10));
+    expect(bar).toBe("░".repeat(10));
+  });
+
+  it("renders full bar at 100%", () => {
+    const bar = stripAnsi(renderBar(100, 10));
+    expect(bar).toBe("█".repeat(10));
+  });
+
+  it("renders proportional fill at 50%", () => {
+    const bar = stripAnsi(renderBar(50, 10));
+    expect(bar).toBe("█████░░░░░");
+  });
+
+  it("clamps above 100%", () => {
+    const bar = stripAnsi(renderBar(150, 10));
+    expect(bar).toBe("█".repeat(10));
+  });
+
+  it("clamps below 0%", () => {
+    const bar = stripAnsi(renderBar(-10, 10));
+    expect(bar).toBe("░".repeat(10));
+  });
+});
+
+describe("formatResetTime", () => {
+  it("returns relative duration for future timestamps", () => {
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    expect(formatResetTime(future)).toMatch(/59m|1h/);
+  });
+
+  it("returns 'now' for past timestamps", () => {
+    const past = new Date(Date.now() - 1000).toISOString();
+    expect(formatResetTime(past)).toBe("now");
+  });
+});
+
+describe("renderUsageLines", () => {
+  it("renders lines for non-null buckets only", () => {
+    const usage = {
+      five_hour: { utilization: 10.0, resets_at: new Date(Date.now() + 3600_000).toISOString() },
+      seven_day: { utilization: 67.0, resets_at: new Date(Date.now() + 86400_000).toISOString() },
+      seven_day_sonnet: null,
+      seven_day_opus: null,
+    };
+    const lines = renderUsageLines(usage);
+    expect(lines).toHaveLength(2);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("5h");
+    expect(text).toContain("10%");
+    expect(text).toContain("7d");
+    expect(text).toContain("67%");
+  });
+
+  it("returns empty array when all buckets are null", () => {
+    const usage = { five_hour: null, seven_day: null };
+    expect(renderUsageLines(usage)).toHaveLength(0);
+  });
+
+  it("includes model-specific buckets when present", () => {
+    const usage = {
+      five_hour: { utilization: 5.0, resets_at: new Date(Date.now() + 1000).toISOString() },
+      seven_day: { utilization: 30.0, resets_at: new Date(Date.now() + 1000).toISOString() },
+      seven_day_sonnet: { utilization: 11.0, resets_at: new Date(Date.now() + 1000).toISOString() },
+      seven_day_opus: { utilization: 22.0, resets_at: new Date(Date.now() + 1000).toISOString() },
+    };
+    const lines = renderUsageLines(usage);
+    expect(lines).toHaveLength(4);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("Sonnet 7d");
+    expect(text).toContain("11%");
+    expect(text).toContain("Opus 7d");
+    expect(text).toContain("22%");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Usage fetch helpers
+// ---------------------------------------------------------------------------
+
+describe("refreshAccessToken", () => {
+  it("refreshes token and updates account object", async () => {
+    const account = { refreshToken: "old-refresh", access: undefined, expires: undefined };
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 }),
+    });
+
+    const token = await refreshAccessToken(account);
+    expect(token).toBe("new-access");
+    expect(account.access).toBe("new-access");
+    expect(account.refreshToken).toBe("new-refresh");
+    expect(account.expires).toBeGreaterThan(Date.now());
+  });
+
+  it("returns null on failure", async () => {
+    const account = { refreshToken: "bad-refresh" };
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
+
+    const token = await refreshAccessToken(account);
+    expect(token).toBeNull();
+  });
+
+  it("returns null on network error", async () => {
+    const account = { refreshToken: "refresh" };
+    mockFetch.mockRejectedValueOnce(new Error("network error"));
+
+    const token = await refreshAccessToken(account);
+    expect(token).toBeNull();
+  });
+});
+
+describe("fetchUsage", () => {
+  it("returns usage data on success", async () => {
+    const usageData = {
+      five_hour: { utilization: 10.0, resets_at: "2026-02-07T06:00:00Z" },
+      seven_day: { utilization: 67.0, resets_at: "2026-02-08T01:00:00Z" },
+    };
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => usageData,
+    });
+
+    const result = await fetchUsage("valid-token");
+    expect(result).toEqual(usageData);
+
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("https://api.anthropic.com/api/oauth/usage");
+    expect(opts.headers.authorization).toBe("Bearer valid-token");
+    expect(opts.headers["anthropic-beta"]).toBe("oauth-2025-04-20");
+  });
+
+  it("returns null on failure", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 403 });
+    expect(await fetchUsage("bad-token")).toBeNull();
+  });
+});
+
+describe("ensureTokenAndFetchUsage", () => {
+  it("skips disabled accounts", async () => {
+    const result = await ensureTokenAndFetchUsage({ enabled: false, refreshToken: "x" });
+    expect(result).toEqual({ usage: null, tokenRefreshed: false });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("uses existing valid token without refreshing", async () => {
+    const account = {
+      enabled: true,
+      refreshToken: "refresh",
+      access: "valid-access",
+      expires: Date.now() + 3600_000,
+    };
+    const usageData = { five_hour: { utilization: 5.0, resets_at: "2026-01-01T00:00:00Z" } };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => usageData });
+
+    const result = await ensureTokenAndFetchUsage(account);
+    expect(result.usage).toEqual(usageData);
+    expect(result.tokenRefreshed).toBe(false);
+    // Only 1 fetch call (usage), no token refresh
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes expired token before fetching usage", async () => {
+    const account = {
+      enabled: true,
+      refreshToken: "refresh",
+      access: "expired-access",
+      expires: Date.now() - 1000, // expired
+    };
+    // First call: token refresh
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 }),
+    });
+    // Second call: usage fetch
+    const usageData = { five_hour: { utilization: 20.0, resets_at: "2026-01-01T00:00:00Z" } };
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => usageData });
+
+    const result = await ensureTokenAndFetchUsage(account);
+    expect(result.usage).toEqual(usageData);
+    expect(result.tokenRefreshed).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null usage when token refresh fails", async () => {
+    const account = {
+      enabled: true,
+      refreshToken: "bad-refresh",
+      access: undefined,
+      expires: undefined,
+    };
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
+
+    const result = await ensureTokenAndFetchUsage(account);
+    expect(result.usage).toBeNull();
+    expect(result.tokenRefreshed).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // cmdList
 // ---------------------------------------------------------------------------
+
+/** Helper to mock usage fetch for cmdList tests. */
+function mockUsageForAccounts(...usages) {
+  const queue = [...usages];
+  const usageByToken = new Map();
+  let tokenCounter = 0;
+
+  mockFetch.mockImplementation((url, opts = {}) => {
+    const target = String(url);
+
+    if (target.includes("/v1/oauth/token")) {
+      if (queue.length === 0) return Promise.resolve({ ok: false, status: 500 });
+
+      const usage = queue.shift();
+      if (usage === null) {
+        return Promise.resolve({ ok: false, status: 401 });
+      }
+
+      tokenCounter += 1;
+      const token = `access-${tokenCounter}`;
+      usageByToken.set(token, usage);
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          access_token: token,
+          refresh_token: `refresh-${tokenCounter}`,
+          expires_in: 3600,
+        }),
+      });
+    }
+
+    if (target.includes("/api/oauth/usage")) {
+      const auth = opts.headers?.authorization || opts.headers?.Authorization;
+      const token = typeof auth === "string" ? auth.replace(/^Bearer\s+/i, "") : "";
+
+      if (!usageByToken.has(token)) {
+        return Promise.resolve({ ok: false, status: 401 });
+      }
+
+      const usage = usageByToken.get(token);
+      return Promise.resolve({ ok: true, json: async () => usage });
+    }
+
+    return Promise.resolve({ ok: false, status: 500 });
+  });
+}
 
 describe("cmdList", () => {
   let output;
 
   beforeEach(() => {
     vi.resetAllMocks();
+    saveAccounts.mockResolvedValue(undefined);
     output = captureOutput();
   });
 
@@ -247,6 +527,81 @@ describe("cmdList", () => {
     const code = await cmdList();
     expect(code).toBe(0);
     expect(output.text()).toContain("sticky");
+  });
+
+  it("shows live usage quotas for enabled accounts", async () => {
+    loadAccounts.mockResolvedValue(makeStorage());
+    const usage = {
+      five_hour: { utilization: 9.0, resets_at: new Date(Date.now() + 3600_000).toISOString() },
+      seven_day: { utilization: 67.0, resets_at: new Date(Date.now() + 86400_000).toISOString() },
+      seven_day_sonnet: { utilization: 11.0, resets_at: new Date(Date.now() + 172800_000).toISOString() },
+      seven_day_opus: null,
+    };
+    // Only 2 enabled accounts need mocking (account 3 is disabled, skips fetch)
+    mockUsageForAccounts(usage, usage);
+
+    const code = await cmdList();
+    expect(code).toBe(0);
+
+    const text = output.text();
+    expect(text).toContain("5h");
+    expect(text).toContain("9%");
+    expect(text).toContain("7d");
+    expect(text).toContain("67%");
+    expect(text).toContain("Sonnet 7d");
+    expect(text).toContain("11%");
+    // Opus 7d should NOT appear (null)
+    expect(text).not.toContain("Opus 7d");
+  });
+
+  it("shows 'quotas: unavailable' when usage fetch fails", async () => {
+    const storage = makeStorage();
+    storage.accounts[2].enabled = true; // enable all 3
+    loadAccounts.mockResolvedValue(storage);
+    // All three accounts: token refresh fails
+    mockUsageForAccounts(null, null, null);
+
+    const code = await cmdList();
+    expect(code).toBe(0);
+    expect(output.text()).toContain("quotas: unavailable");
+  });
+
+  it("does not show quota lines for disabled accounts", async () => {
+    loadAccounts.mockResolvedValue(makeStorage());
+    // Account 1 and 2 (enabled) get usage; account 3 is disabled and skips fetch entirely
+    mockUsageForAccounts(
+      { five_hour: { utilization: 5.0, resets_at: new Date(Date.now() + 1000).toISOString() } },
+      { five_hour: { utilization: 15.0, resets_at: new Date(Date.now() + 1000).toISOString() } },
+    );
+
+    const code = await cmdList();
+    expect(code).toBe(0);
+    const text = output.text();
+    // Should see quota lines for enabled accounts
+    expect(text).toContain("5%");
+    expect(text).toContain("15%");
+    // Disabled account (charlie) should not have quota lines — just the status row
+    const lines = text.split("\n");
+    const charlieIdx = lines.findIndex((l) => l.includes("charlie@example.com"));
+    expect(charlieIdx).toBeGreaterThan(-1);
+    // Next line after charlie should NOT be a quota line
+    const nextLine = lines[charlieIdx + 1] || "";
+    expect(nextLine).not.toContain("5h");
+    expect(nextLine).not.toContain("quotas:");
+  });
+
+  it("persists refreshed tokens back to disk", async () => {
+    loadAccounts.mockResolvedValue(makeStorage());
+    saveAccounts.mockResolvedValue(undefined);
+    // Only 2 enabled accounts need mocking (account 3 is disabled)
+    mockUsageForAccounts(
+      { five_hour: { utilization: 1.0, resets_at: new Date(Date.now() + 1000).toISOString() } },
+      { five_hour: { utilization: 2.0, resets_at: new Date(Date.now() + 1000).toISOString() } },
+    );
+
+    await cmdList();
+    // saveAccounts should be called to persist the refreshed tokens
+    expect(saveAccounts).toHaveBeenCalled();
   });
 });
 

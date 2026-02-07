@@ -27,7 +27,7 @@ Tests use [vitest](https://vitest.dev/). All modules are tested in isolation wit
 opencode-anthropic-auth/
   index.mjs              Plugin entry point (OAuth flow, fetch interceptor, retry loop)
   index.test.mjs         Plugin integration tests
-  cli.mjs                Standalone CLI (11 subcommands)
+  cli.mjs                Standalone CLI (13 subcommands, live usage quotas)
   cli.test.mjs           CLI command tests
   package.json           Dependencies: @openauthjs/openauth (prod), esbuild + vitest (dev)
   lib/
@@ -426,7 +426,7 @@ A custom provider requires `opencode.json` config with at least one model defini
 | `storage.test.mjs`  | Account persistence, deduplication, atomic writes  | `lib/storage.mjs`  |
 | `accounts.test.mjs` | AccountManager lifecycle, pool management          | `lib/accounts.mjs` |
 | `index.test.mjs`    | Plugin integration, fetch interceptor, transforms  | `index.mjs`        |
-| `cli.test.mjs`      | CLI commands, output formatting                    | `cli.mjs`          |
+| `cli.test.mjs`      | CLI commands, output formatting, live usage quotas | `cli.mjs`          |
 
 ### Writing Tests
 
