@@ -24,6 +24,7 @@
 
 import { loadAccounts, saveAccounts, getStoragePath, createDefaultStats } from "./lib/storage.mjs";
 import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES } from "./lib/config.mjs";
+import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 
@@ -1076,12 +1077,12 @@ export async function main(argv) {
 // Run if executed directly (not imported)
 async function detectMain() {
   if (!process.argv[1]) return false;
-  if (import.meta.url === `file://${process.argv[1]}`) return true;
+  if (import.meta.url === pathToFileURL(process.argv[1]).href) return true;
   // Handle symlinks (e.g., ~/.config/opencode/plugin/opencode-anthropic-auth-plugin.js → index.mjs)
   try {
     const { realpath } = await import("node:fs/promises");
     const resolved = await realpath(process.argv[1]);
-    return import.meta.url === `file://${resolved}`;
+    return import.meta.url === pathToFileURL(resolved).href;
   } catch {
     return false;
   }

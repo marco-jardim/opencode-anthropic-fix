@@ -82,6 +82,69 @@ function makeProvider() {
   };
 }
 
+/**
+ * Build a stored account object with sensible defaults.
+ * Override any field by passing partial overrides.
+ */
+function makeStoredAccount(overrides = {}) {
+  return {
+    refreshToken: "refresh-1",
+    addedAt: 1000,
+    lastUsed: 0,
+    enabled: true,
+    rateLimitResetTimes: {},
+    consecutiveFailures: 0,
+    lastFailureTime: null,
+    ...overrides,
+  };
+}
+
+/** Build a stored accounts data structure with N accounts. */
+function makeAccountsData(accountOverrides = [{}], extra = {}) {
+  return {
+    version: 1,
+    accounts: accountOverrides.map((o, i) =>
+      makeStoredAccount({ refreshToken: `refresh-${i + 1}`, addedAt: (i + 1) * 1000, ...o }),
+    ),
+    activeIndex: 0,
+    ...extra,
+  };
+}
+
+/**
+ * Bootstrap a plugin with loaded accounts and return the fetch interceptor.
+ * Accepts an array of account overrides (one per account) and optional auth overrides.
+ */
+async function setupFetchFn(client, accountOverrides = [{}], authOverrides = {}) {
+  const data = makeAccountsData(accountOverrides);
+  loadAccounts.mockResolvedValue(data);
+  saveAccounts.mockResolvedValue(undefined);
+
+  const plugin = await AnthropicAuthPlugin({ client });
+  const getAuth = vi.fn().mockResolvedValue({
+    type: "oauth",
+    refresh: data.accounts[0].refreshToken,
+    access: `access-1`,
+    expires: Date.now() + 3600_000,
+    ...authOverrides,
+  });
+
+  const result = await plugin.auth.loader(getAuth, makeProvider());
+  return result.fetch;
+}
+
+/** Shorthand for a successful token refresh mock response */
+function mockTokenRefresh(token = "access-new", refresh = "refresh-new") {
+  return {
+    ok: true,
+    json: async () => ({
+      access_token: token,
+      refresh_token: refresh,
+      expires_in: 3600,
+    }),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Plugin lifecycle: authorize → callback → loader ordering
 // ---------------------------------------------------------------------------
@@ -175,21 +238,9 @@ describe("plugin lifecycle", () => {
 
   it("second login adds to existing account pool", async () => {
     // First login already happened — accounts file exists
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "first-refresh",
-          addedAt: 1000,
-          lastUsed: 2000,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(
+      makeAccountsData([{ refreshToken: "first-refresh", lastUsed: 2000 }]),
+    );
 
     const plugin = await AnthropicAuthPlugin({ client });
 
@@ -441,40 +492,7 @@ describe("fetch interceptor", () => {
     // Set up two accounts — the auth fallback provides access token for account 1.
     // Account 2 will need a token refresh before it can be used.
     vi.resetAllMocks();
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
-    saveAccounts.mockResolvedValue(undefined);
-
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
+    const fetchFn = await setupFetchFn(client, [{}, {}]);
 
     // First API request: 429 (account 1 has access token from auth fallback)
     mockFetch.mockResolvedValueOnce(
@@ -484,20 +502,13 @@ describe("fetch interceptor", () => {
       ),
     );
     // Token refresh for account 2 (no access token yet)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        access_token: "access-2",
-        refresh_token: "refresh-2",
-        expires_in: 3600,
-      }),
-    });
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("access-2", "refresh-2"));
     // Retry API request with account 2: 200
     mockFetch.mockResolvedValueOnce(
       new Response('{"content":[]}', { status: 200 }),
     );
 
-    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({ messages: [] }),
     });
@@ -559,21 +570,8 @@ describe("fetch interceptor — token refresh", () => {
 
   it("refreshes expired account token before making API request", async () => {
     // Set up one account with an EXPIRED token
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData());
+    saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -585,14 +583,7 @@ describe("fetch interceptor — token refresh", () => {
     const result = await plugin.auth.loader(getAuth, makeProvider());
 
     // Token refresh call
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        access_token: "fresh-access",
-        refresh_token: "refresh-1-rotated",
-        expires_in: 3600,
-      }),
-    });
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("fresh-access", "refresh-1-rotated"));
     // Actual API call
     mockFetch.mockResolvedValueOnce(
       new Response('{"content":[]}', { status: 200 }),
@@ -628,21 +619,8 @@ describe("fetch interceptor — token refresh", () => {
   });
 
   it("coalesces concurrent refreshes for the same account", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData());
+    saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -678,14 +656,7 @@ describe("fetch interceptor — token refresh", () => {
     // Let both requests reach refresh path
     await Promise.resolve();
 
-    resolveRefresh({
-      ok: true,
-      json: async () => ({
-        access_token: "fresh-access",
-        refresh_token: "refresh-1-rotated",
-        expires_in: 3600,
-      }),
-    });
+    resolveRefresh(mockTokenRefresh("fresh-access", "refresh-1-rotated"));
 
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1.status).toBe(200);
@@ -699,30 +670,11 @@ describe("fetch interceptor — token refresh", () => {
 
   it("disables account on 401 token refresh failure and retries with next account", async () => {
     // Two accounts — first will fail refresh, second will succeed
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "revoked-refresh",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "good-refresh",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { refreshToken: "revoked-refresh" },
+      { refreshToken: "good-refresh" },
+    ]));
+    saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -740,14 +692,7 @@ describe("fetch interceptor — token refresh", () => {
       json: async () => ({ error: "invalid_grant" }),
     });
     // Account 2 token refresh (also no access token)
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        access_token: "good-access",
-        refresh_token: "good-refresh",
-        expires_in: 3600,
-      }),
-    });
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("good-access", "good-refresh"));
     // API call with account 2
     mockFetch.mockResolvedValueOnce(
       new Response('{"content":[]}', { status: 200 }),
@@ -764,30 +709,11 @@ describe("fetch interceptor — token refresh", () => {
   });
 
   it("disables account on 400 invalid_grant refresh failure and retries with next account", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "bad-refresh",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "good-refresh",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { refreshToken: "bad-refresh" },
+      { refreshToken: "good-refresh" },
+    ]));
+    saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -805,14 +731,7 @@ describe("fetch interceptor — token refresh", () => {
       text: async () => JSON.stringify({ error: "invalid_grant" }),
     });
     // Account 2 refresh succeeds
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        access_token: "good-access",
-        refresh_token: "good-refresh",
-        expires_in: 3600,
-      }),
-    });
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("good-access", "good-refresh"));
     // API call with account 2
     mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
 
@@ -826,30 +745,11 @@ describe("fetch interceptor — token refresh", () => {
   });
 
   it("fails over to next account on transient refresh failure", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "transient-refresh",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "good-refresh",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { refreshToken: "transient-refresh" },
+      { refreshToken: "good-refresh" },
+    ]));
+    saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -867,14 +767,7 @@ describe("fetch interceptor — token refresh", () => {
       text: async () => "server error",
     });
     // Account 2 refresh succeeds
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        access_token: "good-access",
-        refresh_token: "good-refresh",
-        expires_in: 3600,
-      }),
-    });
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("good-access", "good-refresh"));
     // API call succeeds on account 2
     mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
 
@@ -902,21 +795,9 @@ describe("fetch interceptor — edge conditions", () => {
   });
 
   it("fails fast when all accounts are disabled", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "disabled-refresh",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: false,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { refreshToken: "disabled-refresh", enabled: false },
+    ]));
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -953,21 +834,9 @@ describe("fetch interceptor — account exhaustion", () => {
 
   it("throws when single account fails token refresh (transient skip, no more accounts)", async () => {
     // Single account that fails token refresh with a transient error
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "bad-refresh",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { refreshToken: "bad-refresh" },
+    ]));
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -994,30 +863,7 @@ describe("fetch interceptor — account exhaustion", () => {
   });
 
   it("throws when only account gets rate-limited (no more accounts to try)", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
-
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
+    const fetchFn = await setupFetchFn(client);
 
     // 429 — account-specific, but no other accounts to try
     mockFetch.mockResolvedValueOnce(
@@ -1028,7 +874,7 @@ describe("fetch interceptor — account exhaustion", () => {
     );
 
     await expect(
-      result.fetch("https://api.anthropic.com/v1/messages", {
+      fetchFn("https://api.anthropic.com/v1/messages", {
         method: "POST",
         body: JSON.stringify({ messages: [] }),
       }),
@@ -1038,196 +884,31 @@ describe("fetch interceptor — account exhaustion", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("returns service-wide error directly without switching accounts", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+  it.each([
+    { status: 529, errorType: "overloaded_error", errorMsg: "Server is overloaded" },
+    { status: 503, errorType: "service_unavailable", errorMsg: "temporarily unavailable" },
+    { status: 500, errorType: "internal_error", errorMsg: "internal server error" },
+  ])("returns $status directly without switching accounts", async ({ status, errorType, errorMsg }) => {
+    const fetchFn = await setupFetchFn(client, [{}, {}]);
 
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
-
-    // 529 overloaded — service-wide, should NOT switch accounts
     mockFetch.mockResolvedValueOnce(
       new Response(
-        JSON.stringify({ error: { type: "overloaded_error", message: "Server is overloaded" } }),
-        { status: 529 },
+        JSON.stringify({ error: { type: errorType, message: errorMsg } }),
+        { status },
       ),
     );
 
-    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({ messages: [] }),
     });
 
-    // Should return the 529 directly
-    expect(response.status).toBe(529);
-    // Only 1 fetch call — did NOT try another account
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns 503 directly without switching accounts", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
-
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ error: { type: "service_unavailable", message: "temporarily unavailable" } }),
-        { status: 503 },
-      ),
-    );
-
-    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({ messages: [] }),
-    });
-
-    expect(response.status).toBe(503);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns 500 directly without switching accounts", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
-
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ error: { type: "internal_error", message: "internal server error" } }),
-        { status: 500 },
-      ),
-    );
-
-    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({ messages: [] }),
-    });
-
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(status);
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it("handles 400 account-specific error (billing) by switching accounts", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
-
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
+    const fetchFn = await setupFetchFn(client, [{}, {}]);
 
     // Account 1: 400 with billing language — account-specific
     mockFetch.mockResolvedValueOnce(
@@ -1237,20 +918,13 @@ describe("fetch interceptor — account exhaustion", () => {
       ),
     );
     // Token refresh for account 2
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        access_token: "access-2",
-        refresh_token: "refresh-2",
-        expires_in: 3600,
-      }),
-    });
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("access-2", "refresh-2"));
     // API call with account 2: success
     mockFetch.mockResolvedValueOnce(
       new Response('{"content":[]}', { status: 200 }),
     );
 
-    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({ messages: [] }),
     });
@@ -1261,39 +935,7 @@ describe("fetch interceptor — account exhaustion", () => {
   });
 
   it("handles 400 non-account-specific error by returning directly", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
-
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
+    const fetchFn = await setupFetchFn(client, [{}, {}]);
 
     // 400 with generic error (not account-specific) — should NOT switch
     mockFetch.mockResolvedValueOnce(
@@ -1303,7 +945,7 @@ describe("fetch interceptor — account exhaustion", () => {
       ),
     );
 
-    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({ messages: [] }),
     });
@@ -1314,39 +956,7 @@ describe("fetch interceptor — account exhaustion", () => {
   });
 
   it("handles 403 permission_error by switching accounts", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
-
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
+    const fetchFn = await setupFetchFn(client, [{}, {}]);
 
     // Account 1 fails with structured permission error
     mockFetch.mockResolvedValueOnce(
@@ -1356,20 +966,13 @@ describe("fetch interceptor — account exhaustion", () => {
       ),
     );
     // Refresh account 2 token
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        access_token: "access-2",
-        refresh_token: "refresh-2",
-        expires_in: 3600,
-      }),
-    });
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("access-2", "refresh-2"));
     // Retry with account 2 succeeds
     mockFetch.mockResolvedValueOnce(
       new Response('{"content":[]}', { status: 200 }),
     );
 
-    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({ messages: [] }),
     });
@@ -1391,23 +994,10 @@ describe("fetch interceptor — account exhaustion", () => {
     vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
 
     try {
-      loadAccounts.mockResolvedValue({
-        version: 1,
-        accounts: [
-          {
-            refreshToken: "refresh-1",
-            access: "stale-access",
-            expires: Date.now() + 3600_000,
-            addedAt: 1000,
-            lastUsed: 0,
-            enabled: true,
-            rateLimitResetTimes: {},
-            consecutiveFailures: 0,
-            lastFailureTime: null,
-          },
-        ],
-        activeIndex: 0,
-      });
+      loadAccounts.mockResolvedValue(makeAccountsData([
+        { access: "stale-access", expires: Date.now() + 3600_000 },
+      ]));
+      saveAccounts.mockResolvedValue(undefined);
 
       const plugin = await AnthropicAuthPlugin({ client });
       const getAuth = vi.fn().mockResolvedValue({
@@ -1437,14 +1027,7 @@ describe("fetch interceptor — account exhaustion", () => {
       vi.advanceTimersByTime(6_000);
 
       // Next request should refresh token before calling API
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: "fresh-access",
-          refresh_token: "refresh-1",
-          expires_in: 3600,
-        }),
-      });
+      mockFetch.mockResolvedValueOnce(mockTokenRefresh("fresh-access", "refresh-1"));
       mockFetch.mockResolvedValueOnce(
         new Response('{"content":[]}', { status: 200 }),
       );
@@ -1465,34 +1048,11 @@ describe("fetch interceptor — account exhaustion", () => {
   });
 
   it("tries next account when fetch throws a network error", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          access: "access-1",
-          expires: Date.now() + 3600_000,
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          access: "access-2",
-          expires: Date.now() + 3600_000,
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { access: "access-1", expires: Date.now() + 3600_000 },
+      { access: "access-2", expires: Date.now() + 3600_000 },
+    ]));
+    saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -1518,45 +1078,12 @@ describe("fetch interceptor — account exhaustion", () => {
   });
 
   it("handles mixed account-specific failures across three accounts", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          access: "access-1",
-          expires: Date.now() + 3600_000,
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          access: "access-2",
-          expires: Date.now() + 3600_000,
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-3",
-          access: "access-3",
-          expires: Date.now() + 3600_000,
-          addedAt: 3000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { access: "access-1", expires: Date.now() + 3600_000 },
+      { access: "access-2", expires: Date.now() + 3600_000 },
+      { access: "access-3", expires: Date.now() + 3600_000 },
+    ]));
+    saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -1596,45 +1123,12 @@ describe("fetch interceptor — account exhaustion", () => {
   });
 
   it("debounces rapid account-switch warning toasts", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          access: "access-1",
-          expires: Date.now() + 3600_000,
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          access: "access-2",
-          expires: Date.now() + 3600_000,
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-3",
-          access: "access-3",
-          expires: Date.now() + 3600_000,
-          addedAt: 3000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { access: "access-1", expires: Date.now() + 3600_000 },
+      { access: "access-2", expires: Date.now() + 3600_000 },
+      { access: "access-3", expires: Date.now() + 3600_000 },
+    ]));
+    saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
     const getAuth = vi.fn().mockResolvedValue({
@@ -1972,21 +1466,9 @@ describe("markSuccess wiring", () => {
     const client = makeClient();
 
     // Account with prior failures
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 3,
-          lastFailureTime: Date.now() - 5000,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { consecutiveFailures: 3, lastFailureTime: Date.now() - 5000 },
+    ]));
     saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
@@ -2022,32 +1504,7 @@ describe("markSuccess wiring", () => {
   it("records token usage from streaming response", async () => {
     vi.resetAllMocks();
     const client = makeClient();
-
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
-    saveAccounts.mockResolvedValue(undefined);
-
-    const plugin = await AnthropicAuthPlugin({ client });
-    const getAuth = vi.fn().mockResolvedValue({
-      type: "oauth",
-      refresh: "refresh-1",
-      access: "access-1",
-      expires: Date.now() + 3600_000,
-    });
-    const result = await plugin.auth.loader(getAuth, makeProvider());
+    const fetchFn = await setupFetchFn(client);
 
     // Build an SSE stream with message_start and message_delta usage events
     const sseBody = [
@@ -2072,7 +1529,7 @@ describe("markSuccess wiring", () => {
       }),
     );
 
-    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
     });
@@ -2103,34 +1560,10 @@ describe("markSuccess wiring", () => {
     vi.resetAllMocks();
     const client = makeClient();
 
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          access: "access-1",
-          expires: Date.now() + 3600_000,
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          access: "access-2",
-          expires: Date.now() + 3600_000,
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { access: "access-1", expires: Date.now() + 3600_000 },
+      { access: "access-2", expires: Date.now() + 3600_000 },
+    ]));
     saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
@@ -2179,34 +1612,10 @@ describe("markSuccess wiring", () => {
     vi.resetAllMocks();
     const client = makeClient();
 
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          access: "access-1",
-          expires: Date.now() + 3600_000,
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          access: "access-2",
-          expires: Date.now() + 3600_000,
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { access: "access-1", expires: Date.now() + 3600_000 },
+      { access: "access-2", expires: Date.now() + 3600_000 },
+    ]));
     saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
@@ -2260,34 +1669,10 @@ describe("markSuccess wiring", () => {
     vi.resetAllMocks();
     const client = makeClient();
 
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          access: "access-1",
-          expires: Date.now() + 3600_000,
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          access: "access-2",
-          expires: Date.now() + 3600_000,
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { access: "access-1", expires: Date.now() + 3600_000 },
+      { access: "access-2", expires: Date.now() + 3600_000 },
+    ]));
     saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
@@ -2336,34 +1721,10 @@ describe("markSuccess wiring", () => {
     vi.resetAllMocks();
     const client = makeClient();
 
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          refreshToken: "refresh-1",
-          access: "access-1",
-          expires: Date.now() + 3600_000,
-          addedAt: 1000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-        {
-          refreshToken: "refresh-2",
-          access: "access-2",
-          expires: Date.now() + 3600_000,
-          addedAt: 2000,
-          lastUsed: 0,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-        },
-      ],
-      activeIndex: 0,
-    });
+    loadAccounts.mockResolvedValue(makeAccountsData([
+      { access: "access-1", expires: Date.now() + 3600_000 },
+      { access: "access-2", expires: Date.now() + 3600_000 },
+    ]));
     saveAccounts.mockResolvedValue(undefined);
 
     const plugin = await AnthropicAuthPlugin({ client });
@@ -2418,23 +1779,9 @@ describe("markSuccess wiring", () => {
       vi.resetAllMocks();
       const client = makeClient();
 
-      loadAccounts.mockResolvedValue({
-        version: 1,
-        accounts: [
-          {
-            refreshToken: "refresh-1",
-            access: "stale-access",
-            expires: Date.now() + 3600_000,
-            addedAt: 1000,
-            lastUsed: 0,
-            enabled: true,
-            rateLimitResetTimes: {},
-            consecutiveFailures: 0,
-            lastFailureTime: null,
-          },
-        ],
-        activeIndex: 0,
-      });
+      loadAccounts.mockResolvedValue(makeAccountsData([
+        { access: "stale-access", expires: Date.now() + 3600_000 },
+      ]));
       saveAccounts.mockResolvedValue(undefined);
 
       const plugin = await AnthropicAuthPlugin({ client });
@@ -2469,14 +1816,7 @@ describe("markSuccess wiring", () => {
       vi.advanceTimersByTime(6_000);
 
       // Next request should refresh token first.
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          access_token: "fresh-access",
-          refresh_token: "refresh-1",
-          expires_in: 3600,
-        }),
-      });
+      mockFetch.mockResolvedValueOnce(mockTokenRefresh("fresh-access", "refresh-1"));
       mockFetch.mockResolvedValueOnce(
         new Response('{"content":[]}', { status: 200 }),
       );
@@ -2504,23 +1844,9 @@ describe("markSuccess wiring", () => {
       vi.resetAllMocks();
       const client = makeClient();
 
-      loadAccounts.mockResolvedValue({
-        version: 1,
-        accounts: [
-          {
-            refreshToken: "refresh-1",
-            access: "access-1",
-            expires: Date.now() + 3600_000,
-            addedAt: 1000,
-            lastUsed: 0,
-            enabled: true,
-            rateLimitResetTimes: {},
-            consecutiveFailures: 0,
-            lastFailureTime: null,
-          },
-        ],
-        activeIndex: 0,
-      });
+      loadAccounts.mockResolvedValue(makeAccountsData([
+        { access: "access-1", expires: Date.now() + 3600_000 },
+      ]));
       saveAccounts.mockResolvedValue(undefined);
 
       const plugin = await AnthropicAuthPlugin({ client });

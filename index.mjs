@@ -534,29 +534,6 @@ function transformResponse(response, onUsage, onAccountError) {
 }
 
 /**
- * Parse normalized error fields from a raw response body string.
- * @param {string | null} body
- * @returns {{ errorType: string, message: string, text: string }}
- */
-function parseErrorBody(body) {
-  if (!body) {
-    return { errorType: "", message: "", text: "" };
-  }
-
-  const text = body.toLowerCase();
-  try {
-    const parsed = JSON.parse(body);
-    return {
-      errorType: String(parsed?.error?.type || "").toLowerCase(),
-      message: String(parsed?.error?.message || "").toLowerCase(),
-      text,
-    };
-  } catch {
-    return { errorType: "", message: "", text };
-  }
-}
-
-/**
  * Check whether a response is an SSE event stream.
  * @param {Response} response
  * @returns {boolean}
@@ -567,42 +544,14 @@ function isEventStreamResponse(response) {
 }
 
 /**
- * Determine whether an account-specific error is auth/permission related.
- * @param {number} status
- * @param {string | null} body
- * @returns {boolean}
- */
-function isAuthOrPermissionIssue(status, body) {
-  if (status === 401) return true;
-
-  const { errorType, message, text } = parseErrorBody(body);
-  const authSignals = [
-    "authentication",
-    "permission",
-    "forbidden",
-    "unauthorized",
-    "invalid_api_key",
-    "invalid_grant",
-    "expired token",
-    "invalid access token",
-    "insufficient_permissions",
-  ];
-
-  return authSignals.some((signal) =>
-    errorType.includes(signal) || message.includes(signal) || text.includes(signal),
-  );
-}
-
-/**
  * Build user-facing switch reason text for account-specific errors.
  * @param {number} status
- * @param {string | null} body
  * @param {import('./lib/backoff.mjs').RateLimitReason} reason
  * @returns {string}
  */
-function formatSwitchReason(status, body, reason) {
+function formatSwitchReason(status, reason) {
   if (reason === "AUTH_FAILED") return "auth failed";
-  if (status === 403 && isAuthOrPermissionIssue(status, body)) return "permission denied";
+  if (status === 403 && reason === "QUOTA_EXHAUSTED") return "permission denied";
   if (reason === "QUOTA_EXHAUSTED") return "quota exhausted";
   return "rate-limited";
 }
@@ -635,27 +584,17 @@ async function refreshAccountToken(account, client) {
   );
 
   if (!response.ok) {
-    let bodyText = "";
+    const bodyText = await response.text().catch(() => "");
     let errorCode = "";
-    try {
-      if (typeof response.text === "function") {
-        bodyText = await response.text();
-      } else if (typeof response.json === "function") {
-        const json = await response.json();
-        bodyText = JSON.stringify(json);
-      }
-      if (bodyText) {
-        try {
-          const parsed = JSON.parse(bodyText);
-          if (parsed && typeof parsed.error === "string") {
-            errorCode = parsed.error;
-          }
-        } catch {
-          // body may be non-JSON
+    if (bodyText) {
+      try {
+        const parsed = JSON.parse(bodyText);
+        if (parsed && typeof parsed.error === "string") {
+          errorCode = parsed.error;
         }
+      } catch {
+        // body may be non-JSON
       }
-    } catch {
-      // ignore body parsing errors
     }
 
     const err = new Error(`Token refresh failed: ${response.status}${errorCode ? ` (${errorCode})` : ""}`);
@@ -853,15 +792,11 @@ export async function AnthropicAuthPlugin({ client }) {
 
               // Try each account at most once. If the error is account-specific,
               // switch to the next account. If it's service-wide, return immediately.
-              const maxAttempts = accountManager
-                ? accountManager.getTotalAccountCount()
-                : 1;
+              const maxAttempts = accountManager.getTotalAccountCount();
 
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account
-                const account = accountManager
-                  ? accountManager.getCurrentAccount(transientRefreshSkips)
-                  : null;
+                const account = accountManager.getCurrentAccount(transientRefreshSkips);
 
                 // Toast account usage on first use and whenever the account changes
                 if (showUsageToast && account && accountManager) {
@@ -877,7 +812,7 @@ export async function AnthropicAuthPlugin({ client }) {
                   }
                 }
 
-                if (!account && accountManager) {
+                if (!account) {
                   const enabledCount = accountManager.getAccountCount();
                   if (enabledCount === 0) {
                     throw new Error(
@@ -890,93 +825,51 @@ export async function AnthropicAuthPlugin({ client }) {
 
                 // Determine access token
                 let accessToken;
-                if (account) {
-                  // Per-account token refresh
-                  if (
-                    !account.access ||
-                    !account.expires ||
-                    account.expires < Date.now()
-                  ) {
-                    try {
-                      accessToken = await refreshAccountTokenSingleFlight(account);
-                      // Persist updated tokens (especially if refresh token rotated)
-                      if (accountManager) {
-                        accountManager.requestSaveToDisk();
-                      }
-                    } catch (err) {
-                      // Token refresh failed — mark account as failed
-                      if (accountManager) {
-                        accountManager.markFailure(account);
-                        // Disable account on terminal refresh errors
-                        const msg = err instanceof Error ? err.message : String(err);
-                        const status =
-                          typeof err === "object" && err && "status" in err
-                            ? Number(err.status)
-                            : NaN;
-                        const errorCode =
-                          typeof err === "object" && err && "errorCode" in err
-                            ? String(err.errorCode || "")
-                            : "";
-                        const shouldDisable =
-                          status === 400 ||
-                          status === 401 ||
-                          status === 403 ||
-                          errorCode === "invalid_grant" ||
-                          errorCode === "invalid_request" ||
-                          msg.includes("invalid_grant");
+                // Per-account token refresh
+                if (
+                  !account.access ||
+                  !account.expires ||
+                  account.expires < Date.now()
+                ) {
+                  try {
+                    accessToken = await refreshAccountTokenSingleFlight(account);
+                    // Persist updated tokens (especially if refresh token rotated)
+                    accountManager.requestSaveToDisk();
+                  } catch (err) {
+                    // Token refresh failed — mark account as failed
+                    accountManager.markFailure(account);
+                    // Disable account on terminal refresh errors
+                    const msg = err instanceof Error ? err.message : String(err);
+                    const status =
+                      typeof err === "object" && err && "status" in err
+                        ? Number(err.status)
+                        : NaN;
+                    const errorCode =
+                      typeof err === "object" && err && "errorCode" in err
+                        ? String(err.errorCode || "")
+                        : "";
+                    const shouldDisable =
+                      status === 400 ||
+                      status === 401 ||
+                      status === 403 ||
+                      errorCode === "invalid_grant" ||
+                      errorCode === "invalid_request" ||
+                      msg.includes("invalid_grant");
 
-                        if (shouldDisable) {
-                          account.enabled = false;
-                          accountManager.requestSaveToDisk();
-                          const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
-                          await toast(`Disabled ${name} (token refresh failed)`, "error");
-                        } else {
-                          // Skip this account for the remainder of this request.
-                          transientRefreshSkips.add(account.index);
-                        }
-                      }
-                      lastError = err;
-                      continue; // Try next account
+                    if (shouldDisable) {
+                      account.enabled = false;
+                      accountManager.requestSaveToDisk();
+                      const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
+                      await toast(`Disabled ${name} (token refresh failed)`, "error");
+                    } else {
+                      // Skip this account for the remainder of this request.
+                      transientRefreshSkips.add(account.index);
                     }
-                  } else {
-                    accessToken = account.access;
+                    lastError = err;
+                    continue; // Try next account
                   }
                 } else {
-                  // Fallback: use OpenCode's auth directly (single-account mode)
-                  if (
-                    !currentAuth.access ||
-                    currentAuth.expires < Date.now()
-                  ) {
-                    const response = await fetch(
-                      "https://console.anthropic.com/v1/oauth/token",
-                      {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          grant_type: "refresh_token",
-                          refresh_token: currentAuth.refresh,
-                          client_id: CLIENT_ID,
-                        }),
-                      },
-                    );
-                    if (!response.ok) {
-                      throw new Error(
-                        `Token refresh failed: ${response.status}`,
-                      );
-                    }
-                    const json = await response.json();
-                    await client.auth.set({
-                      path: { id: "anthropic" },
-                      body: {
-                        type: "oauth",
-                        refresh: json.refresh_token || currentAuth.refresh,
-                        access: json.access_token,
-                        expires: Date.now() + json.expires_in * 1000,
-                      },
-                    });
-                    currentAuth.access = json.access_token;
-                  }
-                  accessToken = currentAuth.access;
+                  accessToken = account.access;
                 }
 
                 // Build headers with the selected account's token
@@ -1029,10 +922,7 @@ export async function AnthropicAuthPlugin({ client }) {
                       errorBody,
                     );
                     const retryAfterMs = parseRetryAfterHeader(response);
-                    const authOrPermissionIssue = isAuthOrPermissionIssue(
-                      response.status,
-                      errorBody,
-                    );
+                    const authOrPermissionIssue = reason === "AUTH_FAILED";
 
                     // Auth failures should force token refresh on next use.
                     if (reason === "AUTH_FAILED") {
@@ -1055,11 +945,7 @@ export async function AnthropicAuthPlugin({ client }) {
                     const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
                     const total = accountManager.getAccountCount();
                     if (total > 1) {
-                      const switchReason = formatSwitchReason(
-                        response.status,
-                        errorBody,
-                        reason,
-                      );
+                      const switchReason = formatSwitchReason(response.status, reason);
                       await toast(`${name} ${switchReason}, switching account`, "warning", {
                         debounceKey: "account-switch",
                       });

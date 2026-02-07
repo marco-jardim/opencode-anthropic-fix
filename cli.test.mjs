@@ -938,48 +938,25 @@ describe("cmdStats", () => {
   });
 
   function makeStatsStorage() {
-    return {
-      version: 1,
-      accounts: [
-        {
-          email: "alice@example.com",
-          refreshToken: "refresh-alice",
-          addedAt: 1000,
-          lastUsed: 5000,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-          stats: {
-            requests: 142,
-            inputTokens: 1_200_000,
-            outputTokens: 380_000,
-            cacheReadTokens: 890_000,
-            cacheWriteTokens: 45_000,
-            lastReset: Date.now() - 86400_000,
-          },
-        },
-        {
-          email: "bob@example.com",
-          refreshToken: "refresh-bob",
-          addedAt: 2000,
-          lastUsed: 3000,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-          stats: {
-            requests: 87,
-            inputTokens: 720_000,
-            outputTokens: 210_000,
-            cacheReadTokens: 540_000,
-            cacheWriteTokens: 32_000,
-            lastReset: Date.now() - 86400_000,
-          },
-        },
-      ],
-      activeIndex: 0,
+    const storage = makeStorage();
+    storage.accounts[0].stats = {
+      requests: 142,
+      inputTokens: 1_200_000,
+      outputTokens: 380_000,
+      cacheReadTokens: 890_000,
+      cacheWriteTokens: 45_000,
+      lastReset: Date.now() - 86400_000,
     };
+    storage.accounts[1].email = "bob@example.com";
+    storage.accounts[1].stats = {
+      requests: 87,
+      inputTokens: 720_000,
+      outputTokens: 210_000,
+      cacheReadTokens: 540_000,
+      cacheWriteTokens: 32_000,
+      lastReset: Date.now() - 86400_000,
+    };
+    return storage;
   }
 
   it("displays per-account usage statistics", async () => {
@@ -1004,23 +981,9 @@ describe("cmdStats", () => {
   });
 
   it("handles accounts with no stats (defaults)", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [
-        {
-          email: "alice@example.com",
-          refreshToken: "refresh-alice",
-          addedAt: 1000,
-          lastUsed: 5000,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-          // No stats field
-        },
-      ],
-      activeIndex: 0,
-    });
+    const storage = makeStorage();
+    storage.accounts = [storage.accounts[0]]; // single account, no stats field
+    loadAccounts.mockResolvedValue(storage);
     const code = await cmdStats();
     expect(code).toBe(0);
     const text = output.text();
@@ -1047,23 +1010,9 @@ describe("cmdResetStats", () => {
   });
 
   it("resets stats for all accounts", async () => {
-    const storage = {
-      version: 1,
-      accounts: [
-        {
-          email: "alice@example.com",
-          refreshToken: "refresh-alice",
-          addedAt: 1000,
-          lastUsed: 5000,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-          stats: { requests: 100, inputTokens: 50000, outputTokens: 20000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 },
-        },
-      ],
-      activeIndex: 0,
-    };
+    const storage = makeStorage();
+    storage.accounts = [storage.accounts[0]];
+    storage.accounts[0].stats = { requests: 100, inputTokens: 50000, outputTokens: 20000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 };
     loadAccounts.mockResolvedValue(storage);
 
     const code = await cmdResetStats("all");
@@ -1077,23 +1026,9 @@ describe("cmdResetStats", () => {
   });
 
   it("resets stats for a single account", async () => {
-    const storage = {
-      version: 1,
-      accounts: [
-        {
-          email: "alice@example.com",
-          refreshToken: "refresh-alice",
-          addedAt: 1000,
-          lastUsed: 5000,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-          stats: { requests: 100, inputTokens: 50000, outputTokens: 20000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 },
-        },
-      ],
-      activeIndex: 0,
-    };
+    const storage = makeStorage();
+    storage.accounts = [storage.accounts[0]];
+    storage.accounts[0].stats = { requests: 100, inputTokens: 50000, outputTokens: 20000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 };
     loadAccounts.mockResolvedValue(storage);
 
     const code = await cmdResetStats("1");
@@ -1103,34 +1038,18 @@ describe("cmdResetStats", () => {
   });
 
   it("returns 1 for invalid account number", async () => {
-    loadAccounts.mockResolvedValue({
-      version: 1,
-      accounts: [{ refreshToken: "tok1", email: "a@b.com", addedAt: 1000, lastUsed: 0, enabled: true, rateLimitResetTimes: {}, consecutiveFailures: 0, lastFailureTime: null }],
-      activeIndex: 0,
-    });
+    const storage = makeStorage();
+    storage.accounts = [storage.accounts[0]];
+    loadAccounts.mockResolvedValue(storage);
 
     const code = await cmdResetStats("99");
     expect(code).toBe(1);
   });
 
   it("resets all accounts when no argument given", async () => {
-    const storage = {
-      version: 1,
-      accounts: [
-        {
-          email: "alice@example.com",
-          refreshToken: "refresh-alice",
-          addedAt: 1000,
-          lastUsed: 5000,
-          enabled: true,
-          rateLimitResetTimes: {},
-          consecutiveFailures: 0,
-          lastFailureTime: null,
-          stats: { requests: 50, inputTokens: 10000, outputTokens: 5000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 },
-        },
-      ],
-      activeIndex: 0,
-    };
+    const storage = makeStorage();
+    storage.accounts = [storage.accounts[0]];
+    storage.accounts[0].stats = { requests: 50, inputTokens: 10000, outputTokens: 5000, cacheReadTokens: 0, cacheWriteTokens: 0, lastReset: 1000 };
     loadAccounts.mockResolvedValue(storage);
 
     const code = await cmdResetStats();
