@@ -21,16 +21,35 @@ npm run test:watch     # Watch mode
 
 Tests use [vitest](https://vitest.dev/). All modules are tested in isolation with mocked dependencies.
 
+### Linting and Formatting
+
+```bash
+npm run lint           # Check for lint errors
+npm run lint:fix       # Fix auto-fixable lint errors
+npm run format         # Format all files with Prettier
+npm run format:check   # Check formatting without writing
+```
+
+Git hooks enforce quality automatically:
+
+- **Pre-commit:** `lint-staged` runs Prettier and ESLint on staged `.mjs` files, Prettier on `.json`/`.md` files
+- **Pre-push:** full test suite + Prettier format check
+
 ## Project Structure
 
 ```
 opencode-anthropic-auth/
-  index.mjs              Plugin entry point (OAuth flow, fetch interceptor, retry loop)
-  index.test.mjs         Plugin integration tests
-  cli.mjs                Standalone CLI (13 subcommands, live usage quotas)
-  cli.test.mjs           CLI command tests
-  package.json           Dependencies: @openauthjs/openauth (prod), esbuild + vitest (dev)
+  index.mjs              Plugin entry point (OAuth flow, fetch interceptor, retry loop, slash commands)
+  index.test.mjs         Plugin integration tests (lifecycle, fetch, transforms, slash commands)
+  cli.mjs                Standalone CLI (17 subcommands, auth flows, live usage quotas)
+  cli.test.mjs           CLI command tests (auth + account management + IO capture)
+  package.json           Dependencies: @openauthjs/openauth (prod), esbuild + vitest + eslint + prettier (dev)
+  eslint.config.mjs      ESLint flat config
+  .prettierrc            Prettier config
+  .prettierignore        Prettier ignore patterns
+  .husky/                Git hooks (pre-commit: lint-staged, pre-push: test + format check)
   lib/
+    oauth.mjs            Shared OAuth helpers (authorize, exchange, revoke) — used by both plugin and CLI
     accounts.mjs         AccountManager class (pool management, selection, persistence)
     accounts.test.mjs    AccountManager tests
     rotation.mjs         HealthScoreTracker, TokenBucketTracker, selectAccount()
@@ -56,6 +75,7 @@ graph TB
     subgraph OpenCode
         OC[OpenCode Runtime] -->|loads plugin| Plugin
         OC -->|calls| Fetch[provider.fetch]
+        OC -->|/anthropic| SlashCmd[Slash Command Handler]
     end
 
     subgraph Plugin["index.mjs (Plugin)"]
@@ -63,9 +83,12 @@ graph TB
         Loader[Auth Loader]
         SysTransform[System Prompt Transform]
         FetchInterceptor[Fetch Interceptor]
+        SlashCmd -->|in-process| CLI[cli.mjs dispatch]
+        SlashCmd -->|login/reauth| OAuthFlow[Slash OAuth Flow]
     end
 
     subgraph Core["lib/ (Core)"]
+        OAuth[OAuth Helpers]
         AM[AccountManager]
         Rotation[Rotation Engine]
         Backoff[Backoff Calculator]
@@ -78,7 +101,9 @@ graph TB
         Disk[(~/.config/opencode/)]
     end
 
-    Auth -->|OAuth flow| Anthropic
+    Auth -->|authorize/exchange| OAuth
+    OAuthFlow -->|authorize/exchange| OAuth
+    CLI -->|account commands| Storage
     Auth -->|add account| AM
     Loader -->|init| AM
     FetchInterceptor -->|select account| AM
@@ -88,11 +113,12 @@ graph TB
     AM -->|persist| Storage
     Storage -->|read/write| Disk
     Config -->|read/write| Disk
+    OAuth -->|token exchange| Anthropic
 ```
 
 ## Plugin Lifecycle
 
-The plugin integrates with OpenCode through three hooks:
+The plugin integrates with OpenCode through five hooks:
 
 ```mermaid
 sequenceDiagram
@@ -352,6 +378,22 @@ OpenCode plugins export an async function that receives a `{ client }` object an
 ```javascript
 export async function AnthropicAuthPlugin({ client }) {
   return {
+    // Hook: Register slash commands
+    config: async (input) => {
+      input.command ??= {};
+      input.command["anthropic"] = {
+        template: "/anthropic",
+        description: "Manage Anthropic multi-account auth",
+      };
+    },
+
+    // Hook: Handle slash commands (before default execution)
+    "command.execute.before": async (input) => {
+      if (input.command !== "anthropic") return;
+      // Handle /anthropic subcommands...
+      throw new Error("__HANDLED__"); // Prevents default handler
+    },
+
     // Hook: Transform system prompts
     "experimental.chat.system.transform": (input, output) => { ... },
 
@@ -372,10 +414,23 @@ export async function AnthropicAuthPlugin({ client }) {
 
 | Hook                                 | When It Runs                                | What It Does                                       |
 | ------------------------------------ | ------------------------------------------- | -------------------------------------------------- |
+| `config`                             | Plugin initialization                       | Registers `/anthropic` slash command               |
+| `command.execute.before`             | User runs `/anthropic ...`                  | Routes to slash command handler (in-process CLI)   |
 | `auth.methods[].authorize()`         | User clicks "Connect Provider"              | Starts OAuth flow, returns URL + callback          |
 | `auth.methods[].callback(code)`      | User pastes auth code                       | Exchanges code for tokens, adds account            |
 | `auth.loader(getAuth, provider)`     | After auth is stored, on each state refresh | Initializes AccountManager, returns custom `fetch` |
 | `experimental.chat.system.transform` | Before each API call                        | Prepends "Claude Code" prefix to system prompt     |
+
+### Slash Command Architecture
+
+The `/anthropic` slash command runs CLI commands **deterministically in-process** (no subprocess spawning or PATH resolution). The plugin calls `cliMain(argv, { io })` directly, capturing console output via `AsyncLocalStorage`-based IO routing.
+
+OAuth flows (`login`, `reauth`) are two-step in slash mode:
+
+1. `/anthropic login` or `/anthropic reauth <N>` &mdash; starts OAuth flow, stores PKCE verifier in-memory with 10-minute TTL
+2. `/anthropic login complete <code#state>` or `/anthropic reauth complete <code#state>` &mdash; exchanges code for tokens
+
+Destructive commands (`remove`, `logout`) auto-inject `--force` to avoid readline prompts. Interactive `manage` is blocked with guidance to use granular commands.
 
 ### The `loader` Return Value
 
@@ -418,15 +473,15 @@ A custom provider requires `opencode.json` config with at least one model defini
 
 ### Test Structure
 
-| File                | Tests                                              | Coverage           |
-| ------------------- | -------------------------------------------------- | ------------------ |
-| `backoff.test.mjs`  | Rate limit parsing, backoff calculation            | `lib/backoff.mjs`  |
-| `rotation.test.mjs` | Health scores, token buckets, selection algorithms | `lib/rotation.mjs` |
-| `config.test.mjs`   | Config loading, validation, env overrides          | `lib/config.mjs`   |
-| `storage.test.mjs`  | Account persistence, deduplication, atomic writes  | `lib/storage.mjs`  |
-| `accounts.test.mjs` | AccountManager lifecycle, pool management          | `lib/accounts.mjs` |
-| `index.test.mjs`    | Plugin integration, fetch interceptor, transforms  | `index.mjs`        |
-| `cli.test.mjs`      | CLI commands, output formatting, live usage quotas | `cli.mjs`          |
+| File                | Tests                                                       | Coverage                     |
+| ------------------- | ----------------------------------------------------------- | ---------------------------- |
+| `backoff.test.mjs`  | Rate limit parsing, backoff calculation                     | `lib/backoff.mjs`            |
+| `rotation.test.mjs` | Health scores, token buckets, selection algorithms          | `lib/rotation.mjs`           |
+| `config.test.mjs`   | Config loading, validation, env overrides                   | `lib/config.mjs`             |
+| `storage.test.mjs`  | Account persistence, deduplication, atomic writes           | `lib/storage.mjs`            |
+| `accounts.test.mjs` | AccountManager lifecycle, pool management, empty bootstrap  | `lib/accounts.mjs`           |
+| `index.test.mjs`    | Plugin lifecycle, fetch interceptor, transforms, slash cmds | `index.mjs`, `lib/oauth.mjs` |
+| `cli.test.mjs`      | CLI auth + account commands, IO capture, live usage quotas  | `cli.mjs`                    |
 
 ### Writing Tests
 
@@ -455,11 +510,16 @@ npx vitest run --reporter=verbose  # Verbose output
 
 ## Dependencies
 
-| Package                | Type       | Purpose                                      |
-| ---------------------- | ---------- | -------------------------------------------- |
-| `@openauthjs/openauth` | Production | PKCE code generation for OAuth flow          |
-| `@opencode-ai/plugin`  | Dev        | Plugin API type definitions (used via JSDoc) |
-| `esbuild`              | Dev        | Bundles plugin + CLI into single files       |
-| `vitest`               | Dev        | Test runner                                  |
+| Package                | Type       | Purpose                                                   |
+| ---------------------- | ---------- | --------------------------------------------------------- |
+| `@openauthjs/openauth` | Production | PKCE code generation for OAuth flow                       |
+| `@opencode-ai/plugin`  | Dev        | Plugin API type definitions (used via JSDoc)              |
+| `esbuild`              | Dev        | Bundles plugin + CLI into single files                    |
+| `vitest`               | Dev        | Test runner                                               |
+| `eslint`               | Dev        | Linter (flat config)                                      |
+| `@eslint/js`           | Dev        | ESLint recommended rules                                  |
+| `prettier`             | Dev        | Code formatter                                            |
+| `husky`                | Dev        | Git hooks (pre-commit: lint-staged, pre-push: test + fmt) |
+| `lint-staged`          | Dev        | Runs prettier + eslint on staged files                    |
 
 The plugin has **one production dependency** (`@openauthjs/openauth`), which is bundled into the dist output by esbuild. The bundled files have zero external dependencies beyond Node.js built-ins.

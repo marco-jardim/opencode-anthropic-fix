@@ -84,9 +84,15 @@ export PATH="$HOME/.local/bin:$PATH"
 3. Select **"Claude Pro/Max (multi-account)"**
 4. Open the URL in your browser, authorize, and paste the code back
 
+You can also add accounts directly from the CLI without opening OpenCode:
+
+```bash
+opencode-anthropic-auth login
+```
+
 ### Additional Accounts
 
-Run the auth flow again. The plugin detects existing accounts and shows a menu:
+Run the auth flow again (via CLI `login` or OpenCode's Connect Provider). The plugin detects existing accounts and shows a menu:
 
 ```
 2 account(s) configured:
@@ -113,6 +119,11 @@ opencode-anthropic-auth [command] [args]
 
 | Command                | Description                                                   |
 | ---------------------- | ------------------------------------------------------------- |
+| `login`                | Add a new account via browser OAuth flow                      |
+| `logout <N>`           | Revoke tokens and remove account N                            |
+| `logout --all`         | Revoke all tokens and clear all accounts                      |
+| `reauth <N>`           | Re-authenticate account N with fresh OAuth tokens             |
+| `refresh <N>`          | Attempt token refresh (no browser needed)                     |
 | `list`                 | Show all accounts with status and live usage quotas (default) |
 | `status`               | Compact one-liner for scripts/prompts                         |
 | `switch <N>`           | Set account N as active                                       |
@@ -130,6 +141,9 @@ opencode-anthropic-auth [command] [args]
 ### Examples
 
 ```bash
+# Add a new account via browser OAuth
+opencode-anthropic-auth login
+
 # See account status (includes live usage quotas)
 opencode-anthropic-auth list
 
@@ -153,6 +167,18 @@ opencode-anthropic-auth list
 # Switch active account
 opencode-anthropic-auth switch 2
 
+# Re-authenticate a broken account (opens browser)
+opencode-anthropic-auth reauth 1
+
+# Quick token refresh without browser
+opencode-anthropic-auth refresh 1
+
+# Revoke tokens and remove an account
+opencode-anthropic-auth logout 2
+
+# Revoke all tokens and clear all accounts
+opencode-anthropic-auth logout --all
+
 # View token usage per account
 opencode-anthropic-auth stats
 
@@ -169,13 +195,14 @@ opencode-anthropic-auth manage
 
 ### Flags
 
-| Flag         | Description                              |
-| ------------ | ---------------------------------------- |
-| `--force`    | Skip confirmation prompts (for `remove`) |
-| `--no-color` | Disable colored output                   |
-| `--help`     | Show help message                        |
+| Flag         | Description                                        |
+| ------------ | -------------------------------------------------- |
+| `--force`    | Skip confirmation prompts (for `remove`, `logout`) |
+| `--all`      | Target all accounts (for `logout`)                 |
+| `--no-color` | Disable colored output                             |
+| `--help`     | Show help message                                  |
 
-Most commands have short aliases: `ls`, `st`, `sw`, `en`, `dis`, `rm`, `strat`, `cfg`, `mg`.
+Most commands have short aliases: `ln`, `lo`, `ra`, `rf`, `ls`, `st`, `sw`, `en`, `dis`, `rm`, `strat`, `cfg`, `mg`.
 
 ## Slash Commands in OpenCode
 
@@ -188,6 +215,8 @@ The plugin also registers a built-in `/anthropic` slash command so you can manag
 /anthropic usage          # full account list + quota windows
 /anthropic switch 2
 /anthropic refresh 1
+/anthropic logout 2       # revoke tokens and remove account 2
+/anthropic logout --all   # revoke all tokens and clear all accounts
 /anthropic strategy hybrid
 /anthropic stats
 /anthropic config
@@ -326,7 +355,17 @@ Make sure the plugin is installed in `~/.config/opencode/plugin/`. Restart OpenC
 
 ### "Auth flow completes but requests fail"
 
-Your OAuth token may have expired. Re-run the auth flow: `Ctrl+K` &rarr; Connect Provider &rarr; Anthropic.
+Your OAuth token may have expired. Try a quick refresh first, or re-authenticate with fresh browser login:
+
+```bash
+# Quick token refresh (no browser needed)
+opencode-anthropic-auth refresh 1
+
+# Full re-authentication (opens browser)
+opencode-anthropic-auth reauth 1
+```
+
+Or re-run the auth flow from OpenCode: `Ctrl+K` &rarr; Connect Provider &rarr; Anthropic.
 
 ### "Rate limited on all accounts"
 
