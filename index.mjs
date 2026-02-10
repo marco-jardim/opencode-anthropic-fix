@@ -1,71 +1,11 @@
-import { generatePKCE } from "@openauthjs/openauth/pkce";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { AccountManager } from "./lib/accounts.mjs";
+import { main as cliMain } from "./cli.mjs";
+import { authorize, exchange } from "./lib/oauth.mjs";
 import { loadConfig, CLIENT_ID } from "./lib/config.mjs";
-import { loadAccounts, clearAccounts } from "./lib/storage.mjs";
+import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { isAccountSpecificError, parseRateLimitReason, parseRetryAfterHeader } from "./lib/backoff.mjs";
-
-// CLIENT_ID imported from lib/config.mjs
-
-// ---------------------------------------------------------------------------
-// OAuth helpers (unchanged from original)
-// ---------------------------------------------------------------------------
-
-/**
- * @param {"max" | "console"} mode
- */
-async function authorize(mode) {
-  const pkce = await generatePKCE();
-
-  const url = new URL(`https://${mode === "console" ? "console.anthropic.com" : "claude.ai"}/oauth/authorize`);
-  url.searchParams.set("code", "true");
-  url.searchParams.set("client_id", CLIENT_ID);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("redirect_uri", "https://console.anthropic.com/oauth/code/callback");
-  url.searchParams.set("scope", "org:create_api_key user:profile user:inference");
-  url.searchParams.set("code_challenge", pkce.challenge);
-  url.searchParams.set("code_challenge_method", "S256");
-  url.searchParams.set("state", pkce.verifier);
-  return {
-    url: url.toString(),
-    verifier: pkce.verifier,
-  };
-}
-
-/**
- * @param {string} code
- * @param {string} verifier
- */
-async function exchange(code, verifier) {
-  const splits = code.split("#");
-  const result = await fetch("https://console.anthropic.com/v1/oauth/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      code: splits[0],
-      state: splits[1],
-      grant_type: "authorization_code",
-      client_id: CLIENT_ID,
-      redirect_uri: "https://console.anthropic.com/oauth/code/callback",
-      code_verifier: verifier,
-    }),
-  });
-  if (!result.ok)
-    return {
-      type: "failed",
-    };
-  const json = await result.json();
-  return {
-    type: "success",
-    refresh: json.refresh_token,
-    access: json.access_token,
-    expires: Date.now() + json.expires_in * 1000,
-    email: json.account?.email_address || undefined,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Account management CLI prompts
@@ -594,6 +534,40 @@ async function refreshAccountToken(account, client) {
 // Plugin entry point
 // ---------------------------------------------------------------------------
 
+const ANTHROPIC_COMMAND_HANDLED = "__ANTHROPIC_COMMAND_HANDLED__";
+const PENDING_OAUTH_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Remove ANSI color/control codes from output text.
+ * @param {string} value
+ * @returns {string}
+ */
+function stripAnsi(value) {
+  return value.replace(/\x1b\[[0-9;]*m/g, ""); // eslint-disable-line no-control-regex
+}
+
+/**
+ * Parse command arguments with minimal quote support.
+ *
+ * Examples:
+ *   a b "c d"  -> ["a", "b", "c d"]
+ *   a 'c d'     -> ["a", "c d"]
+ *
+ * @param {string} raw
+ * @returns {string[]}
+ */
+function parseCommandArgs(raw) {
+  if (!raw || !raw.trim()) return [];
+  const parts = [];
+  const re = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  let match;
+  while ((match = re.exec(raw)) !== null) {
+    const token = match[1] ?? match[2] ?? match[3] ?? "";
+    parts.push(token.replace(/\\(["'\\])/g, "$1"));
+  }
+  return parts;
+}
+
 /**
  * @type {import('@opencode-ai/plugin').Plugin}
  */
@@ -610,6 +584,347 @@ export async function AnthropicAuthPlugin({ client }) {
 
   /** @type {Map<string, Promise<string>>} */
   const refreshInFlight = new Map();
+
+  /**
+   * Pending slash-command OAuth flows keyed by session ID.
+   * @type {Map<string, { mode: "login" | "reauth", verifier: string, targetIndex?: number, createdAt: number }>}
+   */
+  const pendingSlashOAuth = new Map();
+
+  /**
+   * Send an informational message into the current session.
+   * @param {string} sessionID
+   * @param {string} text
+   */
+  async function sendCommandMessage(sessionID, text) {
+    await client.session?.prompt({
+      path: { id: sessionID },
+      body: {
+        noReply: true,
+        parts: [{ type: "text", text, ignored: true }],
+      },
+    });
+  }
+
+  /**
+   * Keep in-memory AccountManager in sync with disk mutations made via slash commands.
+   */
+  async function reloadAccountManagerFromDisk() {
+    if (!accountManager) return;
+    accountManager = await AccountManager.load(config, null);
+  }
+
+  /**
+   * Persist OAuth credentials into OpenCode auth storage for immediate compatibility.
+   * @param {string} refresh
+   * @param {string} access
+   * @param {number} expires
+   */
+  async function persistOpenCodeAuth(refresh, access, expires) {
+    await client.auth.set({
+      path: { id: "anthropic" },
+      body: { type: "oauth", refresh, access, expires },
+    });
+  }
+
+  /**
+   * Remove expired pending OAuth flows.
+   */
+  function pruneExpiredPendingOAuth() {
+    const now = Date.now();
+    for (const [sessionID, pending] of pendingSlashOAuth.entries()) {
+      if (now - pending.createdAt > PENDING_OAUTH_TTL_MS) {
+        pendingSlashOAuth.delete(sessionID);
+      }
+    }
+  }
+
+  /**
+   * Execute CLI main(argv) in-process and capture console output.
+   * @param {string[]} argv
+   * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
+   */
+  async function runCliCommand(argv) {
+    const logs = [];
+    const errors = [];
+
+    /** @type {number} */
+    let code = 1;
+    try {
+      code = await cliMain(argv, {
+        io: {
+          log: (...args) => logs.push(args.join(" ")),
+          error: (...args) => errors.push(args.join(" ")),
+        },
+      });
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+
+    return {
+      code,
+      stdout: stripAnsi(logs.join("\n")).trim(),
+      stderr: stripAnsi(errors.join("\n")).trim(),
+    };
+  }
+
+  /**
+   * Start a slash-command OAuth flow and store verifier in-memory.
+   * @param {string} sessionID
+   * @param {"login" | "reauth"} mode
+   * @param {number} [targetIndex]
+   */
+  async function startSlashOAuth(sessionID, mode, targetIndex) {
+    pruneExpiredPendingOAuth();
+    const { url, verifier } = await authorize("max");
+    pendingSlashOAuth.set(sessionID, {
+      mode,
+      verifier,
+      targetIndex,
+      createdAt: Date.now(),
+    });
+
+    const action = mode === "login" ? "login" : `reauth ${targetIndex + 1}`;
+    const followup =
+      mode === "login" ? "/anthropic login complete <code#state>" : "/anthropic reauth complete <code#state>";
+
+    await sendCommandMessage(
+      sessionID,
+      [
+        "▣ Anthropic OAuth",
+        "",
+        `Started ${action} flow.`,
+        "Open this URL in your browser:",
+        url,
+        "",
+        `Then run: ${followup}`,
+        "(Paste the full authorization code, including #state)",
+      ].join("\n"),
+    );
+  }
+
+  /**
+   * Complete a pending slash-command OAuth flow.
+   * @param {string} sessionID
+   * @param {string} code
+   * @returns {Promise<{ ok: boolean, message: string }>}
+   */
+  async function completeSlashOAuth(sessionID, code) {
+    const pending = pendingSlashOAuth.get(sessionID);
+    if (!pending) {
+      pruneExpiredPendingOAuth();
+      return {
+        ok: false,
+        message: "No pending OAuth flow. Start with /anthropic login or /anthropic reauth <N>.",
+      };
+    }
+
+    if (Date.now() - pending.createdAt > PENDING_OAUTH_TTL_MS) {
+      pendingSlashOAuth.delete(sessionID);
+      return {
+        ok: false,
+        message: "Pending OAuth flow expired. Start again with /anthropic login or /anthropic reauth <N>.",
+      };
+    }
+
+    const credentials = await exchange(code, pending.verifier);
+    if (credentials.type === "failed") {
+      return { ok: false, message: "Token exchange failed. The code may be invalid or expired." };
+    }
+
+    const stored = (await loadAccounts()) || { version: 1, accounts: [], activeIndex: 0 };
+
+    if (pending.mode === "login") {
+      const existingIdx = stored.accounts.findIndex((acc) => acc.refreshToken === credentials.refresh);
+      if (existingIdx >= 0) {
+        const acc = stored.accounts[existingIdx];
+        acc.access = credentials.access;
+        acc.expires = credentials.expires;
+        if (credentials.email) acc.email = credentials.email;
+        acc.enabled = true;
+        acc.consecutiveFailures = 0;
+        acc.lastFailureTime = null;
+        acc.rateLimitResetTimes = {};
+        await saveAccounts(stored);
+        await persistOpenCodeAuth(acc.refreshToken, acc.access, acc.expires);
+        await reloadAccountManagerFromDisk();
+        pendingSlashOAuth.delete(sessionID);
+        const name = acc.email || `Account ${existingIdx + 1}`;
+        return { ok: true, message: `Updated existing account #${existingIdx + 1} (${name}).` };
+      }
+
+      if (stored.accounts.length >= 10) {
+        return { ok: false, message: "Maximum of 10 accounts reached. Remove one first." };
+      }
+
+      const now = Date.now();
+      stored.accounts.push({
+        id: `${now}:${credentials.refresh.slice(0, 12)}`,
+        email: credentials.email,
+        refreshToken: credentials.refresh,
+        access: credentials.access,
+        expires: credentials.expires,
+        addedAt: now,
+        lastUsed: 0,
+        enabled: true,
+        rateLimitResetTimes: {},
+        consecutiveFailures: 0,
+        lastFailureTime: null,
+        stats: createDefaultStats(now),
+      });
+      await saveAccounts(stored);
+      const newAccount = stored.accounts[stored.accounts.length - 1];
+      await persistOpenCodeAuth(newAccount.refreshToken, newAccount.access, newAccount.expires);
+      await reloadAccountManagerFromDisk();
+      pendingSlashOAuth.delete(sessionID);
+      const label = credentials.email || `Account ${stored.accounts.length}`;
+      return { ok: true, message: `Added account #${stored.accounts.length} (${label}).` };
+    }
+
+    // reauth flow
+    const idx = pending.targetIndex ?? -1;
+    if (idx < 0 || idx >= stored.accounts.length) {
+      pendingSlashOAuth.delete(sessionID);
+      return { ok: false, message: "Target account no longer exists. Start reauth again." };
+    }
+
+    const existing = stored.accounts[idx];
+    existing.refreshToken = credentials.refresh;
+    existing.access = credentials.access;
+    existing.expires = credentials.expires;
+    if (credentials.email) existing.email = credentials.email;
+    existing.enabled = true;
+    existing.consecutiveFailures = 0;
+    existing.lastFailureTime = null;
+    existing.rateLimitResetTimes = {};
+
+    await saveAccounts(stored);
+    await persistOpenCodeAuth(existing.refreshToken, existing.access, existing.expires);
+    await reloadAccountManagerFromDisk();
+    pendingSlashOAuth.delete(sessionID);
+    const name = existing.email || `Account ${idx + 1}`;
+    return { ok: true, message: `Re-authenticated account #${idx + 1} (${name}).` };
+  }
+
+  /**
+   * Handle /anthropic slash commands.
+   *
+   * Supported examples:
+   *   /anthropic
+   *   /anthropic usage
+   *   /anthropic switch 2
+   *   /anthropic login
+   *   /anthropic login complete <code#state>
+   *   /anthropic reauth 1
+   *   /anthropic reauth complete <code#state>
+   *
+   * @param {{ command: string, arguments?: string, sessionID: string }} input
+   */
+  async function handleAnthropicSlashCommand(input) {
+    const args = parseCommandArgs(input.arguments || "");
+    const primary = (args[0] || "list").toLowerCase();
+
+    // Friendly alias: /anthropic usage -> list
+    if (primary === "usage") {
+      const result = await runCliCommand(["list"]);
+      const heading = result.code === 0 ? "▣ Anthropic" : "▣ Anthropic (error)";
+      const body = result.stdout || result.stderr || "No output.";
+      await sendCommandMessage(input.sessionID, [heading, "", body].join("\n"));
+      await reloadAccountManagerFromDisk();
+      return;
+    }
+
+    // Two-step login flow for slash commands
+    if (primary === "login") {
+      if ((args[1] || "").toLowerCase() === "complete") {
+        const code = args.slice(2).join(" ").trim();
+        if (!code) {
+          await sendCommandMessage(
+            input.sessionID,
+            "▣ Anthropic OAuth\n\nMissing code. Use: /anthropic login complete <code#state>",
+          );
+          return;
+        }
+        const result = await completeSlashOAuth(input.sessionID, code);
+        const heading = result.ok ? "▣ Anthropic OAuth" : "▣ Anthropic OAuth (error)";
+        await sendCommandMessage(input.sessionID, `${heading}\n\n${result.message}`);
+        return;
+      }
+
+      await startSlashOAuth(input.sessionID, "login");
+      return;
+    }
+
+    // Two-step reauth flow for slash commands
+    if (primary === "reauth") {
+      if ((args[1] || "").toLowerCase() === "complete") {
+        const code = args.slice(2).join(" ").trim();
+        if (!code) {
+          await sendCommandMessage(
+            input.sessionID,
+            "▣ Anthropic OAuth\n\nMissing code. Use: /anthropic reauth complete <code#state>",
+          );
+          return;
+        }
+        const result = await completeSlashOAuth(input.sessionID, code);
+        const heading = result.ok ? "▣ Anthropic OAuth" : "▣ Anthropic OAuth (error)";
+        await sendCommandMessage(input.sessionID, `${heading}\n\n${result.message}`);
+        return;
+      }
+
+      const n = parseInt(args[1], 10);
+      if (Number.isNaN(n) || n < 1) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic OAuth\n\nProvide an account number. Example: /anthropic reauth 1",
+        );
+        return;
+      }
+      const stored = await loadAccounts();
+      if (!stored || stored.accounts.length === 0) {
+        await sendCommandMessage(input.sessionID, "▣ Anthropic OAuth (error)\n\nNo accounts configured.");
+        return;
+      }
+      const idx = n - 1;
+      if (idx >= stored.accounts.length) {
+        await sendCommandMessage(
+          input.sessionID,
+          `▣ Anthropic OAuth (error)\n\nAccount ${n} does not exist. You have ${stored.accounts.length} account(s).`,
+        );
+        return;
+      }
+
+      await startSlashOAuth(input.sessionID, "reauth", idx);
+      return;
+    }
+
+    // Interactive CLI command is not compatible with slash flow.
+    if (primary === "manage" || primary === "mg") {
+      await sendCommandMessage(
+        input.sessionID,
+        "▣ Anthropic\n\n`manage` is interactive-only. Use granular slash commands (switch/enable/disable/remove/reset) or run `opencode-anthropic-auth manage` in a terminal.",
+      );
+      return;
+    }
+
+    // Route remaining commands through the CLI command surface.
+    const cliArgs = [...args];
+    if (cliArgs.length === 0) cliArgs.push("list");
+
+    // Avoid readline prompts in slash mode.
+    if (
+      (primary === "remove" || primary === "rm" || primary === "logout" || primary === "lo") &&
+      !cliArgs.includes("--force")
+    ) {
+      cliArgs.push("--force");
+    }
+
+    const result = await runCliCommand(cliArgs);
+    const heading = result.code === 0 ? "▣ Anthropic" : "▣ Anthropic (error)";
+    const body = result.stdout || result.stderr || "No output.";
+    await sendCommandMessage(input.sessionID, [heading, "", body].join("\n"));
+    await reloadAccountManagerFromDisk();
+  }
 
   /**
    * Show a toast in the TUI. Silently fails if TUI is not running.
@@ -683,6 +998,25 @@ export async function AnthropicAuthPlugin({ client }) {
         output.system.unshift(prefix);
         if (output.system[1]) output.system[1] = prefix + "\n\n" + output.system[1];
       }
+    },
+    config: async (input) => {
+      input.command ??= {};
+      input.command["anthropic"] = {
+        template: "/anthropic",
+        description: "Manage Anthropic multi-account auth (status, usage, switch, login, reauth, logout)",
+      };
+    },
+    "command.execute.before": async (input) => {
+      if (input.command !== "anthropic") return;
+
+      try {
+        await handleAnthropicSlashCommand(input);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await sendCommandMessage(input.sessionID, `▣ Anthropic (error)\n\n${message}`);
+      }
+
+      throw new Error(ANTHROPIC_COMMAND_HANDLED);
     },
     auth: {
       provider: "anthropic",

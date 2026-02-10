@@ -65,6 +65,9 @@ function makeClient() {
     auth: {
       set: vi.fn().mockResolvedValue(undefined),
     },
+    session: {
+      prompt: vi.fn().mockResolvedValue(undefined),
+    },
     tui: {
       showToast: vi.fn().mockResolvedValue(undefined),
     },
@@ -293,6 +296,198 @@ describe("plugin lifecycle", () => {
     const result = await plugin.auth.loader(getAuth, makeProvider());
     expect(result).toEqual({});
     expect(saveAccounts).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slash command hooks (/anthropic)
+// ---------------------------------------------------------------------------
+
+describe("slash commands", () => {
+  let client;
+  let plugin;
+
+  /**
+   * Run /anthropic command hook and return the last session message.
+   * @param {string} args
+   * @returns {Promise<string>}
+   */
+  async function runAnthropic(args) {
+    client.session.prompt.mockClear();
+    await expect(
+      plugin["command.execute.before"]({
+        command: "anthropic",
+        arguments: args,
+        sessionID: "session-1",
+      }),
+    ).rejects.toThrow("__ANTHROPIC_COMMAND_HANDLED__");
+
+    const calls = client.session.prompt.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][0].body.parts[0].text;
+  }
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    loadAccounts.mockResolvedValue(null);
+    saveAccounts.mockResolvedValue(undefined);
+    plugin = await AnthropicAuthPlugin({ client });
+  });
+
+  it("registers /anthropic command in config hook", async () => {
+    const cfg = { command: {} };
+    await plugin.config(cfg);
+    expect(cfg.command.anthropic).toEqual(
+      expect.objectContaining({
+        template: "/anthropic",
+        description: expect.stringContaining("Manage Anthropic"),
+      }),
+    );
+  });
+
+  it("shows list view by default", async () => {
+    const text = await runAnthropic("");
+    expect(text).toContain("▣ Anthropic (error)");
+    expect(text).toContain("No accounts configured");
+  });
+
+  it("routes usage alias to CLI list", async () => {
+    loadAccounts.mockResolvedValue(makeAccountsData([{ refreshToken: "refresh-1", enabled: true }]));
+    const text = await runAnthropic("usage");
+    expect(text).toContain("Anthropic Multi-Account Status");
+  });
+
+  it("routes switch through CLI command surface", async () => {
+    loadAccounts.mockResolvedValue(
+      makeAccountsData([
+        { refreshToken: "refresh-1", enabled: true, email: "a@example.com" },
+        { refreshToken: "refresh-2", enabled: true, email: "b@example.com" },
+      ]),
+    );
+
+    const text = await runAnthropic("switch 2");
+    expect(text).toContain("Switched");
+    expect(saveAccounts).toHaveBeenCalledWith(expect.objectContaining({ activeIndex: 1 }));
+  });
+
+  it("starts and completes login OAuth flow", async () => {
+    let text = await runAnthropic("login");
+    expect(text).toContain("Anthropic OAuth");
+    expect(text).toContain("Started login flow");
+    expect(text).toContain("claude.ai/oauth/authorize");
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: "access-from-login",
+        refresh_token: "refresh-from-login",
+        expires_in: 3600,
+        account: { email_address: "new@example.com" },
+      }),
+    });
+
+    text = await runAnthropic("login complete test-code#test-state");
+    expect(text).toContain("Added account #1");
+    expect(client.auth.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: { id: "anthropic" },
+        body: expect.objectContaining({
+          type: "oauth",
+          refresh: "refresh-from-login",
+          access: "access-from-login",
+        }),
+      }),
+    );
+    expect(saveAccounts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        version: 1,
+        accounts: expect.arrayContaining([
+          expect.objectContaining({
+            refreshToken: "refresh-from-login",
+            access: "access-from-login",
+            email: "new@example.com",
+          }),
+        ]),
+      }),
+    );
+  });
+
+  it("expires pending slash OAuth flow after TTL", async () => {
+    await runAnthropic("login");
+
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 11 * 60 * 1000);
+    try {
+      const text = await runAnthropic("login complete stale-code#state");
+      expect(text).toContain("expired");
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("starts and completes reauth OAuth flow", async () => {
+    const stored = makeAccountsData([
+      {
+        refreshToken: "refresh-1",
+        access: "old-access",
+        expires: Date.now() + 1000,
+        enabled: false,
+        consecutiveFailures: 3,
+        lastFailureTime: Date.now(),
+        rateLimitResetTimes: { anthropic: Date.now() + 60_000 },
+      },
+    ]);
+    loadAccounts.mockResolvedValue(stored);
+
+    let text = await runAnthropic("reauth 1");
+    expect(text).toContain("Started reauth 1 flow");
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: "fresh-access",
+        refresh_token: "fresh-refresh",
+        expires_in: 3600,
+        account: { email_address: "reauth@example.com" },
+      }),
+    });
+
+    text = await runAnthropic("reauth complete another-code#state");
+    expect(text).toContain("Re-authenticated account #1");
+    expect(client.auth.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: { id: "anthropic" },
+        body: expect.objectContaining({
+          type: "oauth",
+          refresh: "fresh-refresh",
+          access: "fresh-access",
+        }),
+      }),
+    );
+
+    const saved = saveAccounts.mock.calls[saveAccounts.mock.calls.length - 1][0];
+    expect(saved.accounts[0]).toEqual(
+      expect.objectContaining({
+        refreshToken: "fresh-refresh",
+        access: "fresh-access",
+        email: "reauth@example.com",
+        enabled: true,
+        consecutiveFailures: 0,
+        lastFailureTime: null,
+        rateLimitResetTimes: {},
+      }),
+    );
+  });
+
+  it("returns without handling non-anthropic commands", async () => {
+    await expect(
+      plugin["command.execute.before"]({
+        command: "usage",
+        arguments: "",
+        sessionID: "session-1",
+      }),
+    ).resolves.toBeUndefined();
+    expect(client.session.prompt).not.toHaveBeenCalled();
   });
 });
 

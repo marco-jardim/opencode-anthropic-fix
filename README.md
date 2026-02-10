@@ -177,6 +177,43 @@ opencode-anthropic-auth manage
 
 Most commands have short aliases: `ls`, `st`, `sw`, `en`, `dis`, `rm`, `strat`, `cfg`, `mg`.
 
+## Slash Commands in OpenCode
+
+The plugin also registers a built-in `/anthropic` slash command so you can manage accounts without leaving OpenCode.
+
+### Common examples
+
+```text
+/anthropic                # list (default)
+/anthropic usage          # full account list + quota windows
+/anthropic switch 2
+/anthropic refresh 1
+/anthropic strategy hybrid
+/anthropic stats
+/anthropic config
+```
+
+### OAuth flows from slash command
+
+Login and reauth are two-step flows in slash mode:
+
+```text
+/anthropic login
+# opens URL instructions in chat
+/anthropic login complete <code#state>
+
+/anthropic reauth 1
+# opens URL instructions in chat
+/anthropic reauth complete <code#state>
+```
+
+Pending slash OAuth flows expire after 10 minutes. If completion fails with an expiration message, run the start command again.
+
+### Notes
+
+- Destructive commands (`remove`, `logout`) run with non-interactive `--force` behavior in slash mode.
+- Interactive `manage` is terminal-only; use granular slash commands instead.
+
 ## Account Selection Strategies
 
 Control how the plugin picks which account to use for each request.

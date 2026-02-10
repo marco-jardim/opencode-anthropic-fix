@@ -6,7 +6,14 @@
  * Usage:
  *   opencode-anthropic-auth [command] [args]
  *
- * Commands:
+ * Auth Commands:
+ *   login             Add a new account via browser OAuth flow
+ *   logout <N>        Revoke tokens and remove account N
+ *   logout --all      Revoke all tokens and clear all accounts
+ *   reauth <N>        Re-authenticate account N with fresh OAuth tokens
+ *   refresh <N>       Attempt token refresh (no browser needed)
+ *
+ * Account Commands:
  *   list              Show all accounts with status (default)
  *   status            Compact one-liner for scripts/prompts
  *   switch <N>        Set account N as active
@@ -24,7 +31,10 @@
 
 import { loadAccounts, saveAccounts, getStoragePath, createDefaultStats } from "./lib/storage.mjs";
 import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES, CLIENT_ID } from "./lib/config.mjs";
+import { authorize, exchange, revoke } from "./lib/oauth.mjs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { pathToFileURL } from "node:url";
+import { exec } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 
@@ -271,6 +281,387 @@ export function renderUsageLines(usage) {
     lines.push(`${USAGE_INDENT}${pad(label, USAGE_LABEL_WIDTH)} ${bar} ${pctStr}${reset ? ` ${reset}` : ""}`);
   }
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Browser opener
+// ---------------------------------------------------------------------------
+
+/**
+ * Open a URL in the user's default browser.
+ * Best-effort: uses platform-specific command, silently fails on error.
+ * @param {string} url
+ */
+function openBrowser(url) {
+  if (process.platform === "win32") {
+    exec(`cmd /c start "" ${JSON.stringify(url)}`);
+    return;
+  }
+
+  const cmd = process.platform === "darwin" ? "open" : "xdg-open";
+  exec(`${cmd} ${JSON.stringify(url)}`);
+}
+
+/**
+ * Run the OAuth PKCE login flow from the CLI.
+ * Opens browser, prompts for code, exchanges for tokens.
+ * @returns {Promise<{refresh: string, access: string, expires: number, email?: string} | null>}
+ */
+async function runOAuthFlow() {
+  const { url, verifier } = await authorize("max");
+
+  console.log("");
+  console.log(c.bold("Opening browser for Anthropic OAuth login..."));
+  console.log("");
+  console.log(c.dim("If your browser didn't open, visit this URL:"));
+  console.log(c.cyan(url));
+  console.log("");
+
+  openBrowser(url);
+
+  const rl = createInterface({ input: stdin, output: stdout });
+  try {
+    const code = await rl.question("Paste the authorization code here: ");
+    const trimmed = code.trim();
+    if (!trimmed) {
+      console.error(c.red("Error: no authorization code provided."));
+      return null;
+    }
+
+    const credentials = await exchange(trimmed, verifier);
+    if (credentials.type === "failed") {
+      console.error(c.red("Error: token exchange failed. The code may be invalid or expired."));
+      return null;
+    }
+
+    return {
+      refresh: credentials.refresh,
+      access: credentials.access,
+      expires: credentials.expires,
+      email: credentials.email,
+    };
+  } finally {
+    rl.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auth commands (login, logout, reauth, refresh)
+// ---------------------------------------------------------------------------
+
+/**
+ * Login: add a new account via browser OAuth flow.
+ * @returns {Promise<number>} exit code
+ */
+export async function cmdLogin() {
+  if (!process.stdin.isTTY) {
+    console.error(c.red("Error: 'login' requires an interactive terminal."));
+    return 1;
+  }
+
+  const stored = await loadAccounts();
+
+  const credentials = await runOAuthFlow();
+  if (!credentials) return 1;
+
+  // Load or create storage
+  const storage = stored || { version: 1, accounts: [], activeIndex: 0 };
+
+  // Check for duplicate refresh token
+  const existingIdx = storage.accounts.findIndex((acc) => acc.refreshToken === credentials.refresh);
+  if (existingIdx >= 0) {
+    // Update existing account
+    storage.accounts[existingIdx].access = credentials.access;
+    storage.accounts[existingIdx].expires = credentials.expires;
+    if (credentials.email) storage.accounts[existingIdx].email = credentials.email;
+    storage.accounts[existingIdx].enabled = true;
+    await saveAccounts(storage);
+
+    const label = credentials.email || `Account ${existingIdx + 1}`;
+    console.log(c.green(`Updated existing account #${existingIdx + 1} (${label}).`));
+    return 0;
+  }
+
+  if (storage.accounts.length >= 10) {
+    console.error(c.red("Error: maximum of 10 accounts reached. Remove one first."));
+    return 1;
+  }
+
+  // Add new account
+  const now = Date.now();
+  storage.accounts.push({
+    id: `${now}:${credentials.refresh.slice(0, 12)}`,
+    email: credentials.email,
+    refreshToken: credentials.refresh,
+    access: credentials.access,
+    expires: credentials.expires,
+    addedAt: now,
+    lastUsed: 0,
+    enabled: true,
+    rateLimitResetTimes: {},
+    consecutiveFailures: 0,
+    lastFailureTime: null,
+    stats: createDefaultStats(now),
+  });
+
+  // If this is the first account, it's already active at index 0
+  await saveAccounts(storage);
+
+  const label = credentials.email || `Account ${storage.accounts.length}`;
+  console.log(c.green(`Added account #${storage.accounts.length} (${label}).`));
+  console.log(c.dim(`${storage.accounts.length} account(s) total.`));
+  return 0;
+}
+
+/**
+ * Logout: revoke tokens and remove an account, or all accounts.
+ * @param {string} arg - Account number
+ * @param {object} [opts]
+ * @param {boolean} [opts.force] Skip confirmation prompt
+ * @param {boolean} [opts.all] Logout all accounts
+ * @returns {Promise<number>} exit code
+ */
+export async function cmdLogout(arg, opts = {}) {
+  if (opts.all) {
+    return cmdLogoutAll(opts);
+  }
+
+  const n = parseInt(arg, 10);
+  if (isNaN(n) || n < 1) {
+    console.error(c.red("Error: provide a valid account number (e.g., 'logout 2') or --all."));
+    return 1;
+  }
+
+  const stored = await loadAccounts();
+  if (!stored || stored.accounts.length === 0) {
+    console.error(c.red("Error: no accounts configured."));
+    return 1;
+  }
+
+  const idx = n - 1;
+  if (idx >= stored.accounts.length) {
+    console.error(c.red(`Error: account ${n} does not exist. You have ${stored.accounts.length} account(s).`));
+    return 1;
+  }
+
+  const label = stored.accounts[idx].email || `Account ${n}`;
+
+  // Confirm unless --force
+  if (!opts.force) {
+    if (!process.stdin.isTTY) {
+      console.error(c.red("Error: use --force to logout in non-interactive mode."));
+      return 1;
+    }
+    const rl = createInterface({ input: stdin, output: stdout });
+    try {
+      const answer = await rl.question(
+        `Logout account #${n} (${label})? This will revoke tokens and remove the account. [y/N]: `,
+      );
+      if (answer.trim().toLowerCase() !== "y") {
+        console.log(c.dim("Cancelled."));
+        return 0;
+      }
+    } finally {
+      rl.close();
+    }
+  }
+
+  // Attempt token revocation (best-effort)
+  const revoked = await revoke(stored.accounts[idx].refreshToken);
+  if (revoked) {
+    console.log(c.dim("Token revoked server-side."));
+  } else {
+    console.log(c.dim("Token revocation skipped (server may not support it)."));
+  }
+
+  // Remove the account
+  stored.accounts.splice(idx, 1);
+
+  // Adjust active index
+  if (stored.accounts.length === 0) {
+    stored.activeIndex = 0;
+  } else if (stored.activeIndex >= stored.accounts.length) {
+    stored.activeIndex = stored.accounts.length - 1;
+  } else if (stored.activeIndex > idx) {
+    stored.activeIndex--;
+  }
+
+  await saveAccounts(stored);
+  console.log(c.green(`Logged out account #${n} (${label}).`));
+
+  if (stored.accounts.length > 0) {
+    console.log(c.dim(`${stored.accounts.length} account(s) remaining.`));
+  } else {
+    console.log(c.dim("No accounts remaining. Run 'login' to add one."));
+  }
+
+  return 0;
+}
+
+/**
+ * Logout all accounts: revoke all tokens and clear storage.
+ * @param {object} [opts]
+ * @param {boolean} [opts.force] Skip confirmation prompt
+ * @returns {Promise<number>} exit code
+ */
+async function cmdLogoutAll(opts = {}) {
+  const stored = await loadAccounts();
+  if (!stored || stored.accounts.length === 0) {
+    console.log(c.dim("No accounts to logout."));
+    return 0;
+  }
+
+  const count = stored.accounts.length;
+
+  // Confirm unless --force
+  if (!opts.force) {
+    if (!process.stdin.isTTY) {
+      console.error(c.red("Error: use --force to logout all in non-interactive mode."));
+      return 1;
+    }
+    const rl = createInterface({ input: stdin, output: stdout });
+    try {
+      const answer = await rl.question(
+        `Logout all ${count} account(s)? This will revoke tokens and remove all accounts. [y/N]: `,
+      );
+      if (answer.trim().toLowerCase() !== "y") {
+        console.log(c.dim("Cancelled."));
+        return 0;
+      }
+    } finally {
+      rl.close();
+    }
+  }
+
+  // Attempt token revocation for each account (best-effort, in parallel)
+  const results = await Promise.allSettled(stored.accounts.map((acc) => revoke(acc.refreshToken)));
+  const revokedCount = results.filter((r) => r.status === "fulfilled" && r.value === true).length;
+
+  if (revokedCount > 0) {
+    console.log(c.dim(`Revoked ${revokedCount} of ${count} token(s) server-side.`));
+  }
+
+  // Write explicit empty state so running plugin instances reconcile immediately.
+  await saveAccounts({ version: 1, accounts: [], activeIndex: 0 });
+  console.log(c.green(`Logged out all ${count} account(s).`));
+
+  return 0;
+}
+
+/**
+ * Reauth: re-authenticate an existing account with fresh OAuth tokens.
+ * @param {string} arg - Account number
+ * @returns {Promise<number>} exit code
+ */
+export async function cmdReauth(arg) {
+  const n = parseInt(arg, 10);
+  if (isNaN(n) || n < 1) {
+    console.error(c.red("Error: provide a valid account number (e.g., 'reauth 1')"));
+    return 1;
+  }
+
+  if (!process.stdin.isTTY) {
+    console.error(c.red("Error: 'reauth' requires an interactive terminal."));
+    return 1;
+  }
+
+  const stored = await loadAccounts();
+  if (!stored || stored.accounts.length === 0) {
+    console.error(c.red("Error: no accounts configured."));
+    return 1;
+  }
+
+  const idx = n - 1;
+  if (idx >= stored.accounts.length) {
+    console.error(c.red(`Error: account ${n} does not exist. You have ${stored.accounts.length} account(s).`));
+    return 1;
+  }
+
+  const existing = stored.accounts[idx];
+  const wasDisabled = !existing.enabled;
+  const oldLabel = existing.email || `Account ${n}`;
+  console.log(c.bold(`Re-authenticating account #${n} (${oldLabel})...`));
+
+  const credentials = await runOAuthFlow();
+  if (!credentials) return 1;
+
+  // Update the account at the target index with fresh tokens
+  existing.refreshToken = credentials.refresh;
+  existing.access = credentials.access;
+  existing.expires = credentials.expires;
+  if (credentials.email) existing.email = credentials.email;
+
+  // Re-enable and reset failure tracking
+  existing.enabled = true;
+  existing.consecutiveFailures = 0;
+  existing.lastFailureTime = null;
+  existing.rateLimitResetTimes = {};
+
+  await saveAccounts(stored);
+
+  const newLabel = credentials.email || `Account ${n}`;
+  console.log(c.green(`Re-authenticated account #${n} (${newLabel}).`));
+  if (wasDisabled) {
+    console.log(c.dim("Account has been re-enabled."));
+  }
+
+  return 0;
+}
+
+/**
+ * Refresh: attempt a token refresh for an account without browser interaction.
+ * @param {string} arg - Account number
+ * @returns {Promise<number>} exit code
+ */
+export async function cmdRefresh(arg) {
+  const n = parseInt(arg, 10);
+  if (isNaN(n) || n < 1) {
+    console.error(c.red("Error: provide a valid account number (e.g., 'refresh 1')"));
+    return 1;
+  }
+
+  const stored = await loadAccounts();
+  if (!stored || stored.accounts.length === 0) {
+    console.error(c.red("Error: no accounts configured."));
+    return 1;
+  }
+
+  const idx = n - 1;
+  if (idx >= stored.accounts.length) {
+    console.error(c.red(`Error: account ${n} does not exist. You have ${stored.accounts.length} account(s).`));
+    return 1;
+  }
+
+  const account = stored.accounts[idx];
+  const label = account.email || `Account ${n}`;
+
+  console.log(c.dim(`Refreshing token for account #${n} (${label})...`));
+
+  const token = await refreshAccessToken(account);
+  if (!token) {
+    console.error(c.red(`Error: token refresh failed for account #${n}.`));
+    console.error(c.dim("The refresh token may be invalid or expired."));
+    console.error(c.dim(`Try: opencode-anthropic-auth reauth ${n}`));
+    return 1;
+  }
+
+  // Re-enable if disabled and reset failure tracking
+  const wasDisabled = !account.enabled;
+  account.enabled = true;
+  account.consecutiveFailures = 0;
+  account.lastFailureTime = null;
+  account.rateLimitResetTimes = {};
+
+  await saveAccounts(stored);
+
+  const expiresIn = account.expires ? formatDuration(account.expires - Date.now()) : "unknown";
+  console.log(c.green(`Token refreshed for account #${n} (${label}).`));
+  console.log(c.dim(`New token expires in ${expiresIn}.`));
+  if (wasDisabled) {
+    console.log(c.dim("Account has been re-enabled."));
+  }
+
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,7 +1563,14 @@ ${c.bold("Anthropic Multi-Account Auth CLI")}
 ${c.dim("Usage:")}
   ${bin} [command] [args]
 
-${c.dim("Commands:")}
+${c.dim("Auth Commands:")}
+  ${pad(c.cyan("login"), 22)}Add a new account via browser OAuth flow
+  ${pad(c.cyan("logout") + " <N>", 22)}Revoke tokens and remove account N
+  ${pad(c.cyan("logout") + " --all", 22)}Revoke all tokens and clear all accounts
+  ${pad(c.cyan("reauth") + " <N>", 22)}Re-authenticate account N with fresh tokens
+  ${pad(c.cyan("refresh") + " <N>", 22)}Attempt token refresh (no browser needed)
+
+${c.dim("Account Commands:")}
   ${pad(c.cyan("list"), 22)}Show all accounts with status ${c.dim("(default)")}
   ${pad(c.cyan("status"), 22)}Compact one-liner for scripts/prompts
   ${pad(c.cyan("switch") + " <N>", 22)}Set account N as active
@@ -1189,17 +1587,21 @@ ${c.dim("Commands:")}
 
 ${c.dim("Options:")}
   --force           Skip confirmation prompts
+  --all             Target all accounts (for logout)
   --no-color        Disable colored output
 
 ${c.dim("Examples:")}
+  ${bin} login             ${c.dim("# Add a new account via browser")}
+  ${bin} logout 2          ${c.dim("# Revoke tokens & remove account 2")}
+  ${bin} logout --all      ${c.dim("# Logout all accounts")}
+  ${bin} reauth 1          ${c.dim("# Re-authenticate account 1")}
+  ${bin} refresh 1         ${c.dim("# Quick token refresh for account 1")}
   ${bin} list              ${c.dim("# Show all accounts")}
   ${bin} switch 2          ${c.dim("# Make account 2 active")}
   ${bin} disable 3         ${c.dim("# Temporarily disable account 3")}
   ${bin} reset all         ${c.dim("# Clear all rate-limit tracking")}
-  ${bin} strategy           ${c.dim("# Show current strategy")}
-  ${bin} strategy sticky    ${c.dim("# Switch to sticky mode")}
+  ${bin} strategy sticky   ${c.dim("# Switch to sticky mode")}
   ${bin} stats             ${c.dim("# Show token usage per account")}
-  ${bin} reset-stats all   ${c.dim("# Zero all usage counters")}
   ${bin} status            ${c.dim("# One-liner for shell prompt")}
 
 ${c.dim("Files:")}
@@ -1213,12 +1615,57 @@ ${c.dim("Files:")}
 // Main entry point
 // ---------------------------------------------------------------------------
 
+/** @type {AsyncLocalStorage<{ log?: (...args: any[]) => void, error?: (...args: any[]) => void }>} */
+const ioContext = new AsyncLocalStorage();
+
+const nativeConsoleLog = console.log.bind(console);
+const nativeConsoleError = console.error.bind(console);
+let consoleRouterUsers = 0;
+
+function installConsoleRouter() {
+  if (consoleRouterUsers === 0) {
+    console.log = (...args) => {
+      const io = ioContext.getStore();
+      if (io?.log) return io.log(...args);
+      return nativeConsoleLog(...args);
+    };
+    console.error = (...args) => {
+      const io = ioContext.getStore();
+      if (io?.error) return io.error(...args);
+      return nativeConsoleError(...args);
+    };
+  }
+  consoleRouterUsers++;
+}
+
+function uninstallConsoleRouter() {
+  consoleRouterUsers = Math.max(0, consoleRouterUsers - 1);
+  if (consoleRouterUsers === 0) {
+    console.log = nativeConsoleLog;
+    console.error = nativeConsoleError;
+  }
+}
+
+/**
+ * Run with async-local IO capture without persistent global side effects.
+ * @param {{ log?: (...args: any[]) => void, error?: (...args: any[]) => void }} io
+ * @param {() => Promise<number>} fn
+ */
+async function runWithIoContext(io, fn) {
+  installConsoleRouter();
+  try {
+    return await ioContext.run(io, fn);
+  } finally {
+    uninstallConsoleRouter();
+  }
+}
+
 /**
  * Parse argv and route to the appropriate command.
  * @param {string[]} argv - process.argv.slice(2)
  * @returns {Promise<number>} exit code
  */
-export async function main(argv) {
+async function dispatch(argv) {
   const args = argv.filter((a) => !a.startsWith("--"));
   const flags = argv.filter((a) => a.startsWith("--"));
 
@@ -1230,8 +1677,23 @@ export async function main(argv) {
   const arg = args[1];
 
   const force = flags.includes("--force");
+  const all = flags.includes("--all");
 
   switch (command) {
+    // Auth commands
+    case "login":
+    case "ln":
+      return cmdLogin();
+    case "logout":
+    case "lo":
+      return cmdLogout(arg, { force, all });
+    case "reauth":
+    case "ra":
+      return cmdReauth(arg);
+    case "refresh":
+    case "rf":
+      return cmdRefresh(arg);
+    // Account management commands
     case "list":
     case "ls":
       return cmdList();
@@ -1274,6 +1736,19 @@ export async function main(argv) {
       console.error(c.dim("Run 'opencode-anthropic-auth help' for usage."));
       return 1;
   }
+}
+
+/**
+ * Parse argv and route to the appropriate command.
+ * @param {string[]} argv - process.argv.slice(2)
+ * @param {{ io?: { log?: (...args: any[]) => void, error?: (...args: any[]) => void } }} [options]
+ * @returns {Promise<number>} exit code
+ */
+export async function main(argv, options = {}) {
+  if (options.io) {
+    return runWithIoContext(options.io, () => dispatch(argv));
+  }
+  return dispatch(argv);
 }
 
 // Run if executed directly (not imported)

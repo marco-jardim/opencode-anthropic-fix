@@ -31,6 +31,22 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
   };
 });
 
+vi.mock("./lib/oauth.mjs", () => ({
+  authorize: vi.fn(async () => ({ url: "https://auth.example/authorize", verifier: "pkce-verifier" })),
+  exchange: vi.fn(async () => ({
+    type: "success",
+    refresh: "refresh-new",
+    access: "access-new",
+    expires: Date.now() + 3600_000,
+    email: "new@example.com",
+  })),
+  revoke: vi.fn(async () => true),
+}));
+
+vi.mock("node:child_process", () => ({
+  exec: vi.fn(),
+}));
+
 // Mock readline for interactive commands
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
@@ -53,7 +69,11 @@ import {
   cmdSwitch,
   cmdEnable,
   cmdDisable,
+  cmdLogin,
+  cmdLogout,
   cmdRemove,
+  cmdReauth,
+  cmdRefresh,
   cmdReset,
   cmdStats,
   cmdResetStats,
@@ -62,6 +82,9 @@ import {
   main,
 } from "./cli.mjs";
 import { loadAccounts, saveAccounts } from "./lib/storage.mjs";
+import { authorize, exchange, revoke } from "./lib/oauth.mjs";
+import { createInterface } from "node:readline/promises";
+import { exec } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // Global fetch mock — prevents real HTTP calls and speeds up tests
@@ -101,6 +124,29 @@ function captureOutput() {
       console.error = origError;
     },
   };
+}
+
+/** Temporarily set process.stdin.isTTY for interactive command tests. */
+function setStdinTTY(value) {
+  const previous = process.stdin.isTTY;
+  process.stdin.isTTY = value;
+  return () => {
+    if (typeof previous === "undefined") {
+      delete process.stdin.isTTY;
+    } else {
+      process.stdin.isTTY = previous;
+    }
+  };
+}
+
+/** Configure mocked readline to return a specific answer. */
+function mockReadlineAnswer(answer) {
+  const rl = {
+    question: vi.fn().mockResolvedValue(answer),
+    close: vi.fn(),
+  };
+  vi.mocked(createInterface).mockReturnValue(rl);
+  return rl;
 }
 
 /** Make a standard test account storage object */
@@ -819,6 +865,237 @@ describe("cmdDisable", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Auth commands
+// ---------------------------------------------------------------------------
+
+describe("auth commands", () => {
+  let output;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    output = captureOutput();
+    saveAccounts.mockResolvedValue(undefined);
+    loadAccounts.mockResolvedValue(makeStorage());
+    vi.mocked(authorize).mockResolvedValue({ url: "https://auth.example/authorize", verifier: "pkce-verifier" });
+    vi.mocked(exchange).mockResolvedValue({
+      type: "success",
+      refresh: "refresh-new",
+      access: "access-new",
+      expires: Date.now() + 3600_000,
+      email: "new@example.com",
+    });
+    vi.mocked(revoke).mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    output.restore();
+  });
+
+  it("cmdLogin rejects non-interactive terminals", async () => {
+    const restoreTTY = setStdinTTY(false);
+    try {
+      const code = await cmdLogin();
+      expect(code).toBe(1);
+      expect(output.errorText()).toContain("requires an interactive terminal");
+      expect(authorize).not.toHaveBeenCalled();
+    } finally {
+      restoreTTY();
+    }
+  });
+
+  it("cmdLogin adds a new account via OAuth", async () => {
+    loadAccounts.mockResolvedValue(null);
+    const restoreTTY = setStdinTTY(true);
+    mockReadlineAnswer("auth-code#state");
+
+    try {
+      const code = await cmdLogin();
+      expect(code).toBe(0);
+      expect(authorize).toHaveBeenCalledWith("max");
+      expect(exchange).toHaveBeenCalledWith("auth-code#state", "pkce-verifier");
+      expect(exec).toHaveBeenCalled();
+      expect(saveAccounts).toHaveBeenCalledWith(
+        expect.objectContaining({
+          version: 1,
+          activeIndex: 0,
+          accounts: expect.arrayContaining([
+            expect.objectContaining({
+              refreshToken: "refresh-new",
+              access: "access-new",
+              enabled: true,
+              email: "new@example.com",
+            }),
+          ]),
+        }),
+      );
+    } finally {
+      restoreTTY();
+    }
+  });
+
+  it("cmdLogin updates duplicate account even when at max capacity", async () => {
+    const fullStorage = {
+      version: 1,
+      activeIndex: 0,
+      accounts: Array.from({ length: 10 }, (_, i) => ({
+        refreshToken: i === 4 ? "refresh-new" : `refresh-${i}`,
+        access: `access-${i}`,
+        expires: Date.now() + 1000,
+        addedAt: 1000 + i,
+        lastUsed: 0,
+        enabled: i === 4 ? false : true,
+        rateLimitResetTimes: {},
+        consecutiveFailures: 2,
+        lastFailureTime: Date.now(),
+      })),
+    };
+    loadAccounts.mockResolvedValue(fullStorage);
+    const restoreTTY = setStdinTTY(true);
+    mockReadlineAnswer("auth-code#state");
+
+    try {
+      const code = await cmdLogin();
+      expect(code).toBe(0);
+      const saved = saveAccounts.mock.calls[0][0];
+      expect(saved.accounts).toHaveLength(10);
+      expect(saved.accounts[4].refreshToken).toBe("refresh-new");
+      expect(saved.accounts[4].access).toBe("access-new");
+      expect(saved.accounts[4].enabled).toBe(true);
+    } finally {
+      restoreTTY();
+    }
+  });
+
+  it("cmdLogin rejects adding new account when at max capacity", async () => {
+    const fullStorage = {
+      version: 1,
+      activeIndex: 0,
+      accounts: Array.from({ length: 10 }, (_, i) => ({
+        refreshToken: `refresh-${i}`,
+        access: `access-${i}`,
+        expires: Date.now() + 1000,
+        addedAt: 1000 + i,
+        lastUsed: 0,
+        enabled: true,
+        rateLimitResetTimes: {},
+        consecutiveFailures: 0,
+        lastFailureTime: null,
+      })),
+    };
+    loadAccounts.mockResolvedValue(fullStorage);
+    const restoreTTY = setStdinTTY(true);
+    mockReadlineAnswer("auth-code#state");
+
+    try {
+      const code = await cmdLogin();
+      expect(code).toBe(1);
+      expect(output.errorText()).toContain("maximum of 10 accounts reached");
+      expect(saveAccounts).not.toHaveBeenCalled();
+    } finally {
+      restoreTTY();
+    }
+  });
+
+  it("cmdLogout removes one account and revokes token", async () => {
+    loadAccounts.mockResolvedValue(makeStorage());
+
+    const code = await cmdLogout("2", { force: true });
+    expect(code).toBe(0);
+    expect(revoke).toHaveBeenCalledWith("refresh-bob");
+    const saved = saveAccounts.mock.calls[0][0];
+    expect(saved.accounts).toHaveLength(2);
+    expect(saved.accounts.find((a) => a.refreshToken === "refresh-bob")).toBeUndefined();
+  });
+
+  it("cmdLogout --all revokes all accounts and writes explicit empty storage", async () => {
+    loadAccounts.mockResolvedValue(makeStorage());
+
+    const code = await cmdLogout(undefined, { all: true, force: true });
+    expect(code).toBe(0);
+    expect(revoke).toHaveBeenCalledTimes(3);
+    expect(saveAccounts).toHaveBeenCalledWith({ version: 1, accounts: [], activeIndex: 0 });
+  });
+
+  it("cmdReauth refreshes credentials and resets account failure state", async () => {
+    const storage = makeStorage();
+    storage.accounts[0].enabled = false;
+    storage.accounts[0].consecutiveFailures = 5;
+    storage.accounts[0].lastFailureTime = Date.now();
+    storage.accounts[0].rateLimitResetTimes = { anthropic: Date.now() + 60_000 };
+    loadAccounts.mockResolvedValue(storage);
+    vi.mocked(exchange).mockResolvedValueOnce({
+      type: "success",
+      refresh: "refresh-reauth",
+      access: "access-reauth",
+      expires: Date.now() + 7200_000,
+      email: "alice+reauth@example.com",
+    });
+
+    const restoreTTY = setStdinTTY(true);
+    mockReadlineAnswer("reauth-code#state");
+
+    try {
+      const code = await cmdReauth("1");
+      expect(code).toBe(0);
+      const saved = saveAccounts.mock.calls[0][0];
+      expect(saved.accounts[0]).toEqual(
+        expect.objectContaining({
+          refreshToken: "refresh-reauth",
+          access: "access-reauth",
+          email: "alice+reauth@example.com",
+          enabled: true,
+          consecutiveFailures: 0,
+          lastFailureTime: null,
+          rateLimitResetTimes: {},
+        }),
+      );
+      expect(output.text()).toContain("re-enabled");
+    } finally {
+      restoreTTY();
+    }
+  });
+
+  it("cmdRefresh updates tokens and re-enables account", async () => {
+    const storage = makeStorage();
+    storage.accounts[2].enabled = false;
+    storage.accounts[2].consecutiveFailures = 4;
+    storage.accounts[2].lastFailureTime = Date.now();
+    storage.accounts[2].rateLimitResetTimes = { anthropic: Date.now() + 30_000 };
+    loadAccounts.mockResolvedValue(storage);
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 3600 }),
+    });
+
+    const code = await cmdRefresh("3");
+    expect(code).toBe(0);
+    const saved = saveAccounts.mock.calls[0][0];
+    expect(saved.accounts[2]).toEqual(
+      expect.objectContaining({
+        access: "fresh-access",
+        refreshToken: "fresh-refresh",
+        enabled: true,
+        consecutiveFailures: 0,
+        lastFailureTime: null,
+        rateLimitResetTimes: {},
+      }),
+    );
+    expect(output.text()).toContain("Token refreshed");
+    expect(output.text()).toContain("re-enabled");
+  });
+
+  it("cmdRefresh suggests reauth when refresh fails", async () => {
+    loadAccounts.mockResolvedValue(makeStorage());
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
+
+    const code = await cmdRefresh("1");
+    expect(code).toBe(1);
+    expect(output.errorText()).toContain("Try: opencode-anthropic-auth reauth 1");
+    expect(saveAccounts).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // cmdRemove
 // ---------------------------------------------------------------------------
 
@@ -1049,6 +1326,10 @@ describe("cmdHelp", () => {
   it("shows all commands", () => {
     cmdHelp();
     const text = output.text();
+    expect(text).toContain("login");
+    expect(text).toContain("logout");
+    expect(text).toContain("reauth");
+    expect(text).toContain("refresh");
     expect(text).toContain("list");
     expect(text).toContain("status");
     expect(text).toContain("switch");
@@ -1064,6 +1345,8 @@ describe("cmdHelp", () => {
   it("shows examples", () => {
     cmdHelp();
     const text = output.text();
+    expect(text).toContain("logout --all");
+    expect(text).toContain("reauth 1");
     expect(text).toContain("switch 2");
     expect(text).toContain("disable 3");
     expect(text).toContain("reset all");
@@ -1082,6 +1365,15 @@ describe("main routing", () => {
     output = captureOutput();
     loadAccounts.mockResolvedValue(makeStorage());
     saveAccounts.mockResolvedValue(undefined);
+    vi.mocked(authorize).mockResolvedValue({ url: "https://auth.example/authorize", verifier: "pkce-verifier" });
+    vi.mocked(exchange).mockResolvedValue({
+      type: "success",
+      refresh: "refresh-new",
+      access: "access-new",
+      expires: Date.now() + 3600_000,
+      email: "new@example.com",
+    });
+    vi.mocked(revoke).mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -1159,6 +1451,68 @@ describe("main routing", () => {
     const code = await main(["dis", "2"]);
     expect(code).toBe(0);
     expect(output.text()).toContain("Disabled");
+  });
+
+  it("routes 'ln' alias to login", async () => {
+    loadAccounts.mockResolvedValue(null);
+    const restoreTTY = setStdinTTY(true);
+    mockReadlineAnswer("auth-code#state");
+    try {
+      const code = await main(["ln"]);
+      expect(code).toBe(0);
+      expect(authorize).toHaveBeenCalledWith("max");
+      expect(exchange).toHaveBeenCalled();
+    } finally {
+      restoreTTY();
+    }
+  });
+
+  it("routes 'lo --all --force' alias to logout all", async () => {
+    const code = await main(["lo", "--all", "--force"]);
+    expect(code).toBe(0);
+    expect(revoke).toHaveBeenCalled();
+    expect(saveAccounts).toHaveBeenCalledWith({ version: 1, accounts: [], activeIndex: 0 });
+  });
+
+  it("routes 'ra' alias to reauth", async () => {
+    const restoreTTY = setStdinTTY(true);
+    mockReadlineAnswer("reauth-code#state");
+    try {
+      const code = await main(["ra", "1"]);
+      expect(code).toBe(0);
+      expect(exchange).toHaveBeenCalled();
+      expect(output.text()).toContain("Re-authenticated");
+    } finally {
+      restoreTTY();
+    }
+  });
+
+  it("routes 'rf' alias to refresh", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 3600 }),
+    });
+    const code = await main(["rf", "1"]);
+    expect(code).toBe(0);
+    expect(output.text()).toContain("Token refreshed");
+  });
+
+  it("supports integration io capture option", async () => {
+    // This test validates IO redirection itself, so disable outer capture hook.
+    output.restore();
+
+    const logs = [];
+    const errors = [];
+    const code = await main(["status"], {
+      io: {
+        log: (...args) => logs.push(args.join(" ")),
+        error: (...args) => errors.push(args.join(" ")),
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(errors).toHaveLength(0);
+    expect(logs.join("\n")).toContain("anthropic:");
   });
 });
 
