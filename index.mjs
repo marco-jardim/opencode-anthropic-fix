@@ -1,7 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { AccountManager } from "./lib/accounts.mjs";
-import { main as cliMain } from "./cli.mjs";
 import { authorize, exchange } from "./lib/oauth.mjs";
 import { loadConfig, CLIENT_ID } from "./lib/config.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
@@ -99,6 +98,59 @@ async function promptManageAccounts(accountManager) {
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.2";
+const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
+const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
+
+/**
+ * Map Node.js platform to Stainless OS header value.
+ * @param {NodeJS.Platform} value
+ * @returns {string}
+ */
+function getStainlessOs(value) {
+  if (value === "darwin") return "MacOS";
+  if (value === "win32") return "Windows";
+  if (value === "linux") return "Linux";
+  return value;
+}
+
+/**
+ * Normalize Node.js arch to Stainless arch header value.
+ * @param {string} value
+ * @returns {string}
+ */
+function getStainlessArch(value) {
+  if (value === "x64") return "x64";
+  if (value === "arm64") return "arm64";
+  return value;
+}
+
+/**
+ * Resolve latest claude-code package version from npm registry.
+ * Returns null on timeout/network/parse failures.
+ * @param {number} timeoutMs
+ * @returns {Promise<string | null>}
+ */
+async function fetchLatestClaudeCodeVersion(timeoutMs = 1200) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(CLAUDE_CODE_NPM_LATEST_URL, {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!data || typeof data !== "object") return null;
+    return typeof data.version === "string" && data.version ? data.version : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /**
  * Build request headers from input and init, applying OAuth requirements.
  * Preserves behaviors D1-D7.
@@ -106,9 +158,10 @@ async function promptManageAccounts(accountManager) {
  * @param {any} input
  * @param {Record<string, any>} requestInit
  * @param {string} accessToken
+ * @param {{enabled: boolean, claudeCliVersion: string}} signature
  * @returns {Headers}
  */
-function buildRequestHeaders(input, requestInit, accessToken) {
+function buildRequestHeaders(input, requestInit, accessToken, signature) {
   const requestHeaders = new Headers();
   if (input instanceof Request) {
     input.headers.forEach((value, key) => {
@@ -143,11 +196,27 @@ function buildRequestHeaders(input, requestInit, accessToken) {
     .filter(Boolean);
 
   const requiredBetas = ["oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
+  if (signature.enabled) {
+    requiredBetas.push(CLAUDE_CODE_BETA_FLAG, "fine-grained-tool-streaming-2025-05-14");
+  }
   const mergedBetas = [...new Set([...requiredBetas, ...incomingBetasList])].join(",");
 
   requestHeaders.set("authorization", `Bearer ${accessToken}`);
   requestHeaders.set("anthropic-beta", mergedBetas);
-  requestHeaders.set("user-agent", "claude-cli/2.1.2 (external, cli)");
+  requestHeaders.set("user-agent", `claude-cli/${signature.claudeCliVersion} (external, cli)`);
+  if (signature.enabled) {
+    requestHeaders.set("anthropic-version", "2023-06-01");
+    requestHeaders.set("anthropic-dangerous-direct-browser-access", "true");
+    requestHeaders.set("x-app", "cli");
+    requestHeaders.set("x-stainless-arch", getStainlessArch(process.arch));
+    requestHeaders.set("x-stainless-lang", "js");
+    requestHeaders.set("x-stainless-os", getStainlessOs(process.platform));
+    requestHeaders.set("x-stainless-package-version", signature.claudeCliVersion);
+    requestHeaders.set("x-stainless-runtime", "node");
+    requestHeaders.set("x-stainless-runtime-version", process.version);
+    requestHeaders.set("x-stainless-helper-method", "stream");
+    requestHeaders.set("x-stainless-retry-count", "0");
+  }
   requestHeaders.delete("x-api-key");
 
   return requestHeaders;
@@ -169,13 +238,17 @@ function transformRequestBody(body) {
     const parsed = JSON.parse(body);
 
     // Sanitize system prompt - server blocks "OpenCode" string
-    // Note: (?<!\/) preserves paths like /path/to/opencode-foo
+    // Preserve path segments like /path/to/opencode-foo
     if (parsed.system && Array.isArray(parsed.system)) {
       parsed.system = parsed.system.map((item) => {
         if (item.type === "text" && item.text) {
           return {
             ...item,
-            text: item.text.replace(/OpenCode/g, "Claude Code").replace(/(?<!\/)opencode/gi, "Claude"),
+            text: item.text
+              .replace(/OpenCode/g, "Claude Code")
+              .replace(/opencode/gi, (match, offset, source) =>
+                offset > 0 && source[offset - 1] === "/" ? match : "Claude",
+              ),
           };
         }
         return item;
@@ -573,6 +646,9 @@ function parseCommandArgs(raw) {
  */
 export async function AnthropicAuthPlugin({ client }) {
   const config = loadConfig();
+  const signatureEmulationEnabled = config.signature_emulation.enabled;
+  const shouldFetchClaudeCodeVersion =
+    signatureEmulationEnabled && config.signature_emulation.fetch_claude_code_version_on_startup;
 
   /** @type {AccountManager | null} */
   let accountManager = null;
@@ -651,6 +727,7 @@ export async function AnthropicAuthPlugin({ client }) {
     /** @type {number} */
     let code = 1;
     try {
+      const { main: cliMain } = await import("./cli.mjs");
       code = await cliMain(argv, {
         io: {
           log: (...args) => logs.push(args.join(" ")),
@@ -965,6 +1042,19 @@ export async function AnthropicAuthPlugin({ client }) {
     console.error("[opencode-anthropic-auth]", ...args);
   }
 
+  let claudeCliVersion = FALLBACK_CLAUDE_CLI_VERSION;
+  if (shouldFetchClaudeCodeVersion) {
+    fetchLatestClaudeCodeVersion()
+      .then((version) => {
+        if (!version) return;
+        claudeCliVersion = version;
+        debugLog("resolved claude-code version from npm", version);
+      })
+      .catch(() => {
+        // Ignore fetch errors and keep fallback version.
+      });
+  }
+
   /**
    * Refresh a specific account token with single-flight protection.
    * Prevents concurrent refresh races from disabling healthy accounts.
@@ -994,7 +1084,7 @@ export async function AnthropicAuthPlugin({ client }) {
     // A1-A4: System prompt transform (unchanged)
     "experimental.chat.system.transform": (input, output) => {
       const prefix = "You are Claude Code, Anthropic's official CLI for Claude.";
-      if (input.model?.providerID === "anthropic") {
+      if (!signatureEmulationEnabled && input.model?.providerID === "anthropic") {
         output.system.unshift(prefix);
         if (output.system[1]) output.system[1] = prefix + "\n\n" + output.system[1];
       }
@@ -1153,7 +1243,10 @@ export async function AnthropicAuthPlugin({ client }) {
                 }
 
                 // Build headers with the selected account's token
-                const requestHeaders = buildRequestHeaders(input, requestInit, accessToken);
+                const requestHeaders = buildRequestHeaders(input, requestInit, accessToken, {
+                  enabled: signatureEmulationEnabled,
+                  claudeCliVersion,
+                });
 
                 // Execute the request
                 let response;
