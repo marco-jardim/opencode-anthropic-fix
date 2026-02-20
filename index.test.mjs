@@ -13,14 +13,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mocks — must be set up before importing the module under test
 // ---------------------------------------------------------------------------
 
-// Mock @openauthjs/openauth/pkce
-vi.mock("@openauthjs/openauth/pkce", () => ({
-  generatePKCE: vi.fn(async () => ({
-    challenge: "test-challenge",
-    verifier: "test-verifier",
-  })),
-}));
-
 // Mock readline (used by promptAccountMenu / promptManageAccounts)
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
