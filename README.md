@@ -1,4 +1,4 @@
-# opencode-anthropic-auth
+# opencode-anthropic-fix
 
 Use your Claude Pro or Max subscription with [OpenCode](https://github.com/anomalyco/opencode). Supports multiple accounts with automatic rotation when you hit rate limits.
 
@@ -8,8 +8,8 @@ Use your Claude Pro or Max subscription with [OpenCode](https://github.com/anoma
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/actualyze-ai/opencode-anthropic-auth.git
-cd opencode-anthropic-auth
+git clone https://github.com/marco-jardim/opencode-anthropic-fix.git
+cd opencode-anthropic-fix
 npm install
 
 # 2. Install the plugin + CLI
@@ -32,6 +32,7 @@ The [upstream plugin](https://github.com/anomalyco/opencode-anthropic-auth) ship
 - **Health scoring** &mdash; tracks account reliability and prefers healthy accounts
 - **Standalone CLI** &mdash; manage accounts without opening OpenCode
 - **Configurable strategies** &mdash; sticky, round-robin, or hybrid account selection
+- **Claude Code signature emulation** &mdash; optional Claude-style request headers with startup version lookup
 
 ## Installation
 
@@ -281,6 +282,14 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
   // Enable debug logging
   "debug": false,
 
+  // Claude Code signature emulation behavior
+  "signature_emulation": {
+    // Enable Claude-style attribution/stainless headers and betas
+    "enabled": true,
+    // Resolve latest @anthropic-ai/claude-code version once on plugin startup
+    "fetch_claude_code_version_on_startup": true,
+  },
+
   // Health score tuning (0-100 scale)
   "health_score": {
     "initial": 70,
@@ -311,11 +320,13 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 
 ### Environment Variables
 
-| Variable                      | Description                                                          |
-| ----------------------------- | -------------------------------------------------------------------- |
-| `OPENCODE_ANTHROPIC_STRATEGY` | Override the account selection strategy at runtime.                  |
-| `OPENCODE_ANTHROPIC_DEBUG`    | Set to `1` to enable debug logging.                                  |
-| `OPENCODE_ANTHROPIC_QUIET`    | Set to `1` to suppress non-error toasts (account status, switching). |
+| Variable                                           | Description                                                          |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `OPENCODE_ANTHROPIC_STRATEGY`                      | Override the account selection strategy at runtime.                  |
+| `OPENCODE_ANTHROPIC_DEBUG`                         | Set to `1` to enable debug logging.                                  |
+| `OPENCODE_ANTHROPIC_QUIET`                         | Set to `1` to suppress non-error toasts (account status, switching). |
+| `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).      |
+| `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                    |
 
 ## How It Works
 
@@ -332,9 +343,11 @@ When you make a request through OpenCode:
 The plugin also:
 
 - Zeros out model costs (your subscription covers usage)
-- Prepends the "Claude Code" system prompt prefix
+- Emulates Claude-style request headers and beta flags by default
 - Sanitizes "OpenCode" references to "Claude Code" in system prompts (required by Anthropic's API)
 - Adds `?beta=true` to `/v1/messages` requests
+
+When signature emulation is disabled (`signature_emulation.enabled=false`), the plugin falls back to legacy behavior including the Claude Code system prompt prefix.
 
 ## Files
 
@@ -414,4 +427,4 @@ Same as upstream. See [anomalyco/opencode-anthropic-auth](https://github.com/ano
 
 ---
 
-_Maintained at [actualyze-ai/opencode-anthropic-auth](https://github.com/actualyze-ai/opencode-anthropic-auth)._
+_Maintained at [marco-jardim/opencode-anthropic-fix](https://github.com/marco-jardim/opencode-anthropic-fix)._
