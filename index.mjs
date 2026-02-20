@@ -419,7 +419,7 @@ function sanitizeSystemText(text) {
 
 /**
  * @param {any[] | undefined} system
- * @returns {Array<{type: string, text: string, cacheScope?: string | null}>}
+ * @returns {Array<{type: string, text: string, cache_control?: {type: string}}>}
  */
 function normalizeSystemTextBlocks(system) {
   const output = [];
@@ -434,21 +434,29 @@ function normalizeSystemTextBlocks(system) {
     if (!item || typeof item !== "object") continue;
     if (typeof item.text !== "string") continue;
 
-    output.push({
+    const normalized = {
       type: typeof item.type === "string" ? item.type : "text",
       text: item.text,
-      cacheScope: Object.prototype.hasOwnProperty.call(item, "cacheScope") ? item.cacheScope : undefined,
-    });
+    };
+
+    if (item.cache_control && typeof item.cache_control === "object" && !Array.isArray(item.cache_control)) {
+      normalized.cache_control = item.cache_control;
+    } else if (typeof item.cacheScope === "string" && item.cacheScope) {
+      // Backward compatibility for older shape used by this plugin.
+      normalized.cache_control = { type: "ephemeral" };
+    }
+
+    output.push(normalized);
   }
 
   return output;
 }
 
 /**
- * @param {Array<{type: string, text: string, cacheScope?: string | null}>} system
+ * @param {Array<{type: string, text: string, cache_control?: {type: string}}>} system
  * @param {{enabled: boolean, claudeCliVersion: string}} signature
  * @param {any[]} messages
- * @returns {Array<{type: string, text: string, cacheScope?: string | null}>}
+ * @returns {Array<{type: string, text: string, cache_control?: {type: string}}>}
  */
 function buildSystemPromptBlocks(system, signature, messages) {
   const sanitized = system.map((item) => ({ ...item, text: sanitizeSystemText(item.text) }));
@@ -464,10 +472,10 @@ function buildSystemPromptBlocks(system, signature, messages) {
   const blocks = [];
   const billingHeader = buildAnthropicBillingHeader(signature.claudeCliVersion, messages);
   if (billingHeader) {
-    blocks.push({ type: "text", text: billingHeader, cacheScope: null });
+    blocks.push({ type: "text", text: billingHeader });
   }
 
-  blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cacheScope: "org" });
+  blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cache_control: { type: "ephemeral" } });
   blocks.push(...filtered);
 
   return blocks;

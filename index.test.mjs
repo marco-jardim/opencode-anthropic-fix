@@ -1694,11 +1694,11 @@ describe("header handling", () => {
     const parsed = JSON.parse(init.body);
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
     expect(parsed.system[0].text).toContain("cc_entrypoint=cli");
-    expect(parsed.system[0].cacheScope).toBeNull();
+    expect(parsed.system[0].cache_control).toBeUndefined();
     expect(parsed.system[1]).toEqual({
       type: "text",
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      cacheScope: "org",
+      cache_control: { type: "ephemeral" },
     });
     expect(parsed.system[2].text).toBe("Use Claude Code defaults");
   });
@@ -1718,7 +1718,7 @@ describe("header handling", () => {
     expect(parsed.system[0]).toEqual({
       type: "text",
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      cacheScope: "org",
+      cache_control: { type: "ephemeral" },
     });
     expect(parsed.system.some((item) => item.text.startsWith("x-anthropic-billing-header:"))).toBe(false);
   });

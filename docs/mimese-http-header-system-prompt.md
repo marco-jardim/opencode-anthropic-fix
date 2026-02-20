@@ -235,7 +235,7 @@ In this plugin's current state, it may still appear in the automatically compose
 
 - strings become `{ type: "text", text: "..." }`
 - objects with string `text` are preserved
-- preserves `cacheScope` when present
+- preserves `cache_control` when present
 
 ### 6.2 Text sanitization
 
@@ -254,8 +254,8 @@ In this plugin's current state, it may still appear in the automatically compose
    - `x-anthropic-billing-header: ...`
    - known identity strings (`KNOWN_IDENTITY_STRINGS`)
 3. builds final ordered list:
-   - (optional) billing header block with `cacheScope: null`
-   - canonical identity block with `cacheScope: "org"`
+   - (optional) billing header block
+   - canonical identity block with `cache_control: { type: "ephemeral" }`
    - original filtered/sanitized blocks
 
 Canonical identity string:
