@@ -765,30 +765,6 @@ function transformRequestBody(body, signature, runtime) {
 }
 
 /**
- * @param {string | undefined} body
- * @param {Headers} requestHeaders
- * @param {boolean} signatureEnabled
- * @returns {string | undefined}
- */
-function syncBodyBetasFromHeader(body, requestHeaders, signatureEnabled) {
-  if (!signatureEnabled || !body || typeof body !== "string") return body;
-
-  const betaHeader = requestHeaders.get("anthropic-beta");
-  if (!betaHeader) return body;
-
-  try {
-    const parsed = JSON.parse(body);
-    parsed.betas = betaHeader
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    return JSON.stringify(parsed);
-  } catch {
-    return body;
-  }
-}
-
-/**
  * Transform the request URL: add ?beta=true to /v1/messages.
  * Preserves behaviors F1-F3.
  *
@@ -1745,7 +1721,7 @@ export async function AnthropicAuthPlugin({ client }) {
                   accessToken = account.access;
                 }
 
-                let body = transformRequestBody(
+                const body = transformRequestBody(
                   requestInit.body,
                   {
                     enabled: signatureEmulationEnabled,
@@ -1763,8 +1739,6 @@ export async function AnthropicAuthPlugin({ client }) {
                   enabled: signatureEmulationEnabled,
                   claudeCliVersion,
                 });
-                body = syncBodyBetasFromHeader(body, requestHeaders, signatureEmulationEnabled);
-
                 // Execute the request
                 let response;
                 try {

@@ -1723,7 +1723,7 @@ describe("header handling", () => {
     expect(parsed.system.some((item) => item.text.startsWith("x-anthropic-billing-header:"))).toBe(false);
   });
 
-  it("adds metadata.user_id and betas array to request body", async () => {
+  it("adds metadata.user_id to request body", async () => {
     process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
@@ -1742,9 +1742,7 @@ describe("header handling", () => {
     expect(parsed.metadata.user_id).toMatch(
       /^user_test-signature-user_account_[^_]+_session_[0-9a-f]{8}-[0-9a-f-]{27}$/,
     );
-    expect(Array.isArray(parsed.betas)).toBe(true);
-    expect(parsed.betas).toContain("oauth-2025-04-20");
-    expect(parsed.betas).toContain("claude-code-20250219");
+    expect(parsed.betas).toBeUndefined();
   });
 
   it("uses ANTHROPIC_AUTH_TOKEN when provided", async () => {

@@ -58,8 +58,7 @@ Inside `auth.loader().fetch(...)`:
 2. select account and resolve token (including refresh when needed)
 3. transform body (`transformRequestBody`) with runtime context
 4. build headers (`buildRequestHeaders`)
-5. sync `body.betas` from the `anthropic-beta` header (`syncBodyBetasFromHeader`)
-6. execute `fetch`
+5. execute `fetch`
 
 Important: body transform happens per-attempt/per-account (not only once), so `metadata.user_id` includes the actual `accountId` in use for that attempt.
 
@@ -296,11 +295,7 @@ Where:
 - `sessionId`: UUID generated once per plugin initialization
 - `accountId`: `account.accountUuid` when present; fallback to `account.id`
 
-After headers are built, `syncBodyBetasFromHeader(...)` ensures:
-
-- `body.betas = anthropic-beta.split(",")` (trim/filter)
-
-This keeps body betas aligned with the final effective header beta list.
+The plugin does not inject a `betas` field into request body. Beta flags are sent via `anthropic-beta` header only.
 
 ## 8) Related URL shaping
 
