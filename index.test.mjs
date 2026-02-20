@@ -505,6 +505,8 @@ describe("fetch interceptor", () => {
     delete process.env.TENGU_TOOL_PEAR;
     delete process.env.TENGU_SCARF_COFFEE;
     delete process.env.ANTHROPIC_BETAS;
+    delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER;
+    delete process.env.CLAUDE_CODE_ENTRYPOINT;
 
     client = makeClient();
     loadAccounts.mockResolvedValue(null);
@@ -573,7 +575,8 @@ describe("fetch interceptor", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    expect(body.system[0].text).toBe("You are Claude Code, an Claude assistant.");
+    const payloadText = body.system.map((item) => item.text);
+    expect(payloadText).toContain("You are Claude Code, an Claude assistant.");
   });
 
   it("preserves paths containing opencode in system prompt", async () => {
@@ -589,7 +592,8 @@ describe("fetch interceptor", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    expect(body.system[0].text).toBe("Working dir: /Users/rmk/projects/opencode-auth");
+    const payloadText = body.system.map((item) => item.text);
+    expect(payloadText).toContain("Working dir: /Users/rmk/projects/opencode-auth");
   });
 
   it("prefixes tool names with mcp_ in request", async () => {
@@ -1642,6 +1646,52 @@ describe("header handling", () => {
     const [, init] = mockFetch.mock.calls[0];
     expect(init.headers.get("x-stainless-helper")).toContain("BetaToolRunner");
     expect(init.headers.get("x-stainless-helper")).toContain("compaction");
+  });
+
+  it("injects billing and identity system blocks in request body", async () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "abcd_efghijklmnopqrstuv" }],
+        system: [{ type: "text", text: "Use OpenCode defaults" }],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
+    expect(parsed.system[0].text).toContain("cc_entrypoint=cli");
+    expect(parsed.system[0].cacheScope).toBeNull();
+    expect(parsed.system[1]).toEqual({
+      type: "text",
+      text: "You are Claude Code, Anthropic's official CLI for Claude.",
+      cacheScope: "org",
+    });
+    expect(parsed.system[2].text).toBe("Use Claude Code defaults");
+  });
+
+  it("does not inject billing block when CLAUDE_CODE_ATTRIBUTION_HEADER=0", async () => {
+    process.env.CLAUDE_CODE_ATTRIBUTION_HEADER = "0";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hello world" }], system: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.system[0]).toEqual({
+      type: "text",
+      text: "You are Claude Code, Anthropic's official CLI for Claude.",
+      cacheScope: "org",
+    });
+    expect(parsed.system.some((item) => item.text.startsWith("x-anthropic-billing-header:"))).toBe(false);
   });
 
   it("filters unsupported betas on bedrock endpoints", async () => {

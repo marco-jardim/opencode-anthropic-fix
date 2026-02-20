@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import { createHash } from "node:crypto";
 import { AccountManager } from "./lib/accounts.mjs";
 import { authorize, exchange } from "./lib/oauth.mjs";
 import { loadConfig, CLIENT_ID } from "./lib/config.mjs";
@@ -101,6 +102,14 @@ async function promptManageAccounts(accountManager) {
 const FALLBACK_CLAUDE_CLI_VERSION = "2.1.2";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
+const BILLING_HASH_SALT = "59cf53e54c78";
+const BILLING_HASH_POSITIONS = [4, 7, 20];
+const CLAUDE_CODE_IDENTITY_STRING = "You are Claude Code, Anthropic's official CLI for Claude.";
+const KNOWN_IDENTITY_STRINGS = new Set([
+  CLAUDE_CODE_IDENTITY_STRING,
+  "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
+  "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+]);
 const BEDROCK_UNSUPPORTED_BETAS = new Set([
   "interleaved-thinking-2025-05-14",
   "context-1m-2025-08-07",
@@ -246,6 +255,124 @@ function buildStainlessHelperHeader(tools, messages) {
   for (const message of messages) collect(message);
 
   return Array.from(helpers).join(", ");
+}
+
+/**
+ * @param {any} content
+ * @returns {string}
+ */
+function extractTextContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const parts = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * @param {any[]} messages
+ * @returns {string}
+ */
+function getFirstUserText(messages) {
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    if (message.role !== "user") continue;
+
+    const text = extractTextContent(message.content);
+    if (text) return text;
+  }
+  return "";
+}
+
+/**
+ * @param {string} claudeCliVersion
+ * @param {any[]} messages
+ * @returns {string}
+ */
+function buildAnthropicBillingHeader(claudeCliVersion, messages) {
+  if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
+
+  const firstUserText = getFirstUserText(messages);
+  const sampled = BILLING_HASH_POSITIONS.map((position) => firstUserText[position] || "0").join("");
+  const hash = createHash("sha256")
+    .update(`${BILLING_HASH_SALT}${sampled}${claudeCliVersion}`)
+    .digest("hex")
+    .slice(0, 3);
+
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "unknown";
+  return `x-anthropic-billing-header: cc_version=${claudeCliVersion}.${hash}; cc_entrypoint=${entrypoint}; cch=00000;`;
+}
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+function sanitizeSystemText(text) {
+  return text
+    .replace(/OpenCode/g, "Claude Code")
+    .replace(/opencode/gi, (match, offset, source) => (offset > 0 && source[offset - 1] === "/" ? match : "Claude"));
+}
+
+/**
+ * @param {any[] | undefined} system
+ * @returns {Array<{type: string, text: string, cacheScope?: string | null}>}
+ */
+function normalizeSystemTextBlocks(system) {
+  const output = [];
+  if (!Array.isArray(system)) return output;
+
+  for (const item of system) {
+    if (typeof item === "string") {
+      output.push({ type: "text", text: item });
+      continue;
+    }
+
+    if (!item || typeof item !== "object") continue;
+    if (typeof item.text !== "string") continue;
+
+    output.push({
+      type: typeof item.type === "string" ? item.type : "text",
+      text: item.text,
+      cacheScope: Object.prototype.hasOwnProperty.call(item, "cacheScope") ? item.cacheScope : undefined,
+    });
+  }
+
+  return output;
+}
+
+/**
+ * @param {Array<{type: string, text: string, cacheScope?: string | null}>} system
+ * @param {{enabled: boolean, claudeCliVersion: string}} signature
+ * @param {any[]} messages
+ * @returns {Array<{type: string, text: string, cacheScope?: string | null}>}
+ */
+function buildSystemPromptBlocks(system, signature, messages) {
+  const sanitized = system.map((item) => ({ ...item, text: sanitizeSystemText(item.text) }));
+
+  if (!signature.enabled) {
+    return sanitized;
+  }
+
+  const filtered = sanitized.filter(
+    (item) => !item.text.startsWith("x-anthropic-billing-header:") && !KNOWN_IDENTITY_STRINGS.has(item.text),
+  );
+
+  const blocks = [];
+  const billingHeader = buildAnthropicBillingHeader(signature.claudeCliVersion, messages);
+  if (billingHeader) {
+    blocks.push({ type: "text", text: billingHeader, cacheScope: null });
+  }
+
+  blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cacheScope: "org" });
+  blocks.push(...filtered);
+
+  return blocks;
 }
 
 /**
@@ -450,33 +577,20 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
  * Preserves behaviors E1-E7.
  *
  * @param {string | undefined} body
+ * @param {{enabled: boolean, claudeCliVersion: string}} signature
  * @returns {string | undefined}
  */
-function transformRequestBody(body) {
+function transformRequestBody(body, signature) {
   if (!body || typeof body !== "string") return body;
 
   const TOOL_PREFIX = "mcp_";
 
   try {
     const parsed = JSON.parse(body);
+    const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
 
-    // Sanitize system prompt - server blocks "OpenCode" string
-    // Preserve path segments like /path/to/opencode-foo
-    if (parsed.system && Array.isArray(parsed.system)) {
-      parsed.system = parsed.system.map((item) => {
-        if (item.type === "text" && item.text) {
-          return {
-            ...item,
-            text: item.text
-              .replace(/OpenCode/g, "Claude Code")
-              .replace(/opencode/gi, (match, offset, source) =>
-                offset > 0 && source[offset - 1] === "/" ? match : "Claude",
-              ),
-          };
-        }
-        return item;
-      });
-    }
+    // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
+    parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signature, messages);
 
     // Add prefix to tools definitions
     if (parsed.tools && Array.isArray(parsed.tools)) {
@@ -1306,7 +1420,7 @@ export async function AnthropicAuthPlugin({ client }) {
   return {
     // A1-A4: System prompt transform (unchanged)
     "experimental.chat.system.transform": (input, output) => {
-      const prefix = "You are Claude Code, Anthropic's official CLI for Claude.";
+      const prefix = CLAUDE_CODE_IDENTITY_STRING;
       if (!signatureEmulationEnabled && input.model?.providerID === "anthropic") {
         output.system.unshift(prefix);
         if (output.system[1]) output.system[1] = prefix + "\n\n" + output.system[1];
@@ -1374,7 +1488,10 @@ export async function AnthropicAuthPlugin({ client }) {
 
               // Transform body and URL once (shared across retries)
               const requestInit = init ?? {};
-              const body = transformRequestBody(requestInit.body);
+              const body = transformRequestBody(requestInit.body, {
+                enabled: signatureEmulationEnabled,
+                claudeCliVersion,
+              });
               const { requestInput, requestUrl } = transformRequestUrl(input);
               const requestMethod = String(
                 requestInit.method || (requestInput instanceof Request ? requestInput.method : "POST"),
