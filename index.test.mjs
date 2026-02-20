@@ -499,6 +499,13 @@ describe("fetch interceptor", () => {
 
   beforeEach(async () => {
     vi.resetAllMocks();
+    delete process.env.DISABLE_INTERLEAVED_THINKING;
+    delete process.env.USE_API_CONTEXT_MANAGEMENT;
+    delete process.env.TENGU_MARBLE_ANVIL;
+    delete process.env.TENGU_TOOL_PEAR;
+    delete process.env.TENGU_SCARF_COFFEE;
+    delete process.env.ANTHROPIC_BETAS;
+
     client = makeClient();
     loadAccounts.mockResolvedValue(null);
     saveAccounts.mockResolvedValue(undefined);
@@ -1539,6 +1546,13 @@ describe("header handling", () => {
 
   beforeEach(async () => {
     vi.resetAllMocks();
+    delete process.env.DISABLE_INTERLEAVED_THINKING;
+    delete process.env.USE_API_CONTEXT_MANAGEMENT;
+    delete process.env.TENGU_MARBLE_ANVIL;
+    delete process.env.TENGU_TOOL_PEAR;
+    delete process.env.TENGU_SCARF_COFFEE;
+    delete process.env.ANTHROPIC_BETAS;
+
     client = makeClient();
     loadAccounts.mockResolvedValue(null);
     saveAccounts.mockResolvedValue(undefined);
@@ -1577,6 +1591,74 @@ describe("header handling", () => {
     expect(betaHeader).toContain("fine-grained-tool-streaming-2025-05-14");
     expect(betaHeader).toContain("custom-beta-2025-01-01");
     expect(betaHeader).toContain("another-beta-2025-02-01");
+  });
+
+  it("adds context-1m beta when model advertises 1m context", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-1m", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+  });
+
+  it("adds ANTHROPIC_BETAS entries for non-haiku models", async () => {
+    process.env.ANTHROPIC_BETAS = "custom-a, custom-b";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    expect(betaHeader).toContain("custom-a");
+    expect(betaHeader).toContain("custom-b");
+  });
+
+  it("computes x-stainless-helper from tools and message content", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "hello", stainlessHelper: "compaction" }],
+          },
+        ],
+        tools: [{ name: "read_file", stainlessHelper: "BetaToolRunner" }],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers.get("x-stainless-helper")).toContain("BetaToolRunner");
+    expect(init.headers.get("x-stainless-helper")).toContain("compaction");
+  });
+
+  it("filters unsupported betas on bedrock endpoints", async () => {
+    process.env.TENGU_SCARF_COFFEE = "1";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://bedrock-runtime.us-east-1.amazonaws.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-1m", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    expect(betaHeader).not.toContain("context-1m-2025-08-07");
+    expect(betaHeader).not.toContain("tool-examples-2025-10-29");
+    expect(betaHeader).toContain("claude-code-20250219");
   });
 
   it("extracts headers from Request object input", async () => {

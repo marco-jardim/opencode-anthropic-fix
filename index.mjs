@@ -101,6 +101,226 @@ async function promptManageAccounts(accountManager) {
 const FALLBACK_CLAUDE_CLI_VERSION = "2.1.2";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
+const BEDROCK_UNSUPPORTED_BETAS = new Set([
+  "interleaved-thinking-2025-05-14",
+  "context-1m-2025-08-07",
+  "tool-search-tool-2025-10-19",
+  "tool-examples-2025-10-29",
+]);
+const STAINLESS_HELPER_KEYS = [
+  "x_stainless_helper",
+  "x-stainless-helper",
+  "stainless_helper",
+  "stainlessHelper",
+  "_stainless_helper",
+];
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isTruthyEnv(value) {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+/**
+ * @param {string | undefined} value
+ * @returns {boolean}
+ */
+function isFalsyEnv(value) {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "0" || normalized === "false" || normalized === "no";
+}
+
+/**
+ * @returns {boolean}
+ */
+function isNonInteractiveMode() {
+  if (isTruthyEnv(process.env.CI)) return true;
+  return !process.stdout.isTTY;
+}
+
+/**
+ * @param {string} model
+ * @returns {boolean}
+ */
+function isHaikuModel(model) {
+  return /haiku/i.test(model);
+}
+
+/**
+ * @param {string} model
+ * @returns {boolean}
+ */
+function supportsThinking(model) {
+  if (!model) return true;
+  return /claude|sonnet|opus|haiku/i.test(model);
+}
+
+/**
+ * @param {string} model
+ * @returns {boolean}
+ */
+function hasOneMillionContext(model) {
+  return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model);
+}
+
+/**
+ * @param {string} model
+ * @returns {boolean}
+ */
+function supportsStructuredOutputs(model) {
+  if (!/claude|sonnet|opus|haiku/i.test(model)) return false;
+  return !isHaikuModel(model);
+}
+
+/**
+ * @param {string} model
+ * @returns {boolean}
+ */
+function supportsWebSearch(model) {
+  return /claude|sonnet|opus|haiku|gpt|gemini/i.test(model);
+}
+
+/**
+ * @param {URL | null} requestUrl
+ * @returns {"anthropic" | "bedrock" | "vertex" | "foundry"}
+ */
+function detectProvider(requestUrl) {
+  if (!requestUrl) return "anthropic";
+  const host = requestUrl.hostname.toLowerCase();
+  if (host.includes("bedrock") || host.includes("amazonaws.com")) return "bedrock";
+  if (host.includes("aiplatform") || host.includes("vertex")) return "vertex";
+  if (host.includes("foundry") || host.includes("azure")) return "foundry";
+  return "anthropic";
+}
+
+/**
+ * @param {string | undefined} body
+ * @returns {{model: string, tools: any[], messages: any[]}}
+ */
+function parseRequestBodyMetadata(body) {
+  if (!body || typeof body !== "string") {
+    return { model: "", tools: [], messages: [] };
+  }
+
+  try {
+    const parsed = JSON.parse(body);
+    const model = typeof parsed?.model === "string" ? parsed.model : "";
+    const tools = Array.isArray(parsed?.tools) ? parsed.tools : [];
+    const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
+    return { model, tools, messages };
+  } catch {
+    return { model: "", tools: [], messages: [] };
+  }
+}
+
+/**
+ * @param {any[]} tools
+ * @param {any[]} messages
+ * @returns {string}
+ */
+function buildStainlessHelperHeader(tools, messages) {
+  const helpers = new Set();
+
+  const collect = (value) => {
+    if (!value || typeof value !== "object") return;
+
+    for (const key of STAINLESS_HELPER_KEYS) {
+      if (typeof value[key] === "string" && value[key]) {
+        helpers.add(value[key]);
+      }
+    }
+
+    if (Array.isArray(value.content)) {
+      for (const contentBlock of value.content) {
+        collect(contentBlock);
+      }
+    }
+  };
+
+  for (const tool of tools) collect(tool);
+  for (const message of messages) collect(message);
+
+  return Array.from(helpers).join(", ");
+}
+
+/**
+ * @param {string} incomingBeta
+ * @param {boolean} signatureEnabled
+ * @param {string} model
+ * @param {"anthropic" | "bedrock" | "vertex" | "foundry"} provider
+ * @returns {string}
+ */
+function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provider) {
+  const incomingBetasList = incomingBeta
+    .split(",")
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  const betas = ["oauth-2025-04-20"];
+
+  if (!signatureEnabled) {
+    betas.push("interleaved-thinking-2025-05-14");
+    return [...new Set([...betas, ...incomingBetasList])].join(",");
+  }
+
+  const nonInteractive = isNonInteractiveMode();
+  const haiku = isHaikuModel(model);
+
+  if (!haiku) {
+    betas.push(CLAUDE_CODE_BETA_FLAG);
+  }
+
+  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && supportsThinking(model)) {
+    betas.push("interleaved-thinking-2025-05-14");
+  }
+
+  if (hasOneMillionContext(model)) {
+    betas.push("context-1m-2025-08-07");
+  }
+
+  if (
+    nonInteractive &&
+    (isTruthyEnv(process.env.USE_API_CONTEXT_MANAGEMENT) || isTruthyEnv(process.env.TENGU_MARBLE_ANVIL))
+  ) {
+    betas.push("context-management-2025-06-27");
+  }
+
+  if (supportsStructuredOutputs(model) && isTruthyEnv(process.env.TENGU_TOOL_PEAR)) {
+    betas.push("structured-outputs-2025-12-15");
+  }
+
+  if (nonInteractive && isTruthyEnv(process.env.TENGU_SCARF_COFFEE)) {
+    betas.push("tool-examples-2025-10-29");
+  }
+
+  if ((provider === "vertex" || provider === "foundry") && supportsWebSearch(model)) {
+    betas.push("web-search-2025-03-05");
+  }
+
+  if (nonInteractive) {
+    betas.push("prompt-caching-scope-2026-01-05");
+  }
+
+  if (process.env.ANTHROPIC_BETAS && !haiku) {
+    const envBetas = process.env.ANTHROPIC_BETAS.split(",")
+      .map((b) => b.trim())
+      .filter(Boolean);
+    betas.push(...envBetas);
+  }
+
+  betas.push("fine-grained-tool-streaming-2025-05-14");
+
+  const mergedBetas = [...new Set([...betas, ...incomingBetasList])];
+  if (provider === "bedrock") {
+    return mergedBetas.filter((beta) => !BEDROCK_UNSUPPORTED_BETAS.has(beta)).join(",");
+  }
+  return mergedBetas.join(",");
+}
 
 /**
  * Map Node.js platform to Stainless OS header value.
@@ -158,10 +378,12 @@ async function fetchLatestClaudeCodeVersion(timeoutMs = 1200) {
  * @param {any} input
  * @param {Record<string, any>} requestInit
  * @param {string} accessToken
+ * @param {string | undefined} requestBody
+ * @param {URL | null} requestUrl
  * @param {{enabled: boolean, claudeCliVersion: string}} signature
  * @returns {Headers}
  */
-function buildRequestHeaders(input, requestInit, accessToken, signature) {
+function buildRequestHeaders(input, requestInit, accessToken, requestBody, requestUrl, signature) {
   const requestHeaders = new Headers();
   if (input instanceof Request) {
     input.headers.forEach((value, key) => {
@@ -190,16 +412,9 @@ function buildRequestHeaders(input, requestInit, accessToken, signature) {
 
   // Preserve all incoming beta headers while ensuring OAuth requirements
   const incomingBeta = requestHeaders.get("anthropic-beta") || "";
-  const incomingBetasList = incomingBeta
-    .split(",")
-    .map((b) => b.trim())
-    .filter(Boolean);
-
-  const requiredBetas = ["oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
-  if (signature.enabled) {
-    requiredBetas.push(CLAUDE_CODE_BETA_FLAG, "fine-grained-tool-streaming-2025-05-14");
-  }
-  const mergedBetas = [...new Set([...requiredBetas, ...incomingBetasList])].join(",");
+  const { model, tools, messages } = parseRequestBodyMetadata(requestBody);
+  const provider = detectProvider(requestUrl);
+  const mergedBetas = buildAnthropicBetaHeader(incomingBeta, signature.enabled, model, provider);
 
   requestHeaders.set("authorization", `Bearer ${accessToken}`);
   requestHeaders.set("anthropic-beta", mergedBetas);
@@ -215,7 +430,15 @@ function buildRequestHeaders(input, requestInit, accessToken, signature) {
     requestHeaders.set("x-stainless-runtime", "node");
     requestHeaders.set("x-stainless-runtime-version", process.version);
     requestHeaders.set("x-stainless-helper-method", "stream");
-    requestHeaders.set("x-stainless-retry-count", "0");
+    const incomingRetryCount = requestHeaders.get("x-stainless-retry-count");
+    requestHeaders.set(
+      "x-stainless-retry-count",
+      incomingRetryCount && !isFalsyEnv(incomingRetryCount) ? incomingRetryCount : "0",
+    );
+    const stainlessHelpers = buildStainlessHelperHeader(tools, messages);
+    if (stainlessHelpers) {
+      requestHeaders.set("x-stainless-helper", stainlessHelpers);
+    }
   }
   requestHeaders.delete("x-api-key");
 
@@ -1243,7 +1466,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 }
 
                 // Build headers with the selected account's token
-                const requestHeaders = buildRequestHeaders(input, requestInit, accessToken, {
+                const requestHeaders = buildRequestHeaders(input, requestInit, accessToken, body, requestUrl, {
                   enabled: signatureEmulationEnabled,
                   claudeCliVersion,
                 });
