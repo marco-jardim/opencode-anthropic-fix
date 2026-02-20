@@ -1,19 +1,19 @@
-# Mimese detalhada de HTTP headers e system prompt
+# Detailed Mimicry of HTTP Headers and System Prompt
 
-Este documento descreve, em nivel de implementacao, como o plugin emula o comportamento de assinatura do Claude Code para requests Anthropic, com foco em:
+This document explains, at implementation level, how the plugin mimics Claude Code signature behavior for Anthropic requests, with focus on:
 
-- composicao de headers HTTP
-- composicao de `system` no body
-- campos auxiliares relacionados (`metadata`, `betas`, URL e toggles)
+- HTTP header composition
+- `system` composition in the request body
+- related auxiliary fields (`metadata`, `betas`, URL shaping, and toggles)
 
-Referencias principais de codigo:
+Primary code references:
 
 - `index.mjs`
 - `lib/config.mjs`
 
-## 1) Chave de controle (liga/desliga)
+## 1) Control switch (on/off)
 
-A mimese e controlada por `signature_emulation`:
+Mimicry is controlled by `signature_emulation`:
 
 ```jsonc
 {
@@ -24,65 +24,65 @@ A mimese e controlada por `signature_emulation`:
 }
 ```
 
-Overrides por env (em `lib/config.mjs`):
+Environment overrides (in `lib/config.mjs`):
 
 - `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE`
-  - `1/true` => ativa
-  - `0/false` => desativa
+  - `1/true` => enabled
+  - `0/false` => disabled
 - `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`
-  - `1/true` => busca versao mais recente do `@anthropic-ai/claude-code` no startup
-  - `0/false` => usa fallback interno
+  - `1/true` => fetch latest `@anthropic-ai/claude-code` version on startup
+  - `0/false` => keep internal fallback version
 
-Quando `signature_emulation.enabled=false`, o plugin cai para comportamento legado do transform de system prompt (prefixo Claude Code no hook `experimental.chat.system.transform`) e nao aplica o bloco completo de mimese de headers/system descrito abaixo.
+When `signature_emulation.enabled=false`, the plugin falls back to legacy system-prompt transform behavior (Claude Code prefix via `experimental.chat.system.transform`) and does not apply the full header/system mimicry block documented below.
 
-## 2) Versao do Claude CLI usada na assinatura
+## 2) Claude CLI version used in signature behavior
 
-Em `AnthropicAuthPlugin`:
+In `AnthropicAuthPlugin`:
 
-- fallback inicial: `2.1.2`
-- se `fetch_claude_code_version_on_startup=true`, faz GET em:
+- initial fallback version: `2.1.2`
+- if `fetch_claude_code_version_on_startup=true`, it performs GET on:
   - `https://registry.npmjs.org/@anthropic-ai/claude-code/latest`
-- timeout curto (AbortController), falhas sao silenciosas e mantem fallback
+- short timeout (AbortController); failures are silent and fallback remains active
 
-Essa versao alimenta:
+This version is used by:
 
 - `user-agent`
 - `x-stainless-package-version`
-- hash do bloco `x-anthropic-billing-header` no system
+- `x-anthropic-billing-header` hash generation in `system`
 
-## 3) Fluxo de request onde a mimese acontece
+## 3) Request flow where mimicry is applied
 
-No `auth.loader().fetch(...)`:
+Inside `auth.loader().fetch(...)`:
 
-1. transforma URL (`transformRequestUrl`)
-2. seleciona conta e resolve token (com refresh se necessario)
-3. transforma body (`transformRequestBody`) com contexto runtime
-4. monta headers (`buildRequestHeaders`)
-5. sincroniza `body.betas` a partir do header `anthropic-beta` (`syncBodyBetasFromHeader`)
-6. executa `fetch`
+1. transform URL (`transformRequestUrl`)
+2. select account and resolve token (including refresh when needed)
+3. transform body (`transformRequestBody`) with runtime context
+4. build headers (`buildRequestHeaders`)
+5. sync `body.betas` from the `anthropic-beta` header (`syncBodyBetasFromHeader`)
+6. execute `fetch`
 
-Importante: o body e transformado por tentativa/conta (nao apenas uma vez), para que `metadata.user_id` inclua o `accountId` real da conta em uso naquela tentativa.
+Important: body transform happens per-attempt/per-account (not only once), so `metadata.user_id` includes the actual `accountId` in use for that attempt.
 
-## 4) Mimese de HTTP headers
+## 4) HTTP header mimicry
 
-### 4.1 Headers sempre aplicados
+### 4.1 Headers always applied
 
-`buildRequestHeaders(...)` sempre garante:
+`buildRequestHeaders(...)` always ensures:
 
 - `authorization: Bearer <token>`
-  - token padrao: access token OAuth da conta
-  - override opcional: `ANTHROPIC_AUTH_TOKEN` (se definido, tem precedencia)
-- `anthropic-beta: <lista final de betas>`
+  - default token: account OAuth access token
+  - optional override: `ANTHROPIC_AUTH_TOKEN` (if set, takes precedence)
+- `anthropic-beta: <final beta list>`
 - `user-agent: claude-cli/<version> (external, <entrypoint>[, agent-sdk/<v>][, client-app/<app>])`
-  - `entrypoint`: `CLAUDE_CODE_ENTRYPOINT` ou `cli`
-  - sufixos opcionais:
+  - `entrypoint`: `CLAUDE_CODE_ENTRYPOINT` or `cli`
+  - optional suffixes:
     - `CLAUDE_AGENT_SDK_VERSION`
     - `CLAUDE_AGENT_SDK_CLIENT_APP`
-- remove sempre `x-api-key`
+- always removes `x-api-key`
 
-### 4.2 Headers extras quando mimese esta ativa
+### 4.2 Extra headers when mimicry is enabled
 
-Com `signature.enabled=true`, adiciona:
+With `signature.enabled=true`, it adds:
 
 - `anthropic-version: 2023-06-01`
 - `anthropic-dangerous-direct-browser-access: true`
@@ -95,57 +95,57 @@ Com `signature.enabled=true`, adiciona:
 - `x-stainless-runtime-version: <process.version>`
 - `x-stainless-helper-method: stream`
 - `x-stainless-retry-count`
-  - preserva valor de entrada se existir e nao for falsy explicitamente
-  - senao define `0`
+  - preserves incoming value when present and not explicitly falsy
+  - otherwise sets `0`
 - `x-stainless-helper`
-  - extraido dinamicamente de `tools`/`messages` no body
-  - coleta chaves: `x_stainless_helper`, `x-stainless-helper`, `stainless_helper`, `stainlessHelper`, `_stainless_helper`
-  - agrega sem duplicatas, separado por virgula
+  - extracted dynamically from `tools`/`messages` in body
+  - scans keys: `x_stainless_helper`, `x-stainless-helper`, `stainless_helper`, `stainlessHelper`, `_stainless_helper`
+  - aggregates unique values as comma-separated list
 
-Tambem injeta headers opcionais por env:
+It also injects optional env-driven headers:
 
-- `ANTHROPIC_CUSTOM_HEADERS` (multilinha `Header-Name: value`)
-  - cada linha valida vira header
+- `ANTHROPIC_CUSTOM_HEADERS` (multiline `Header-Name: value`)
+  - each valid line is converted into a header
 - `CLAUDE_CODE_CONTAINER_ID` => `x-claude-remote-container-id`
 - `CLAUDE_CODE_REMOTE_SESSION_ID` => `x-claude-remote-session-id`
 - `CLAUDE_AGENT_SDK_CLIENT_APP` => `x-client-app`
 - `CLAUDE_CODE_ADDITIONAL_PROTECTION=1/true/yes` => `x-anthropic-additional-protection: true`
 
-## 5) Catalogo de beta headers (referencia Claude Code vs estado atual)
+## 5) Beta header catalog (Claude Code reference vs current plugin)
 
-### 5.1 Regra de composicao no plugin
+### 5.1 Beta composition rule in the plugin
 
-A funcao `buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provider)`:
+Function: `buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provider)`
 
-- inicia com `oauth-2025-04-20`
-- preserva betas de entrada (`incomingBeta`) e remove duplicados no merge
+- starts with `oauth-2025-04-20`
+- preserves incoming betas (`incomingBeta`) and deduplicates on merge
 
-Quando `signatureEnabled=false`:
+When `signatureEnabled=false`:
 
-- adiciona `interleaved-thinking-2025-05-14` (alem de oauth)
+- adds `interleaved-thinking-2025-05-14` (in addition to OAuth beta)
 
-Quando `signatureEnabled=true`, no estado atual pode adicionar dinamicamente:
+When `signatureEnabled=true`, current implementation may add dynamically:
 
-- `claude-code-20250219` (nao adiciona para modelos haiku)
-- `interleaved-thinking-2025-05-14` (se modelo suporta e nao desativado por `DISABLE_INTERLEAVED_THINKING`)
-- `context-1m-2025-08-07` (se modelo indica 1M context)
-- `context-management-2025-06-27` (modo nao interativo + flags)
-- `structured-outputs-2025-12-15` (modelo suporta + `TENGU_TOOL_PEAR`)
-- `tool-examples-2025-10-29` (modo nao interativo + `TENGU_SCARF_COFFEE`)
-- `web-search-2025-03-05` (provider `vertex`/`foundry` + modelo com suporte)
-- `prompt-caching-scope-2026-01-05` (modo nao interativo)
-- betas adicionais de `ANTHROPIC_BETAS` (exceto haiku)
-- `fine-grained-tool-streaming-2025-05-14` (observacao: ver nota em 5.4)
+- `claude-code-20250219` (not added for Haiku models)
+- `interleaved-thinking-2025-05-14` (if model supports it and not disabled by `DISABLE_INTERLEAVED_THINKING`)
+- `context-1m-2025-08-07` (if model indicates 1M context)
+- `context-management-2025-06-27` (non-interactive mode + flags)
+- `structured-outputs-2025-12-15` (model supports it + `TENGU_TOOL_PEAR`)
+- `tool-examples-2025-10-29` (non-interactive mode + `TENGU_SCARF_COFFEE`)
+- `web-search-2025-03-05` (provider `vertex`/`foundry` + supported model)
+- `prompt-caching-scope-2026-01-05` (non-interactive mode)
+- additional betas from `ANTHROPIC_BETAS` (except Haiku)
+- `fine-grained-tool-streaming-2025-05-14` (see note in 5.4)
 
-Filtro por provider:
+Provider filter:
 
-- se provider detectado for `bedrock`, remove betas em `BEDROCK_UNSUPPORTED_BETAS`.
+- if detected provider is `bedrock`, remove betas listed in `BEDROCK_UNSUPPORTED_BETAS`.
 
-Deteccao de provider e por hostname da URL (`anthropic`, `bedrock`, `vertex`, `foundry`).
+Provider detection is based on request URL hostname (`anthropic`, `bedrock`, `vertex`, `foundry`).
 
-### 5.2 Betas de referencia do Claude Code (lista consolidada)
+### 5.2 Claude Code reference beta list (consolidated)
 
-Betas ativados automaticamente pelo Claude Code (conforme levantamento funcional):
+Automatically enabled by Claude Code (functional reference):
 
 - `claude-code-20250219`
 - `interleaved-thinking-2025-05-14`
@@ -160,7 +160,7 @@ Betas ativados automaticamente pelo Claude Code (conforme levantamento funcional
 - `oauth-2025-04-20`
 - `token-counting-2024-11-01` (preflight `/v1/messages/count_tokens`)
 
-Betas considerados uteis em integracoes especificas:
+Useful in specific integrations:
 
 - `files-api-2025-04-14`
 - `message-batches-2024-09-24`
@@ -168,125 +168,125 @@ Betas considerados uteis em integracoes especificas:
 - `compact-2026-01-12`
 - `mcp-servers-2025-12-04`
 
-Betas de plataforma (nao usar diretamente como comportamento cross-provider):
+Platform-specific betas (not cross-provider defaults):
 
 - `bedrock-2023-05-31`
 - `vertex-2023-10-16`
 - `oauth-2025-04-20`
 - `ccr-byoc-2025-07-29`
 
-### 5.3 Gap atual do plugin em relacao a referencia
+### 5.3 Current plugin gaps vs reference
 
-Ainda nao ha composicao automatica dedicada para:
+No dedicated automatic composition yet for:
 
 - `adaptive-thinking-2026-01-28`
 - `effort-2025-11-24`
 - `fast-mode-2026-02-01`
-- `token-counting-2024-11-01` (fluxo de preflight)
+- `token-counting-2024-11-01` (preflight flow)
 
-Esses betas ainda podem ser injetados manualmente via `ANTHROPIC_BETAS` quando fizer sentido operacional.
+These can still be injected manually through `ANTHROPIC_BETAS` when operationally required.
 
-### 5.4 Nota importante sobre fine-grained tool streaming
+### 5.4 Important note on fine-grained tool streaming
 
-`fine-grained-tool-streaming` no Claude Code e modelado primariamente por campo de tool (`eager_input_streaming=true`) e feature flag/env, nao como dependencia obrigatoria de beta header.
+In Claude Code, `fine-grained-tool-streaming` is primarily modeled through tool fields (`eager_input_streaming=true`) and feature/env flags, not as a mandatory beta header dependency.
 
-No estado atual deste plugin, ele ainda pode aparecer na lista de betas montada automaticamente. Isso foi mantido para compatibilidade com o comportamento ja implementado, mas deve ser tratado como area de ajuste fino para alinhamento estrito com o CLI de referencia.
+In this plugin's current state, it may still appear in the automatically composed beta list. This remains for compatibility with already-implemented behavior, but should be treated as an alignment refinement area against the reference CLI.
 
-## 6) Mimese de system prompt
+## 6) System prompt mimicry
 
-### 6.1 Normalizacao de blocos
+### 6.1 Block normalization
 
-`normalizeSystemTextBlocks(system)` converte `system` para array de objetos:
+`normalizeSystemTextBlocks(system)` converts `system` into an array of objects:
 
-- strings viram `{ type: "text", text: "..." }`
-- objetos com `text` string sao mantidos
-- preserva `cacheScope` quando presente
+- strings become `{ type: "text", text: "..." }`
+- objects with string `text` are preserved
+- preserves `cacheScope` when present
 
-### 6.2 Sanitizacao de texto
+### 6.2 Text sanitization
 
-`sanitizeSystemText(text)` aplica:
+`sanitizeSystemText(text)` applies:
 
 - `OpenCode` => `Claude Code`
-- `opencode`/`OpenCode` variantes => `Claude`
-  - com excecao de ocorrencia precedida por `/` (preserva paths)
+- `opencode`/`OpenCode` variants => `Claude`
+  - except when preceded by `/` (path-like occurrence preserved)
 
-### 6.3 Blocos injetados quando mimese ativa
+### 6.3 Injected blocks when mimicry is enabled
 
-`buildSystemPromptBlocks(...)` faz:
+`buildSystemPromptBlocks(...)`:
 
-1. sanitiza todos os blocos
-2. remove blocos pre-existentes que ja sejam:
+1. sanitizes all blocks
+2. removes pre-existing blocks that are already:
    - `x-anthropic-billing-header: ...`
-   - strings de identidade conhecidas (`KNOWN_IDENTITY_STRINGS`)
-3. cria lista final com ordem:
-   - (opcional) billing header block com `cacheScope: null`
-   - identity block oficial com `cacheScope: "org"`
-   - blocos originais filtrados/sanitizados
+   - known identity strings (`KNOWN_IDENTITY_STRINGS`)
+3. builds final ordered list:
+   - (optional) billing header block with `cacheScope: null`
+   - canonical identity block with `cacheScope: "org"`
+   - original filtered/sanitized blocks
 
-Identity canonical usada:
+Canonical identity string:
 
 - `You are Claude Code, Anthropic's official CLI for Claude.`
 
-### 6.4 Como o billing header e gerado
+### 6.4 Billing header generation
 
 `buildAnthropicBillingHeader(claudeCliVersion, messages)`:
 
-- pode ser desativado por `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
-- pega o primeiro texto de mensagem `user`
-- amostra caracteres nas posicoes `[4, 7, 20]` (fallback `"0"` se faltar)
-- calcula `sha256(BILLING_HASH_SALT + sampled + claudeCliVersion)`
+- can be disabled by `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
+- extracts first `user` message text
+- samples chars at positions `[4, 7, 20]` (fallback `"0"` if missing)
+- computes `sha256(BILLING_HASH_SALT + sampled + claudeCliVersion)`
   - `BILLING_HASH_SALT = "59cf53e54c78"`
-- usa os 3 primeiros hex chars como sufixo de hash
-- monta string:
+- uses first 3 hex chars as hash suffix
+- builds:
 
 ```text
 x-anthropic-billing-header: cc_version=<claudeCliVersion>.<hash3>; cc_entrypoint=<entrypoint>; cch=00000;
 ```
 
-Detalhe: `cc_entrypoint` aqui usa `CLAUDE_CODE_ENTRYPOINT` ou `unknown` (diferente do user-agent, cujo default e `cli`).
+Detail: `cc_entrypoint` here uses `CLAUDE_CODE_ENTRYPOINT` or `unknown` (different from `user-agent`, whose default is `cli`).
 
-## 7) Campos de body relacionados a mimese
+## 7) Body fields related to mimicry
 
-Quando mimese ativa, `transformRequestBody(...)` adiciona/atualiza:
+When mimicry is enabled, `transformRequestBody(...)` adds/updates:
 
-- `metadata.user_id` no formato:
+- `metadata.user_id` with format:
   - `user_<persistentUserId>_account_<accountId>_session_<sessionId>`
 
-Onde:
+Where:
 
 - `persistentUserId`:
-  - override opcional por `OPENCODE_ANTHROPIC_SIGNATURE_USER_ID`
-  - senao, carregado de arquivo persistente em `getConfigDir()/anthropic-signature-user-id`
-  - se nao existir, gera UUID e persiste
-- `sessionId`: UUID gerado uma vez por inicializacao do plugin
-- `accountId`: `account.accountUuid` se existir; fallback para `account.id`
+  - optional override via `OPENCODE_ANTHROPIC_SIGNATURE_USER_ID`
+  - otherwise loaded from persisted file at `getConfigDir()/anthropic-signature-user-id`
+  - if absent, generates UUID and persists it
+- `sessionId`: UUID generated once per plugin initialization
+- `accountId`: `account.accountUuid` when present; fallback to `account.id`
 
-Depois de montar headers, `syncBodyBetasFromHeader(...)` garante:
+After headers are built, `syncBodyBetasFromHeader(...)` ensures:
 
 - `body.betas = anthropic-beta.split(",")` (trim/filter)
 
-Assim o body carrega a mesma lista efetiva de betas enviada no header.
+This keeps body betas aligned with the final effective header beta list.
 
-## 8) Ajustes de URL relacionados
+## 8) Related URL shaping
 
-`transformRequestUrl(input)` adiciona `?beta=true` para requests em `/v1/messages` quando o parametro ainda nao existe.
+`transformRequestUrl(input)` appends `?beta=true` for `/v1/messages` requests when the query parameter is not already present.
 
-## 9) Compatibilidade e fallback
+## 9) Compatibility and fallback behavior
 
-- Mimese ativa por padrao (config default)
-- Se desativada, o plugin mantem operacao de auth/rotacao e usa caminho legado de system transform
-- Falhas em parsing JSON do body nao derrubam request (retorna body original)
-- Falhas de IO ao persistir `persistentUserId` nao derrubam request (UUID runtime continua valendo)
-- Falha na busca de versao no npm nao derruba startup (usa fallback)
+- Mimicry is enabled by default (config default)
+- If disabled, plugin keeps auth/rotation behavior and uses legacy system transform path
+- JSON parse failures in body transform do not break requests (original body is preserved)
+- IO failures while persisting `persistentUserId` do not break requests (runtime UUID remains usable)
+- NPM version fetch failure does not break startup (fallback version is used)
 
-## 10) Checklist rapido de verificacao
+## 10) Quick verification checklist
 
-Para auditar se a mimese esta ativa em runtime:
+To audit whether mimicry is active at runtime:
 
-1. confirmar `signature_emulation.enabled=true` (config ou env)
-2. inspecionar request headers e verificar presenca de `x-stainless-*`, `x-app`, `anthropic-version`
-3. verificar `anthropic-beta` com flags esperadas para modelo/provider
-4. inspecionar body e confirmar:
-   - `system[0..]` contendo identity block (e billing block se nao desativado)
-   - `metadata.user_id` no formato composto
-   - `betas` alinhado com header
+1. confirm `signature_emulation.enabled=true` (config or env)
+2. inspect request headers and verify `x-stainless-*`, `x-app`, `anthropic-version`
+3. verify `anthropic-beta` includes expected flags for model/provider
+4. inspect body and confirm:
+   - `system[0..]` includes identity block (and billing block unless disabled)
+   - `metadata.user_id` follows composed format
+   - `betas` is aligned with header
