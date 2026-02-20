@@ -108,7 +108,7 @@ Run the auth flow again (via CLI `login` or OpenCode's Connect Provider). The pl
 - **Manage** &mdash; enable/disable/remove accounts inline
 - **Cancel** &mdash; keep current setup
 
-You can also use the **"Create an API Key"** or **"Manually enter API Key"** auth methods if you prefer API key auth (single account, no rotation).
+This fork is OAuth-first. Use `claude.ai` login flows (`login` / `reauth`) for all accounts.
 
 ## CLI
 
@@ -328,13 +328,19 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 | `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).      |
 | `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                    |
 
+### OAuth-only behavior
+
+- The expected auth mode is OAuth (`claude login` / browser flow), not direct `ANTHROPIC_API_KEY` usage.
+- In OAuth mode, the plugin always includes `oauth-2025-04-20` in `anthropic-beta`.
+- This applies to all models, including Haiku.
+
 ## How It Works
 
 When you make a request through OpenCode:
 
 1. The plugin selects an account based on your strategy
 2. It refreshes the OAuth token if expired
-3. It transforms the request (adds OAuth headers, beta flags, tool prefixes)
+3. It transforms the request (adds OAuth headers, `oauth-2025-04-20`, signature headers, beta flags, tool prefixes)
 4. If the response is account-specific (429/401, plus 400/403 billing/quota/permission errors), it marks that account and immediately tries the next account
 5. If the response is service-wide (500/503/529), it returns the error directly (switching accounts would not help)
 6. It tries each available account at most once per request
