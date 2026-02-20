@@ -1,9 +1,11 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { AccountManager } from "./lib/accounts.mjs";
 import { authorize, exchange } from "./lib/oauth.mjs";
-import { loadConfig, CLIENT_ID } from "./lib/config.mjs";
+import { loadConfig, CLIENT_ID, getConfigDir } from "./lib/config.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { isAccountSpecificError, parseRateLimitReason, parseRetryAfterHeader } from "./lib/backoff.mjs";
 
@@ -123,6 +125,7 @@ const STAINLESS_HELPER_KEYS = [
   "stainlessHelper",
   "_stainless_helper",
 ];
+const USER_ID_STORAGE_FILE = "anthropic-signature-user-id";
 
 /**
  * @param {string | undefined} value
@@ -150,6 +153,77 @@ function isFalsyEnv(value) {
 function isNonInteractiveMode() {
   if (isTruthyEnv(process.env.CI)) return true;
   return !process.stdout.isTTY;
+}
+
+/**
+ * @returns {string}
+ */
+function getClaudeEntrypoint() {
+  return process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
+}
+
+/**
+ * @param {string} claudeCliVersion
+ * @returns {string}
+ */
+function buildUserAgent(claudeCliVersion) {
+  const sdkSuffix = process.env.CLAUDE_AGENT_SDK_VERSION ? `, agent-sdk/${process.env.CLAUDE_AGENT_SDK_VERSION}` : "";
+  const appSuffix = process.env.CLAUDE_AGENT_SDK_CLIENT_APP
+    ? `, client-app/${process.env.CLAUDE_AGENT_SDK_CLIENT_APP}`
+    : "";
+  return `claude-cli/${claudeCliVersion} (external, ${getClaudeEntrypoint()}${sdkSuffix}${appSuffix})`;
+}
+
+/**
+ * @returns {Record<string, string>}
+ */
+function parseAnthropicCustomHeaders() {
+  const raw = process.env.ANTHROPIC_CUSTOM_HEADERS;
+  if (!raw) return {};
+
+  /** @type {Record<string, string>} */
+  const headers = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const sep = trimmed.indexOf(":");
+    if (sep <= 0) continue;
+    const key = trimmed.slice(0, sep).trim();
+    const value = trimmed.slice(sep + 1).trim();
+    if (!key || !value) continue;
+    headers[key] = value;
+  }
+
+  return headers;
+}
+
+/**
+ * @returns {string}
+ */
+function getOrCreateSignatureUserId() {
+  const envUserId = process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID?.trim();
+  if (envUserId) return envUserId;
+
+  const configDir = getConfigDir();
+  const userIdPath = join(configDir, USER_ID_STORAGE_FILE);
+
+  try {
+    if (existsSync(userIdPath)) {
+      const existing = readFileSync(userIdPath, "utf-8").trim();
+      if (existing) return existing;
+    }
+  } catch {
+    // fall through and generate a new id
+  }
+
+  const generated = randomUUID();
+  try {
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(userIdPath, `${generated}\n`, { encoding: "utf-8", mode: 0o600 });
+  } catch {
+    // Ignore filesystem errors; caller still gets generated ID for this runtime.
+  }
+  return generated;
 }
 
 /**
@@ -288,6 +362,30 @@ function getFirstUserText(messages) {
     if (text) return text;
   }
   return "";
+}
+
+/**
+ * @param {{id?: string, accountUuid?: string} | null | undefined} account
+ * @returns {string}
+ */
+function getAccountIdentifier(account) {
+  if (account?.accountUuid && typeof account.accountUuid === "string") {
+    return account.accountUuid;
+  }
+  if (account?.id && typeof account.id === "string") {
+    return account.id;
+  }
+  return "";
+}
+
+/**
+ * @param {{persistentUserId: string, accountId: string, sessionId: string}} input
+ * @returns {{user_id: string}}
+ */
+function buildRequestMetadata(input) {
+  return {
+    user_id: `user_${input.persistentUserId}_account_${input.accountId}_session_${input.sessionId}`,
+  };
 }
 
 /**
@@ -543,9 +641,12 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
   const provider = detectProvider(requestUrl);
   const mergedBetas = buildAnthropicBetaHeader(incomingBeta, signature.enabled, model, provider);
 
-  requestHeaders.set("authorization", `Bearer ${accessToken}`);
+  const authTokenOverride = process.env.ANTHROPIC_AUTH_TOKEN?.trim();
+  const bearerToken = authTokenOverride || accessToken;
+
+  requestHeaders.set("authorization", `Bearer ${bearerToken}`);
   requestHeaders.set("anthropic-beta", mergedBetas);
-  requestHeaders.set("user-agent", `claude-cli/${signature.claudeCliVersion} (external, cli)`);
+  requestHeaders.set("user-agent", buildUserAgent(signature.claudeCliVersion));
   if (signature.enabled) {
     requestHeaders.set("anthropic-version", "2023-06-01");
     requestHeaders.set("anthropic-dangerous-direct-browser-access", "true");
@@ -566,6 +667,22 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
     if (stainlessHelpers) {
       requestHeaders.set("x-stainless-helper", stainlessHelpers);
     }
+
+    for (const [key, value] of Object.entries(parseAnthropicCustomHeaders())) {
+      requestHeaders.set(key, value);
+    }
+    if (process.env.CLAUDE_CODE_CONTAINER_ID) {
+      requestHeaders.set("x-claude-remote-container-id", process.env.CLAUDE_CODE_CONTAINER_ID);
+    }
+    if (process.env.CLAUDE_CODE_REMOTE_SESSION_ID) {
+      requestHeaders.set("x-claude-remote-session-id", process.env.CLAUDE_CODE_REMOTE_SESSION_ID);
+    }
+    if (process.env.CLAUDE_AGENT_SDK_CLIENT_APP) {
+      requestHeaders.set("x-client-app", process.env.CLAUDE_AGENT_SDK_CLIENT_APP);
+    }
+    if (isTruthyEnv(process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION)) {
+      requestHeaders.set("x-anthropic-additional-protection", "true");
+    }
   }
   requestHeaders.delete("x-api-key");
 
@@ -578,9 +695,10 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
  *
  * @param {string | undefined} body
  * @param {{enabled: boolean, claudeCliVersion: string}} signature
+ * @param {{persistentUserId: string, sessionId: string, accountId: string}} runtime
  * @returns {string | undefined}
  */
-function transformRequestBody(body, signature) {
+function transformRequestBody(body, signature, runtime) {
   if (!body || typeof body !== "string") return body;
 
   const TOOL_PREFIX = "mcp_";
@@ -591,6 +709,21 @@ function transformRequestBody(body, signature) {
 
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signature, messages);
+
+    if (signature.enabled) {
+      const currentMetadata =
+        parsed.metadata && typeof parsed.metadata === "object" && !Array.isArray(parsed.metadata)
+          ? parsed.metadata
+          : {};
+      parsed.metadata = {
+        ...currentMetadata,
+        ...buildRequestMetadata({
+          persistentUserId: runtime.persistentUserId,
+          accountId: runtime.accountId,
+          sessionId: runtime.sessionId,
+        }),
+      };
+    }
 
     // Add prefix to tools definitions
     if (parsed.tools && Array.isArray(parsed.tools)) {
@@ -619,6 +752,30 @@ function transformRequestBody(body, signature) {
     return JSON.stringify(parsed);
   } catch {
     // ignore parse errors
+    return body;
+  }
+}
+
+/**
+ * @param {string | undefined} body
+ * @param {Headers} requestHeaders
+ * @param {boolean} signatureEnabled
+ * @returns {string | undefined}
+ */
+function syncBodyBetasFromHeader(body, requestHeaders, signatureEnabled) {
+  if (!signatureEnabled || !body || typeof body !== "string") return body;
+
+  const betaHeader = requestHeaders.get("anthropic-beta");
+  if (!betaHeader) return body;
+
+  try {
+    const parsed = JSON.parse(body);
+    parsed.betas = betaHeader
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return JSON.stringify(parsed);
+  } catch {
     return body;
   }
 }
@@ -1380,6 +1537,8 @@ export async function AnthropicAuthPlugin({ client }) {
   }
 
   let claudeCliVersion = FALLBACK_CLAUDE_CLI_VERSION;
+  const signatureSessionId = randomUUID();
+  const signatureUserId = getOrCreateSignatureUserId();
   if (shouldFetchClaudeCodeVersion) {
     fetchLatestClaudeCodeVersion()
       .then((version) => {
@@ -1486,12 +1645,8 @@ export async function AnthropicAuthPlugin({ client }) {
               const currentAuth = await getAuth();
               if (currentAuth.type !== "oauth") return fetch(input, init);
 
-              // Transform body and URL once (shared across retries)
+              // Transform URL once (shared across retries)
               const requestInit = init ?? {};
-              const body = transformRequestBody(requestInit.body, {
-                enabled: signatureEmulationEnabled,
-                claudeCliVersion,
-              });
               const { requestInput, requestUrl } = transformRequestUrl(input);
               const requestMethod = String(
                 requestInit.method || (requestInput instanceof Request ? requestInput.method : "POST"),
@@ -1582,11 +1737,25 @@ export async function AnthropicAuthPlugin({ client }) {
                   accessToken = account.access;
                 }
 
+                let body = transformRequestBody(
+                  requestInit.body,
+                  {
+                    enabled: signatureEmulationEnabled,
+                    claudeCliVersion,
+                  },
+                  {
+                    persistentUserId: signatureUserId,
+                    sessionId: signatureSessionId,
+                    accountId: getAccountIdentifier(account),
+                  },
+                );
+
                 // Build headers with the selected account's token
                 const requestHeaders = buildRequestHeaders(input, requestInit, accessToken, body, requestUrl, {
                   enabled: signatureEmulationEnabled,
                   claudeCliVersion,
                 });
+                body = syncBodyBetasFromHeader(body, requestHeaders, signatureEmulationEnabled);
 
                 // Execute the request
                 let response;

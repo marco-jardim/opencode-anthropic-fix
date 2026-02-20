@@ -54,6 +54,25 @@ vi.stubGlobal("fetch", mockFetch);
 import { AnthropicAuthPlugin } from "./index.mjs";
 import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
 
+beforeEach(() => {
+  delete process.env.DISABLE_INTERLEAVED_THINKING;
+  delete process.env.USE_API_CONTEXT_MANAGEMENT;
+  delete process.env.TENGU_MARBLE_ANVIL;
+  delete process.env.TENGU_TOOL_PEAR;
+  delete process.env.TENGU_SCARF_COFFEE;
+  delete process.env.ANTHROPIC_BETAS;
+  delete process.env.ANTHROPIC_CUSTOM_HEADERS;
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  delete process.env.CLAUDE_CODE_ENTRYPOINT;
+  delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER;
+  delete process.env.CLAUDE_AGENT_SDK_VERSION;
+  delete process.env.CLAUDE_AGENT_SDK_CLIENT_APP;
+  delete process.env.CLAUDE_CODE_CONTAINER_ID;
+  delete process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
+  delete process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION;
+  process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID = "test-signature-user";
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -505,6 +524,16 @@ describe("fetch interceptor", () => {
     delete process.env.TENGU_TOOL_PEAR;
     delete process.env.TENGU_SCARF_COFFEE;
     delete process.env.ANTHROPIC_BETAS;
+    delete process.env.ANTHROPIC_CUSTOM_HEADERS;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.CLAUDE_CODE_ENTRYPOINT;
+    delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER;
+    delete process.env.CLAUDE_AGENT_SDK_VERSION;
+    delete process.env.CLAUDE_AGENT_SDK_CLIENT_APP;
+    delete process.env.CLAUDE_CODE_CONTAINER_ID;
+    delete process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
+    delete process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION;
+    process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID = "test-signature-user";
     delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER;
     delete process.env.CLAUDE_CODE_ENTRYPOINT;
 
@@ -1692,6 +1721,84 @@ describe("header handling", () => {
       cacheScope: "org",
     });
     expect(parsed.system.some((item) => item.text.startsWith("x-anthropic-billing-header:"))).toBe(false);
+  });
+
+  it("adds metadata.user_id and betas array to request body", async () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4",
+        messages: [{ role: "user", content: "hello" }],
+        system: [],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.metadata.user_id).toMatch(
+      /^user_test-signature-user_account_[^_]+_session_[0-9a-f]{8}-[0-9a-f-]{27}$/,
+    );
+    expect(Array.isArray(parsed.betas)).toBe(true);
+    expect(parsed.betas).toContain("oauth-2025-04-20");
+    expect(parsed.betas).toContain("claude-code-20250219");
+  });
+
+  it("uses ANTHROPIC_AUTH_TOKEN when provided", async () => {
+    process.env.ANTHROPIC_AUTH_TOKEN = "manual-override-token";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers.get("authorization")).toBe("Bearer manual-override-token");
+  });
+
+  it("builds user-agent with agent sdk suffixes", async () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+    process.env.CLAUDE_AGENT_SDK_VERSION = "1.2.3";
+    process.env.CLAUDE_AGENT_SDK_CLIENT_APP = "my-app";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const ua = init.headers.get("user-agent");
+    expect(ua).toContain("(external, cli, agent-sdk/1.2.3, client-app/my-app)");
+  });
+
+  it("adds remote and custom headers from environment", async () => {
+    process.env.ANTHROPIC_CUSTOM_HEADERS = "X-Extra-One: value1\nX-Extra-Two: value2";
+    process.env.CLAUDE_CODE_CONTAINER_ID = "container-123";
+    process.env.CLAUDE_CODE_REMOTE_SESSION_ID = "session-456";
+    process.env.CLAUDE_AGENT_SDK_CLIENT_APP = "my-app";
+    process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION = "1";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers.get("x-extra-one")).toBe("value1");
+    expect(init.headers.get("x-extra-two")).toBe("value2");
+    expect(init.headers.get("x-claude-remote-container-id")).toBe("container-123");
+    expect(init.headers.get("x-claude-remote-session-id")).toBe("session-456");
+    expect(init.headers.get("x-client-app")).toBe("my-app");
+    expect(init.headers.get("x-anthropic-additional-protection")).toBe("true");
   });
 
   it("filters unsupported betas on bedrock endpoints", async () => {
