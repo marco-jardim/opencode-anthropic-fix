@@ -37,7 +37,13 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
   const original = await importOriginal();
   return {
     ...original,
-    loadConfig: vi.fn(() => ({ ...original.DEFAULT_CONFIG })),
+    loadConfig: vi.fn(() => ({
+      ...original.DEFAULT_CONFIG,
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+    })),
   };
 });
 
@@ -527,7 +533,10 @@ describe("fetch interceptor", () => {
     const headers = init.headers;
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
+    expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
     expect(headers.get("user-agent")).toContain("claude-cli");
+    expect(headers.get("x-app")).toBe("cli");
+    expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.has("x-api-key")).toBe(false);
   });
 
@@ -695,16 +704,14 @@ describe("fetch interceptor", () => {
 // ---------------------------------------------------------------------------
 
 describe("system prompt transform", () => {
-  it("prepends Claude Code prefix for anthropic provider", async () => {
+  it("does not prepend Claude Code prefix in emulation mode", async () => {
     const client = makeClient();
     const plugin = await AnthropicAuthPlugin({ client });
 
     const output = { system: ["You are a helpful assistant."] };
     plugin["experimental.chat.system.transform"]({ model: { providerID: "anthropic" } }, output);
 
-    expect(output.system[0]).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
-    expect(output.system[1]).toContain("You are Claude Code");
-    expect(output.system[1]).toContain("You are a helpful assistant.");
+    expect(output.system).toEqual(["You are a helpful assistant."]);
   });
 
   it("does not modify system for non-anthropic provider", async () => {
@@ -715,6 +722,27 @@ describe("system prompt transform", () => {
     plugin["experimental.chat.system.transform"]({ model: { providerID: "openai" } }, output);
 
     expect(output.system).toEqual(["You are a helpful assistant."]);
+  });
+
+  it("keeps legacy prefix behavior when emulation is disabled", async () => {
+    const configModule = await import("./lib/config.mjs");
+    configModule.loadConfig.mockReturnValueOnce({
+      ...configModule.loadConfig(),
+      signature_emulation: {
+        enabled: false,
+        fetch_claude_code_version_on_startup: false,
+      },
+    });
+
+    const client = makeClient();
+    const plugin = await AnthropicAuthPlugin({ client });
+
+    const output = { system: ["You are a helpful assistant."] };
+    plugin["experimental.chat.system.transform"]({ model: { providerID: "anthropic" } }, output);
+
+    expect(output.system[0]).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    expect(output.system[1]).toContain("You are Claude Code");
+    expect(output.system[1]).toContain("You are a helpful assistant.");
   });
 });
 
@@ -1545,6 +1573,8 @@ describe("header handling", () => {
     // Should contain both required betas AND the custom ones
     expect(betaHeader).toContain("oauth-2025-04-20");
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
+    expect(betaHeader).toContain("claude-code-20250219");
+    expect(betaHeader).toContain("fine-grained-tool-streaming-2025-05-14");
     expect(betaHeader).toContain("custom-beta-2025-01-01");
     expect(betaHeader).toContain("another-beta-2025-02-01");
   });
