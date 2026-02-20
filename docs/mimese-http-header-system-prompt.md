@@ -63,6 +63,41 @@ Inside `auth.loader().fetch(...)`:
 
 Important: body transform happens per-attempt/per-account (not only once), so `metadata.user_id` includes the actual `accountId` in use for that attempt.
 
+### 3.1 Protocol sequence diagram (Mermaid)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as OpenCode Runtime
+    participant Plugin as AnthropicAuthPlugin
+    participant Account as AccountManager
+    participant OAuth as OAuth Token Layer
+    participant API as Anthropic API
+
+    Client->>Plugin: fetch(input, init)
+    Plugin->>Plugin: transformRequestUrl(input)
+
+    loop per attempt / account
+        Plugin->>Account: getCurrentAccount(model)
+        Account-->>Plugin: selected account
+
+        Plugin->>OAuth: resolve access token (refresh if needed)
+        OAuth-->>Plugin: bearer token
+
+        Plugin->>Plugin: transformRequestBody(body, signature, runtime)
+        Note over Plugin: inject metadata.user_id + system blocks
+
+        Plugin->>Plugin: buildRequestHeaders(...)
+        Note over Plugin: compose anthropic-beta (includes oauth-2025-04-20)
+
+        Plugin->>Plugin: syncBodyBetasFromHeader(body, headers)
+        Plugin->>API: fetch(url, {headers, body})
+        API-->>Plugin: response
+    end
+
+    Plugin-->>Client: final response
+```
+
 ## 4) HTTP header mimicry
 
 ### 4.1 Headers always applied
