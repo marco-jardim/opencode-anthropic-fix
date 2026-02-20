@@ -288,6 +288,11 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
     "enabled": true,
     // Resolve latest @anthropic-ai/claude-code version once on plugin startup
     "fetch_claude_code_version_on_startup": true,
+    // Compact long injected system instructions to reduce token usage.
+    // In "minimal" mode, repeated/contained blocks are deduplicated and title-generator
+    // requests are replaced with a compact dedicated prompt.
+    // "minimal" | "off"
+    "prompt_compaction": "minimal",
   },
 
   // Health score tuning (0-100 scale)
@@ -320,13 +325,15 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 
 ### Environment Variables
 
-| Variable                                           | Description                                                          |
-| -------------------------------------------------- | -------------------------------------------------------------------- |
-| `OPENCODE_ANTHROPIC_STRATEGY`                      | Override the account selection strategy at runtime.                  |
-| `OPENCODE_ANTHROPIC_DEBUG`                         | Set to `1` to enable debug logging.                                  |
-| `OPENCODE_ANTHROPIC_QUIET`                         | Set to `1` to suppress non-error toasts (account status, switching). |
-| `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).      |
-| `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                    |
+| Variable                                           | Description                                                                                               |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `OPENCODE_ANTHROPIC_STRATEGY`                      | Override the account selection strategy at runtime.                                                       |
+| `OPENCODE_ANTHROPIC_DEBUG`                         | Set to `1` to enable debug logging.                                                                       |
+| `OPENCODE_ANTHROPIC_QUIET`                         | Set to `1` to suppress non-error toasts (account status, switching).                                      |
+| `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).                                           |
+| `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                                                         |
+| `OPENCODE_ANTHROPIC_PROMPT_COMPACTION`             | Set to `off` to disable default minimal system prompt compaction.                                         |
+| `OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT`           | Set to `1` to log the final transformed `system` prompt to stderr (title-generator requests are skipped). |
 
 ### OAuth-only behavior
 
@@ -351,6 +358,7 @@ The plugin also:
 - Zeros out model costs (your subscription covers usage)
 - Emulates Claude-style request headers and beta flags by default
 - Sanitizes "OpenCode" references to "Claude Code" in system prompts (required by Anthropic's API)
+- In `prompt_compaction="minimal"`, deduplicates repeated/contained system blocks and uses a compact dedicated prompt for internal title-generation requests
 - Adds `?beta=true` to `/v1/messages` requests
 
 When signature emulation is disabled (`signature_emulation.enabled=false`), the plugin falls back to legacy behavior including the Claude Code system prompt prefix.
@@ -385,6 +393,23 @@ opencode-anthropic-auth reauth 1
 ```
 
 Or re-run the auth flow from OpenCode: `Ctrl+K` &rarr; Connect Provider &rarr; Anthropic.
+
+### "Need to inspect the final system prompt sent to Anthropic"
+
+Enable system prompt debug logging:
+
+```bash
+export OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT=1
+opencode
+```
+
+When enabled, the plugin prints the transformed `system` block (after sanitization/compaction) to `stderr` with prefix:
+
+```text
+[opencode-anthropic-auth][system-debug] transformed system:
+```
+
+Note: internal title-generator requests are intentionally skipped by this debug log to avoid noisy high-volume output.
 
 ### "Rate limited on all accounts"
 

@@ -126,6 +126,17 @@ const STAINLESS_HELPER_KEYS = [
   "_stainless_helper",
 ];
 const USER_ID_STORAGE_FILE = "anthropic-signature-user-id";
+const DEBUG_SYSTEM_PROMPT_ENV = "OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT";
+const COMPACT_TITLE_GENERATOR_SYSTEM_PROMPT = [
+  "You are a title generator. You output ONLY a thread title. Nothing else.",
+  "",
+  "Rules:",
+  "- Use the same language as the user message.",
+  "- Output exactly one line.",
+  "- Keep the title at or below 50 characters.",
+  "- No explanations, prefixes, or suffixes.",
+  "- Keep important technical terms, numbers, and filenames when present.",
+].join("\n");
 
 /**
  * @param {string | undefined} value
@@ -224,6 +235,33 @@ function getOrCreateSignatureUserId() {
     // Ignore filesystem errors; caller still gets generated ID for this runtime.
   }
   return generated;
+}
+
+/**
+ * @returns {boolean}
+ */
+function shouldDebugSystemPrompt() {
+  return isTruthyEnv(process.env[DEBUG_SYSTEM_PROMPT_ENV]);
+}
+
+/**
+ * @param {string | undefined} body
+ */
+function logTransformedSystemPrompt(body) {
+  if (!shouldDebugSystemPrompt()) return;
+  if (!body || typeof body !== "string") return;
+
+  try {
+    const parsed = JSON.parse(body);
+    if (!Object.prototype.hasOwnProperty.call(parsed, "system")) return;
+    if (isTitleGeneratorSystemBlocks(normalizeSystemTextBlocks(parsed.system))) return;
+    console.error(
+      "[opencode-anthropic-auth][system-debug] transformed system:",
+      JSON.stringify(parsed.system, null, 2),
+    );
+  } catch {
+    // Ignore parse errors in debug logging path.
+  }
 }
 
 /**
@@ -412,9 +450,103 @@ function buildAnthropicBillingHeader(claudeCliVersion, messages) {
  * @returns {string}
  */
 function sanitizeSystemText(text) {
+  return text.replace(/OpenCode/g, "Claude Code").replace(/opencode/gi, "Claude");
+}
+
+/**
+ * @param {string} text
+ * @param {'minimal' | 'off'} mode
+ * @returns {string}
+ */
+function compactSystemText(text, mode) {
+  const withoutDuplicateIdentityPrefix = text.startsWith(`${CLAUDE_CODE_IDENTITY_STRING}\n`)
+    ? text.slice(CLAUDE_CODE_IDENTITY_STRING.length).trimStart()
+    : text;
+
+  if (mode === "off") {
+    return withoutDuplicateIdentityPrefix.trim();
+  }
+
+  const compacted = withoutDuplicateIdentityPrefix.replace(/<example>[\s\S]*?<\/example>/gi, "\n");
+
+  const dedupedLines = [];
+  let prevNormalized = "";
+  for (const line of compacted.split("\n")) {
+    const normalized = line.trim();
+    if (normalized && normalized === prevNormalized) continue;
+    dedupedLines.push(line);
+    prevNormalized = normalized;
+  }
+
+  return dedupedLines
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+function normalizeSystemTextForComparison(text) {
   return text
-    .replace(/OpenCode/g, "Claude Code")
-    .replace(/opencode/gi, (match, offset, source) => (offset > 0 && source[offset - 1] === "/" ? match : "Claude"));
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * @param {Array<{type: string, text: string, cache_control?: {type: string}}>} system
+ * @returns {Array<{type: string, text: string, cache_control?: {type: string}}>}
+ */
+function dedupeSystemBlocks(system) {
+  const exactSeen = new Set();
+  const exactDeduped = [];
+
+  for (const item of system) {
+    const normalized = normalizeSystemTextForComparison(item.text);
+    const key = `${item.type}:${normalized}`;
+    if (exactSeen.has(key)) continue;
+    exactSeen.add(key);
+    exactDeduped.push(item);
+  }
+
+  const normalizedBlocks = exactDeduped.map((item) => normalizeSystemTextForComparison(item.text));
+  return exactDeduped.filter((_, index) => {
+    const current = normalizedBlocks[index];
+    if (current.length < 80) return true;
+
+    for (let otherIndex = 0; otherIndex < normalizedBlocks.length; otherIndex += 1) {
+      if (otherIndex === index) continue;
+      const other = normalizedBlocks[otherIndex];
+      if (other.length <= current.length + 20) continue;
+      if (other.includes(current)) return false;
+    }
+
+    return true;
+  });
+}
+
+/**
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isTitleGeneratorSystemText(text) {
+  const normalized = text.trim().toLowerCase();
+  return normalized.includes("you are a title generator") || normalized.includes("generate a brief title");
+}
+
+/**
+ * @param {Array<{type: string, text: string, cache_control?: {type: string}}>} system
+ * @returns {boolean}
+ */
+function isTitleGeneratorSystemBlocks(system) {
+  return system.some(
+    (item) => item.type === "text" && typeof item.text === "string" && isTitleGeneratorSystemText(item.text),
+  );
 }
 
 /**
@@ -454,12 +586,23 @@ function normalizeSystemTextBlocks(system) {
 
 /**
  * @param {Array<{type: string, text: string, cache_control?: {type: string}}>} system
- * @param {{enabled: boolean, claudeCliVersion: string}} signature
+ * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off'}} signature
  * @param {any[]} messages
  * @returns {Array<{type: string, text: string, cache_control?: {type: string}}>}
  */
 function buildSystemPromptBlocks(system, signature, messages) {
-  const sanitized = system.map((item) => ({ ...item, text: sanitizeSystemText(item.text) }));
+  const titleGeneratorRequest = isTitleGeneratorSystemBlocks(system);
+
+  let sanitized = system.map((item) => ({
+    ...item,
+    text: compactSystemText(sanitizeSystemText(item.text), signature.promptCompactionMode),
+  }));
+
+  if (titleGeneratorRequest) {
+    sanitized = [{ type: "text", text: COMPACT_TITLE_GENERATOR_SYSTEM_PROMPT }];
+  } else if (signature.promptCompactionMode !== "off") {
+    sanitized = dedupeSystemBlocks(sanitized);
+  }
 
   if (!signature.enabled) {
     return sanitized;
@@ -702,7 +845,7 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
  * Preserves behaviors E1-E7.
  *
  * @param {string | undefined} body
- * @param {{enabled: boolean, claudeCliVersion: string}} signature
+ * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off'}} signature
  * @param {{persistentUserId: string, sessionId: string, accountId: string}} runtime
  * @returns {string | undefined}
  */
@@ -713,6 +856,9 @@ function transformRequestBody(body, signature, runtime) {
 
   try {
     const parsed = JSON.parse(body);
+    if (Object.prototype.hasOwnProperty.call(parsed, "betas")) {
+      delete parsed.betas;
+    }
     const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
 
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
@@ -1125,6 +1271,7 @@ function parseCommandArgs(raw) {
 export async function AnthropicAuthPlugin({ client }) {
   const config = loadConfig();
   const signatureEmulationEnabled = config.signature_emulation.enabled;
+  const promptCompactionMode = config.signature_emulation.prompt_compaction === "off" ? "off" : "minimal";
   const shouldFetchClaudeCodeVersion =
     signatureEmulationEnabled && config.signature_emulation.fetch_claude_code_version_on_startup;
 
@@ -1726,6 +1873,7 @@ export async function AnthropicAuthPlugin({ client }) {
                   {
                     enabled: signatureEmulationEnabled,
                     claudeCliVersion,
+                    promptCompactionMode,
                   },
                   {
                     persistentUserId: signatureUserId,
@@ -1733,6 +1881,7 @@ export async function AnthropicAuthPlugin({ client }) {
                     accountId: getAccountIdentifier(account),
                   },
                 );
+                logTransformedSystemPrompt(body);
 
                 // Build headers with the selected account's token
                 const requestHeaders = buildRequestHeaders(input, requestInit, accessToken, body, requestUrl, {

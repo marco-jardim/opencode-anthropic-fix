@@ -20,6 +20,7 @@ Mimicry is controlled by `signature_emulation`:
   "signature_emulation": {
     "enabled": true,
     "fetch_claude_code_version_on_startup": true,
+    "prompt_compaction": "minimal",
   },
 }
 ```
@@ -32,6 +33,9 @@ Environment overrides (in `lib/config.mjs`):
 - `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`
   - `1/true` => fetch latest `@anthropic-ai/claude-code` version on startup
   - `0/false` => keep internal fallback version
+- `OPENCODE_ANTHROPIC_PROMPT_COMPACTION`
+  - `minimal` => compact long system instruction blocks (default)
+  - `off` => disable compaction
 
 When `signature_emulation.enabled=false`, the plugin falls back to legacy system-prompt transform behavior (Claude Code prefix via `experimental.chat.system.transform`) and does not apply the full header/system mimicry block documented below.
 

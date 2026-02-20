@@ -70,6 +70,7 @@ beforeEach(() => {
   delete process.env.CLAUDE_CODE_CONTAINER_ID;
   delete process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
   delete process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION;
+  delete process.env.OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT;
   process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID = "test-signature-user";
 });
 
@@ -533,6 +534,7 @@ describe("fetch interceptor", () => {
     delete process.env.CLAUDE_CODE_CONTAINER_ID;
     delete process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
     delete process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION;
+    delete process.env.OPENCODE_ANTHROPIC_PROMPT_COMPACTION;
     process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID = "test-signature-user";
     delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER;
     delete process.env.CLAUDE_CODE_ENTRYPOINT;
@@ -608,7 +610,7 @@ describe("fetch interceptor", () => {
     expect(payloadText).toContain("You are Claude Code, an Claude assistant.");
   });
 
-  it("preserves paths containing opencode in system prompt", async () => {
+  it("redacts opencode mentions inside path-like text in system prompt", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -622,7 +624,125 @@ describe("fetch interceptor", () => {
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     const payloadText = body.system.map((item) => item.text);
-    expect(payloadText).toContain("Working dir: /Users/rmk/projects/opencode-auth");
+    expect(payloadText).toContain("Working dir: /Users/rmk/projects/Claude-auth");
+    expect(payloadText.join("\n")).not.toMatch(/opencode/i);
+  });
+
+  it("compacts verbose system instructions in minimal mode (default)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        messages: [],
+        system: [
+          {
+            type: "text",
+            text: "You are Claude Code, Anthropic's official CLI for Claude.\n\nHeader\n<example>remove me</example>\nRule A\nRule A\n\n\nRule B",
+          },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    const userBlock = body.system[2].text;
+    expect(userBlock).not.toContain("<example>");
+    expect(userBlock).toContain("Rule A");
+    expect(userBlock).toContain("Rule B");
+    expect(userBlock).not.toContain("\n\n\n");
+  });
+
+  it("deduplicates nested repeated instruction blocks in minimal mode", async () => {
+    const repeated =
+      "## Model Delegation Protocol\nPreset: openai\nDelegate with Task(subagent_type='fast|medium|heavy', prompt='...').";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "hello" }],
+        system: [
+          {
+            type: "text",
+            text: `You are Claude Code, the best coding agent on the planet.\n\n${repeated}\n\nOther section`,
+          },
+          { type: "text", text: repeated },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    const joined = body.system.map((item) => item.text).join("\n\n");
+    const occurrences = (joined.match(/## Model Delegation Protocol/g) || []).length;
+    expect(occurrences).toBe(1);
+  });
+
+  it("uses compact dedicated prompt for title-generator requests", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "test" }],
+        system: [
+          {
+            type: "text",
+            text: "You are a title generator. You output ONLY a thread title. Nothing else.\n\n<task>\nGenerate a brief title that would help the user find this conversation later.\n</task>",
+          },
+          {
+            type: "text",
+            text: "## Model Delegation Protocol\nPreset: openai\nDelegate with Task(subagent_type='fast|medium|heavy', prompt='...').",
+          },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    const textBlocks = body.system.map((item) => item.text);
+
+    expect(textBlocks.join("\n")).not.toContain("Model Delegation Protocol");
+    expect(textBlocks.join("\n")).not.toContain("Delegate with Task(");
+    expect(textBlocks.join("\n")).toContain("You are a title generator. You output ONLY a thread title. Nothing else.");
+    expect(textBlocks.join("\n")).toContain("- Keep the title at or below 50 characters.");
+    expect(textBlocks.join("\n")).not.toContain("<task>");
+  });
+
+  it("preserves verbose system instructions when prompt compaction is off", async () => {
+    const configModule = await import("./lib/config.mjs");
+    configModule.loadConfig.mockReturnValueOnce({
+      ...configModule.loadConfig(),
+      signature_emulation: {
+        ...configModule.loadConfig().signature_emulation,
+        prompt_compaction: "off",
+      },
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const result = await plugin.auth.loader(
+      vi.fn().mockResolvedValue({
+        type: "oauth",
+        refresh: "test-refresh",
+        access: "test-access",
+        expires: Date.now() + 3600_000,
+      }),
+      makeProvider(),
+    );
+
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+    await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        messages: [],
+        system: [{ type: "text", text: "Header\n<example>keep me</example>\nRule A\nRule A" }],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.system[2].text).toContain("<example>keep me</example>");
   });
 
   it("prefixes tool names with mcp_ in request", async () => {
@@ -1703,6 +1823,36 @@ describe("header handling", () => {
     expect(parsed.system[2].text).toBe("Use Claude Code defaults");
   });
 
+  it("redacts opencode mentions and compacts duplicated identity prefix", async () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "hello" }],
+        system: [
+          {
+            type: "text",
+            text: "You are Claude Code, Anthropic's official CLI for Claude.\n\nUse OpenCode defaults\n\n\nSee https://opencode.ai/docs and github.com/anomalyco/opencode",
+          },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+
+    // identity block is injected once by the plugin
+    expect(parsed.system[1].text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    // original block is compacted and redacted
+    expect(parsed.system[2].text.startsWith("You are Claude Code, Anthropic's official CLI for Claude.")).toBe(false);
+    expect(parsed.system[2].text).toContain("Use Claude Code defaults");
+    expect(parsed.system[2].text).not.toMatch(/opencode/i);
+    expect(parsed.system[2].text).not.toContain("\n\n\n");
+  });
+
   it("does not inject billing block when CLAUDE_CODE_ATTRIBUTION_HEADER=0", async () => {
     process.env.CLAUDE_CODE_ATTRIBUTION_HEADER = "0";
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
@@ -1742,6 +1892,20 @@ describe("header handling", () => {
     expect(parsed.metadata.user_id).toMatch(
       /^user_test-signature-user_account_[^_]+_session_[0-9a-f]{8}-[0-9a-f-]{27}$/,
     );
+    expect(parsed.betas).toBeUndefined();
+  });
+
+  it("removes unsupported top-level betas field from request body", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [], betas: ["foo-beta"] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
     expect(parsed.betas).toBeUndefined();
   });
 
@@ -1797,6 +1961,53 @@ describe("header handling", () => {
     expect(init.headers.get("x-claude-remote-session-id")).toBe("session-456");
     expect(init.headers.get("x-client-app")).toBe("my-app");
     expect(init.headers.get("x-anthropic-additional-protection")).toBe("true");
+  });
+
+  it("logs transformed system prompt when debug env is enabled", async () => {
+    process.env.OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT = "1";
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "hello" }],
+        system: [{ type: "text", text: "Use OpenCode defaults" }],
+      }),
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[opencode-anthropic-auth][system-debug] transformed system:",
+      expect.stringContaining("Use Claude Code defaults"),
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("does not log title-generator system prompt when debug env is enabled", async () => {
+    process.env.OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT = "1";
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "test" }],
+        system: [
+          {
+            type: "text",
+            text: "You are a title generator. You output ONLY a thread title. Nothing else.",
+          },
+        ],
+      }),
+    });
+
+    const hadSystemDebugLog = consoleSpy.mock.calls.some(
+      (call) => call[0] === "[opencode-anthropic-auth][system-debug] transformed system:",
+    );
+    expect(hadSystemDebugLog).toBe(false);
+    consoleSpy.mockRestore();
   });
 
   it("filters unsupported betas on bedrock endpoints", async () => {
