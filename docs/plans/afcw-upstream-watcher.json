@@ -1,0 +1,495 @@
+{
+  "manifest_version": "2.0",
+  "project": {
+    "id": "anti_fragile_contract_watcher",
+    "name": "Anti-Fragile Contract-Driven Upstream Watcher (Simplified)",
+    "repo": "marco-jardim/opencode-auth-fix",
+    "upstream": {
+      "npm_package": "@anthropic-ai/claude-code",
+      "trigger_event_type": "claude-contract-changed"
+    },
+    "goals": [
+      "Detect upstream contract changes (not cosmetic refactors)",
+      "Generate patch via template engine with LLM fallback",
+      "Run unit + contract + E2E tests",
+      "Create idempotent PR, auto-merge on green gates",
+      "Publish new npm version idempotently",
+      "Guarantee eventual convergence via reconciliation and retries"
+    ],
+    "design_decisions": [
+      "GitHub Actions only — no external infra (Cloudflare, Durable Objects, KV)",
+      "State persisted as JSON artifact in GitHub Actions or branch-stored file",
+      "Template-based patching for known contract fields; LLM synth as fallback only",
+      "Concurrency control via GitHub Actions concurrency groups (no distributed locks)",
+      "npm publish gated by manual approval or @next tag first"
+    ]
+  },
+  "execution_policy": {
+    "allow_parallel_within_phase": true,
+    "max_parallel_tasks": 3,
+    "require_phase_qa_before_advance": true,
+    "default_retry_policy": {
+      "max_attempts": 3,
+      "backoff": "exponential",
+      "base_delay_seconds": 60,
+      "max_delay_seconds": 900
+    },
+    "escalation_policy": {
+      "on_repeated_failure_attempts": 3,
+      "escalate_to": "human_review_required",
+      "dead_letter_after_attempts": 6
+    }
+  },
+  "global_constraints": [
+    "Contract-driven detection only: do not trigger pipeline on cosmetic or internal refactors unless contract changes.",
+    "Idempotency required for all handlers: safe to run multiple times without duplicating PRs or publishes.",
+    "Deterministic branch naming: auto/claude-<upstreamVersion>.",
+    "npm publish must be idempotent: check if version exists before publishing.",
+    "State transitions must be monotonic, persisted as artifact, and protected by GitHub concurrency groups.",
+    "All E2E tests must be deterministic and must not depend on external network services.",
+    "No Cloudflare, no external databases, no paid infra beyond GitHub Actions minutes."
+  ],
+  "state_machine": {
+    "entity_key": "upstreamVersion:contractHash",
+    "storage": "GitHub Actions artifact (state.json) OR branch file (.afcw/state.json)",
+    "concurrency": "GitHub Actions concurrency group per entity_key",
+    "states": [
+      "NOT_OBSERVED",
+      "DETECTED",
+      "DISPATCHED",
+      "PR_CREATED",
+      "PR_APPROVED",
+      "MERGED",
+      "PUBLISHED",
+      "FAILED_RETRYABLE",
+      "DEAD_LETTER"
+    ],
+    "terminal_states": ["PUBLISHED", "DEAD_LETTER"],
+    "invariants": [
+      "PUBLISHED implies MERGED",
+      "MERGED implies PR_CREATED",
+      "PR_CREATED implies DISPATCHED",
+      "At most one PUBLISHED per entity_key",
+      "DEAD_LETTER is terminal"
+    ],
+    "transitions": [
+      { "from": "NOT_OBSERVED", "event": "DETECTED", "to": "DETECTED" },
+      { "from": "DETECTED", "event": "DISPATCH_OK", "to": "DISPATCHED" },
+      { "from": "DETECTED", "event": "DISPATCH_FAIL", "to": "FAILED_RETRYABLE" },
+      { "from": "DISPATCHED", "event": "PR_CREATED", "to": "PR_CREATED" },
+      { "from": "DISPATCHED", "event": "PR_CREATION_FAIL", "to": "FAILED_RETRYABLE" },
+      { "from": "PR_CREATED", "event": "REVIEW_APPROVED", "to": "PR_APPROVED" },
+      { "from": "PR_CREATED", "event": "REVIEW_REJECTED", "to": "FAILED_RETRYABLE" },
+      { "from": "PR_APPROVED", "event": "MERGED", "to": "MERGED" },
+      { "from": "PR_APPROVED", "event": "MERGE_FAIL", "to": "FAILED_RETRYABLE" },
+      { "from": "MERGED", "event": "PUBLISH_OK", "to": "PUBLISHED" },
+      { "from": "MERGED", "event": "PUBLISH_FAIL", "to": "FAILED_RETRYABLE" },
+      { "from": "FAILED_RETRYABLE", "event": "RETRY", "to": "DETECTED" },
+      { "from": "FAILED_RETRYABLE", "event": "RETRY_LIMIT_EXCEEDED", "to": "DEAD_LETTER" }
+    ]
+  },
+  "providers": {
+    "github": {
+      "resources": [
+        "GitHub Actions (scheduled cron + repository_dispatch + pull_request + push triggers)",
+        "Concurrency groups for distributed locking",
+        "Artifacts for state persistence",
+        "Branch protection + required status checks"
+      ],
+      "secrets": [
+        "GITHUB_TOKEN (default, for PR/dispatch)",
+        "NPM_TOKEN (for publish)",
+        "FIREWORKS_API_KEY (for LLM fallback only)"
+      ]
+    },
+    "npm": {
+      "resources": ["Package publish rights for target package", "Automation token NPM_TOKEN"]
+    },
+    "llm": {
+      "provider": "fireworks",
+      "usage": "fallback only — template patching is primary",
+      "models": {
+        "synth": "Kimi 2.5 (via Fireworks)",
+        "review": "Kimi 2.5 (via Fireworks) OR different model for independence"
+      },
+      "constraints": [
+        "Synth outputs unified diff only",
+        "Reviewer outputs JSON verdict only",
+        "Only invoked when template patcher cannot handle the contract diff"
+      ]
+    }
+  },
+  "tasks": [
+    {
+      "id": "T00",
+      "phase": "P0",
+      "name": "Repository baseline audit and contract schema definition",
+      "difficulty": "medium",
+      "dependencies": [],
+      "outputs": [
+        "docs/afcw/architecture.md",
+        "docs/afcw/paths-allowlist.json",
+        "docs/afcw/contract-schema.json",
+        "docs/afcw/test-plan.md"
+      ],
+      "definition_of_done": [
+        "File allowlist defined (paths + globs for automation-editable files)",
+        "Contract schema JSON drafted (headers, betas, endpoints, system blocks, metadata)",
+        "Test plan includes unit/contract/e2e with determinism constraints",
+        "Architecture doc includes state machine summary and reconciliation approach"
+      ],
+      "qa_gate": ["Allowlist excludes .github/workflows by default", "Contract schema covers all known mimese fields"]
+    },
+    {
+      "id": "T01",
+      "phase": "P1",
+      "name": "Implement npm metadata fetcher + tarball extraction + cli.mjs extractor",
+      "difficulty": "medium",
+      "dependencies": ["T00"],
+      "outputs": ["scripts/fetch-upstream.mjs", "scripts/extract-cli.mjs", "tests/extract-cli.test.mjs"],
+      "definition_of_done": [
+        "Given package name, fetches dist-tags.latest and tarball URL",
+        "Downloads tarball and extracts cli.mjs (fixed path + heuristic fallback)",
+        "Handles scoped package encoding and common tarball layouts"
+      ],
+      "qa_gate": ["Unit tests with fixture tarballs cover multiple path patterns", "Graceful error on missing cli.mjs"]
+    },
+    {
+      "id": "T02",
+      "phase": "P1",
+      "name": "Implement contract extractor and canonical hashing",
+      "difficulty": "heavy",
+      "dependencies": ["T01", "T00"],
+      "outputs": ["scripts/extract-contract.mjs", "scripts/canonicalize.mjs", "tests/contract-extractor.test.mjs"],
+      "definition_of_done": [
+        "extract_contract(cliText) returns {contract, contractHash}",
+        "Deterministic canonical JSON (sorted keys, sorted arrays, normalized strings)",
+        "Same cliText => same contractHash always",
+        "Refactor-only changes => same contractHash (validated by fixtures)",
+        "Meaningful changes (headers/betas/endpoints) => different contractHash"
+      ],
+      "qa_gate": ["Snapshot tests for canonical JSON", "At least 1 'no change' and 1 'contract change' fixture"]
+    },
+    {
+      "id": "T03",
+      "phase": "P1",
+      "name": "Implement contract diff engine with severity scoring",
+      "difficulty": "medium",
+      "dependencies": ["T02"],
+      "outputs": ["scripts/diff-contract.mjs", "tests/diff-contract.test.mjs"],
+      "definition_of_done": [
+        "diff_contract(old, new) => {changed, severity: low|medium|high, diff}",
+        "No change => changed: false",
+        "Critical field change (endpoints, auth) => severity: high"
+      ],
+      "qa_gate": ["Tests cover all severity classifications"]
+    },
+    {
+      "id": "T04",
+      "phase": "P2",
+      "name": "Implement state manager (JSON artifact + concurrency group)",
+      "difficulty": "medium",
+      "dependencies": ["T00"],
+      "outputs": ["scripts/state-manager.mjs", "tests/state-machine.test.mjs"],
+      "definition_of_done": [
+        "State record CRUD via GitHub Actions artifact (state.json)",
+        "Transitions validated against allowed transitions table",
+        "Retry increment and dead-letter logic implemented",
+        "Double-apply same event is idempotent"
+      ],
+      "qa_gate": ["Table-driven tests for all transitions", "Idempotent re-application verified"]
+    },
+    {
+      "id": "T05",
+      "phase": "P2",
+      "name": "Implement scheduled watcher workflow (detect + diff + dispatch)",
+      "difficulty": "heavy",
+      "dependencies": ["T01", "T02", "T03", "T04"],
+      "outputs": [".github/workflows/watch-upstream.yml", "scripts/watcher.mjs"],
+      "definition_of_done": [
+        "Cron-triggered GitHub Actions workflow (every 30 min)",
+        "Fetches latest upstream, extracts contract, compares hash",
+        "No contract change => no dispatch, exits cleanly",
+        "Contract change => creates state record DETECTED, sends repository_dispatch, transitions to DISPATCHED",
+        "Failures => FAILED_RETRYABLE with retry count incremented"
+      ],
+      "qa_gate": ["Dry-run mode for local verification", "Concurrency group prevents parallel runs"]
+    },
+    {
+      "id": "T06",
+      "phase": "P2",
+      "name": "Implement reconciliation workflow (inspect PR/npm status, advance state)",
+      "difficulty": "heavy",
+      "dependencies": ["T04", "T05"],
+      "outputs": [".github/workflows/reconcile.yml", "scripts/reconciler.mjs", "tests/reconciler.test.mjs"],
+      "definition_of_done": [
+        "Cron-triggered (every 15 min), inspects non-terminal entities",
+        "DISPATCHED + PR exists => PR_CREATED",
+        "PR_CREATED + merged => MERGED",
+        "MERGED + npm version published => PUBLISHED",
+        "FAILED_RETRYABLE retry until limit then DEAD_LETTER",
+        "Safe when GitHub/npm temporarily unavailable"
+      ],
+      "qa_gate": ["Simulated failure recovery scenario tests", "Multiple reconciliation runs are idempotent"]
+    },
+    {
+      "id": "T07",
+      "phase": "P3",
+      "name": "Implement template patcher + LLM synth fallback",
+      "difficulty": "heavy",
+      "dependencies": ["T03", "T00"],
+      "outputs": [
+        "scripts/template-patcher.mjs",
+        "scripts/llm-synth.mjs",
+        "docs/afcw/llm-prompts.md",
+        "tests/template-patcher.test.mjs"
+      ],
+      "definition_of_done": [
+        "Template patcher handles known field changes (headers, betas, endpoints, system blocks)",
+        "LLM synth invoked only when template patcher returns unsupported diff",
+        "Both produce unified diff that only touches allowlist paths",
+        "Diff scope validator blocks forbidden files"
+      ],
+      "qa_gate": [
+        "Template patcher covers ≥80% of historical contract diffs",
+        "LLM synth tested with mocked Fireworks response"
+      ]
+    },
+    {
+      "id": "T08",
+      "phase": "P3",
+      "name": "Implement LLM reviewer + CI pipeline workflow",
+      "difficulty": "medium",
+      "dependencies": ["T07"],
+      "outputs": ["scripts/llm-review.mjs", "scripts/verify-review.mjs", ".github/workflows/ci.yml"],
+      "definition_of_done": [
+        "Reviewer outputs JSON: {approve, risk_score, notes[]}",
+        "Invalid reviewer output => reject (fail-closed)",
+        "CI workflow runs: unit tests, contract tests, e2e tests, lint, review verdict",
+        "All checks required for merge"
+      ],
+      "qa_gate": ["Golden tests for parsing and fail-closed behavior", "CI workflow syntax validated"]
+    },
+    {
+      "id": "T09",
+      "phase": "P3",
+      "name": "Implement idempotent PR creation + contract/e2e tests",
+      "difficulty": "medium",
+      "dependencies": ["T07", "T08"],
+      "outputs": [
+        "scripts/create-or-update-pr.mjs",
+        ".github/workflows/on-dispatch.yml",
+        "tests/contract.test.mjs",
+        "tests/e2e-handshake.test.mjs",
+        "tests/mocks/oauth-server.mjs",
+        "tests/mocks/api-server.mjs"
+      ],
+      "definition_of_done": [
+        "Branch deterministic: auto/claude-<version>",
+        "If branch/PR exists: update; else create",
+        "Running twice does not create duplicates",
+        "Contract test: impl contract matches upstream contract",
+        "E2E test: mock OAuth + API, validate headers/payload/system blocks",
+        "E2E is fully offline (no external network)"
+      ],
+      "qa_gate": ["Dry-run mode for local verification", "Removing required header makes E2E fail"]
+    },
+    {
+      "id": "T10",
+      "phase": "P4",
+      "name": "Implement release automation + npm publish idempotency",
+      "difficulty": "medium",
+      "dependencies": ["T09"],
+      "outputs": [".github/workflows/release.yml", "scripts/publish-if-needed.mjs"],
+      "definition_of_done": [
+        "Triggered on push to main after merge",
+        "Checks if version already exists on npm before publish",
+        "Publishes as @next tag first (promote to @latest via manual step or delay)",
+        "Creates GitHub release + git tag",
+        "If version already published, exits cleanly and marks PUBLISHED"
+      ],
+      "qa_gate": ["Dry-run mode documented and tested"]
+    },
+    {
+      "id": "T11",
+      "phase": "P5",
+      "name": "End-to-end validation + alerting + observability",
+      "difficulty": "heavy",
+      "dependencies": ["T05", "T06", "T09", "T10"],
+      "outputs": ["docs/afcw/e2e-validation.md", "docs/afcw/observability.md", "scripts/alert-dead-letter.mjs"],
+      "definition_of_done": [
+        "Failure injection scenarios: dispatch fail, LLM fail, CI fail, publish fail",
+        "All scenarios converge to terminal state via reconciliation",
+        "DEAD_LETTER triggers GitHub issue creation (alert)",
+        "State transitions logged with entity_key in workflow logs",
+        "At least 5 scenario runs documented with outcomes"
+      ],
+      "qa_gate": [
+        "No scenario leaves system in non-terminal state without retries/reconciliation",
+        "Alert test verified"
+      ]
+    }
+  ],
+  "phase_gates": [
+    {
+      "phase": "P0",
+      "gate_name": "Baseline Gate",
+      "must_pass": ["T00"],
+      "evidence": ["Contract schema defined", "Allowlist defined", "Test plan drafted"]
+    },
+    {
+      "phase": "P1",
+      "gate_name": "Foundation Gate",
+      "must_pass": ["T01", "T02", "T03"],
+      "evidence": [
+        "Scripts can fetch npm metadata, tarball, extract cli.mjs",
+        "Contract extractor stable and tested",
+        "Diff engine severity validated"
+      ]
+    },
+    {
+      "phase": "P2",
+      "gate_name": "Orchestration Gate",
+      "must_pass": ["T04", "T05", "T06"],
+      "evidence": [
+        "State machine enforced with concurrency groups",
+        "Watcher detects and dispatches correctly",
+        "Reconciler advances states based on PR/npm inspection"
+      ]
+    },
+    {
+      "phase": "P3",
+      "gate_name": "Pipeline Gate",
+      "must_pass": ["T07", "T08", "T09"],
+      "evidence": [
+        "Template patcher handles known diffs",
+        "LLM synth fallback produces scoped patch",
+        "LLM review gates merges",
+        "PR idempotent flow works",
+        "Contract + E2E tests pass"
+      ]
+    },
+    {
+      "phase": "P4",
+      "gate_name": "Release Gate",
+      "must_pass": ["T10"],
+      "evidence": ["npm publish idempotent on merge", "Release notes/tag produced"]
+    },
+    {
+      "phase": "P5",
+      "gate_name": "System Acceptance Gate",
+      "must_pass": ["T11"],
+      "evidence": [
+        "Failure injection scenarios converge to terminal state",
+        "Alerting works",
+        "No stuck partial states"
+      ]
+    }
+  ],
+  "examples": {
+    "watcher_cron": "*/30 * * * *",
+    "reconciler_cron": "*/15 * * * *",
+    "entity_key_example": "1.4.7:8f23ab9c (upstreamVersion:contractHash)",
+    "branch_name_example": "auto/claude-1.4.7",
+    "state_artifact_example": {
+      "entities": {
+        "1.4.7:8f23ab9c": {
+          "state": "PR_CREATED",
+          "retries": 0,
+          "lastEvent": "PR_CREATED",
+          "createdAt": "2026-02-20T15:00:00Z",
+          "updatedAt": "2026-02-20T15:05:00Z",
+          "prNumber": 42,
+          "branchName": "auto/claude-1.4.7"
+        }
+      }
+    },
+    "repository_dispatch_payload_example": {
+      "event_type": "claude-contract-changed",
+      "client_payload": {
+        "upstreamVersion": "1.4.7",
+        "contractHash": "8f23ab9c",
+        "severity": "high",
+        "diffSummary": { "oauth.tokenEndpoint": { "from": "A", "to": "B" } }
+      }
+    },
+    "review_verdict_example": {
+      "approve": true,
+      "risk_score": 2,
+      "notes": ["Patch updates token endpoint and required header set; no scope creep."]
+    }
+  },
+  "troubleshooting": [
+    {
+      "symptom": "New npm version published but no workflow triggered",
+      "likely_causes": [
+        "Watcher cron disabled or workflow file missing",
+        "Contract extractor failed (cli.mjs path changed) and marked FAILED_RETRYABLE repeatedly",
+        "GitHub Actions runner quota exhausted"
+      ],
+      "checks": [
+        "Check Actions tab for recent watch-upstream runs",
+        "Download state.json artifact and inspect latest entity records",
+        "Verify GITHUB_TOKEN permissions include contents:write"
+      ],
+      "fixes": [
+        "Adjust cli.mjs extraction heuristics in scripts/extract-cli.mjs",
+        "Manually trigger workflow_dispatch to force re-check",
+        "Check Actions billing/quota"
+      ]
+    },
+    {
+      "symptom": "PR duplicates created",
+      "likely_causes": ["Branch naming not deterministic", "PR existence check missing or race condition"],
+      "fixes": [
+        "Enforce branch name auto/claude-<version>",
+        "Search PR by head ref before create in scripts/create-or-update-pr.mjs",
+        "Ensure concurrency group is active for on-dispatch workflow"
+      ]
+    },
+    {
+      "symptom": "System stuck in MERGED but not PUBLISHED",
+      "likely_causes": [
+        "npm publish failed silently",
+        "release.yml not triggered on push to main",
+        "NPM_TOKEN missing/invalid/expired"
+      ],
+      "fixes": [
+        "Verify release.yml triggers on push main",
+        "Check scripts/publish-if-needed.mjs dry-run output",
+        "Rotate NPM_TOKEN",
+        "Reconciler should advance to PUBLISHED if npm already has the version"
+      ]
+    },
+    {
+      "symptom": "Template patcher fails on unknown contract diff shape",
+      "likely_causes": ["Upstream introduced new contract fields not in template map", "Contract schema out of date"],
+      "fixes": [
+        "LLM synth fallback should activate automatically",
+        "Update contract-schema.json and template-patcher.mjs for new field",
+        "Check diff severity — high severity + template fail should alert"
+      ]
+    },
+    {
+      "symptom": "LLM synth produces invalid or out-of-scope patch",
+      "likely_causes": ["Prompt drift or model regression", "Context too large and truncated poorly"],
+      "fixes": [
+        "LLM reviewer should reject (fail-closed)",
+        "Review and update prompt in docs/afcw/llm-prompts.md",
+        "Check diff scope validator is blocking forbidden files"
+      ]
+    },
+    {
+      "symptom": "Entity stuck in DEAD_LETTER",
+      "likely_causes": [
+        "Repeated failures exhausted retry limit",
+        "Fundamental incompatibility requires manual intervention"
+      ],
+      "fixes": [
+        "Inspect GitHub issue created by alert-dead-letter.mjs",
+        "Manually review contract diff and create PR",
+        "After manual fix, update state.json artifact to PUBLISHED"
+      ]
+    }
+  ]
+}
