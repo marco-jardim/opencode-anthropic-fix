@@ -33,6 +33,8 @@ The [upstream plugin](https://github.com/anomalyco/opencode-anthropic-auth) ship
 - **Standalone CLI** &mdash; manage accounts without opening OpenCode
 - **Configurable strategies** &mdash; sticky, round-robin, or hybrid account selection
 - **Claude Code signature emulation** &mdash; optional Claude-style request headers with startup version lookup
+- **Adaptive thinking for Opus 4.6** &mdash; automatically uses `adaptive-thinking-2026-01-28` and maps `budgetTokens` to effort levels (`low`/`medium`/`high`/`max`)
+- **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
 
 ## Installation
 
