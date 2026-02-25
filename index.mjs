@@ -282,6 +282,18 @@ function supportsThinking(model) {
 }
 
 /**
+ * Detects claude-opus-4.6 / claude-opus-4-6 model IDs.
+ * These models use adaptive thinking (effort parameter) instead of
+ * manual budgetTokens.
+ * @param {string} model
+ * @returns {boolean}
+ */
+function isOpus46Model(model) {
+  if (!model) return false;
+  return /claude-opus-4[._-]6/i.test(model);
+}
+
+/**
  * @param {string} model
  * @returns {boolean}
  */
@@ -651,11 +663,19 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
     betas.push(CLAUDE_CODE_BETA_FLAG);
   }
 
-  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && supportsThinking(model)) {
+  if (isOpus46Model(model)) {
+    // Opus 4.6 uses adaptive thinking — model decides how much to think based on task complexity.
+    // The effort parameter guides it; budgetTokens/interleaved-thinking are for older models.
+    if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING)) {
+      betas.push("adaptive-thinking-2026-01-28");
+    }
+  } else if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && supportsThinking(model)) {
     betas.push("interleaved-thinking-2025-05-14");
   }
 
-  if (hasOneMillionContext(model)) {
+  // context-1m-2025-08-07 is only supported for API key users; OAuth provider does not support it.
+  // For OAuth (this plugin's only auth mode), compaction is gated by model.limit.input instead.
+  if (hasOneMillionContext(model) && provider !== "anthropic") {
     betas.push("context-1m-2025-08-07");
   }
 
@@ -696,6 +716,66 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
     return mergedBetas.filter((beta) => !BEDROCK_UNSUPPORTED_BETAS.has(beta)).join(",");
   }
   return mergedBetas.join(",");
+}
+
+/** @typedef {'low' | 'medium' | 'high' | 'max'} ThinkingEffort */
+
+/**
+ * Map budgetTokens to an adaptive thinking effort level.
+ * Used when an Opus 4.6 request arrives with the legacy budgetTokens shape.
+ * @param {number} budgetTokens
+ * @returns {ThinkingEffort}
+ */
+function budgetTokensToEffort(budgetTokens) {
+  if (budgetTokens <= 1024) return "low";
+  if (budgetTokens <= 8000) return "medium";
+  if (budgetTokens <= 16000) return "high";
+  return "max";
+}
+
+/**
+ * Validate that a given value is a valid ThinkingEffort string.
+ * @param {unknown} value
+ * @returns {value is ThinkingEffort}
+ */
+function isValidEffort(value) {
+  return value === "low" || value === "medium" || value === "high" || value === "max";
+}
+
+/**
+ * Normalise the `thinking` block in the request body for the target model:
+ * - Opus 4.6 (adaptive thinking): produces `{ type: "enabled", effort: <effort> }`
+ * - Older models: passes the existing thinking block through unchanged.
+ *
+ * Handles three incoming shapes:
+ *   1. Already adaptive: `{ type: "enabled", effort: "..." }` → kept as-is for Opus 4.6
+ *   2. Legacy manual: `{ type: "enabled", budget_tokens: N }` → mapped to effort for Opus 4.6
+ *   3. Absent / disabled: no transform
+ *
+ * @param {any} thinking
+ * @param {string} model
+ * @returns {any}
+ */
+function normalizeThinkingBlock(thinking, model) {
+  if (!thinking || typeof thinking !== "object" || thinking.type !== "enabled") {
+    return thinking;
+  }
+
+  if (!isOpus46Model(model)) {
+    // Older models: pass through unchanged (may have budget_tokens)
+    return thinking;
+  }
+
+  // Opus 4.6: use adaptive thinking with effort
+  if (isValidEffort(thinking.effort)) {
+    // Already in adaptive shape — just strip any legacy budget_tokens field
+    const { budget_tokens: _dropped, ...rest } = thinking;
+    return rest;
+  }
+
+  const effort = typeof thinking.budget_tokens === "number" ? budgetTokensToEffort(thinking.budget_tokens) : "high"; // safe default
+
+  return { type: "enabled", effort };
 }
 
 /**
@@ -860,6 +940,11 @@ function transformRequestBody(body, signature, runtime) {
       delete parsed.betas;
     }
     const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+
+    // Normalize thinking block for adaptive (Opus 4.6) vs manual (older models).
+    if (Object.prototype.hasOwnProperty.call(parsed, "thinking")) {
+      parsed.thinking = normalizeThinkingBlock(parsed.thinking, parsed.model || "");
+    }
 
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signature, messages);

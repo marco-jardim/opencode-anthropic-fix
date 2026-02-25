@@ -1746,7 +1746,7 @@ describe("header handling", () => {
     expect(betaHeader).toContain("another-beta-2025-02-01");
   });
 
-  it("adds context-1m beta when model advertises 1m context", async () => {
+  it("does NOT add context-1m beta for anthropic/OAuth provider (not supported)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -1756,7 +1756,112 @@ describe("header handling", () => {
     });
 
     const [, init] = mockFetch.mock.calls[0];
-    expect(init.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+    // context-1m beta is unsupported on OAuth; compaction is gated by model.limit.input instead.
+    expect(init.headers.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+  });
+
+  it("adds adaptive-thinking beta instead of interleaved-thinking for Opus 4.6 models", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-4-6", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    expect(betaHeader).toContain("adaptive-thinking-2026-01-28");
+    expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
+  });
+
+  it("transforms budget_tokens thinking to effort for Opus 4.6", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-6",
+        messages: [{ role: "user", content: "think hard" }],
+        thinking: { type: "enabled", budget_tokens: 20000 },
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.thinking).toEqual({ type: "enabled", effort: "max" });
+    expect(parsed.thinking.budget_tokens).toBeUndefined();
+  });
+
+  it("maps budget_tokens to effort levels correctly for Opus 4.6", async () => {
+    /** @type {Array<[number, string]>} */
+    const cases = [
+      [512, "low"],
+      [1024, "low"],
+      [1025, "medium"],
+      [8000, "medium"],
+      [8001, "high"],
+      [16000, "high"],
+      [16001, "max"],
+      [100000, "max"],
+    ];
+
+    for (const [budget, expectedEffort] of cases) {
+      mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+      mockFetch.mockClear();
+
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-6",
+          messages: [],
+          thinking: { type: "enabled", budget_tokens: budget },
+        }),
+      });
+
+      const [, init] = mockFetch.mock.calls[0];
+      const parsed = JSON.parse(init.body);
+      expect(parsed.thinking.effort).toBe(expectedEffort);
+      expect(parsed.thinking.budget_tokens).toBeUndefined();
+    }
+  });
+
+  it("keeps effort if already provided for Opus 4.6", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-6",
+        messages: [],
+        thinking: { type: "enabled", effort: "low" },
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.thinking).toEqual({ type: "enabled", effort: "low" });
+  });
+
+  it("passes thinking through unchanged for older models (budget_tokens preserved)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        messages: [],
+        thinking: { type: "enabled", budget_tokens: 8000 },
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
   });
 
   it("adds ANTHROPIC_BETAS entries for non-haiku models", async () => {
