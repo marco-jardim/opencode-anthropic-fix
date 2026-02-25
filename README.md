@@ -2,6 +2,16 @@
 
 Use your Claude Pro or Max subscription with [OpenCode](https://github.com/anomalyco/opencode). Supports multiple accounts with automatic rotation when you hit rate limits.
 
+## Background
+
+[AnomalyCo](https://github.com/anomalyco/opencode-anthropic-auth) originally published this as a built-in plugin shipped with OpenCode itself. The repo was archived following a legal request from Anthropic. Before it was archived, [rmk40](https://github.com/rmk40/opencode-anthropic-auth) — a frequent contributor unrelated to AnomalyCo — had developed multi-account support that never made it upstream.
+
+This fork continues that work and extends it with deeper research into how the official Claude Code CLI identifies itself to the API. The mimicry was derived by analyzing [Claude Code's open source code on GitHub](https://github.com/anthropics/claude-code). This isn't just a system prompt injection — see the [full mimicry analysis](https://github.com/marco-jardim/opencode-anthropic-fix/blob/master/docs/mimese-http-header-system-prompt.md) for details.
+
+> **Educational purpose.** This code exists to study how Anthropic's OAuth protocol and Claude Code's HTTP communication pattern work. It is not intended to be used in violation of Anthropic's Terms of Service.
+
+> **Account risk.** There is a real risk of account suspension if Anthropic detects requests are not coming from Claude Code. The mimicry tries hard to make every request look as close as possible to a genuine Claude Code request, but that reduces rather than eliminates the risk. Use at your own risk.
+
 ## Quick Start
 
 **Prerequisites:** [OpenCode](https://github.com/anomalyco/opencode) installed, a Claude Pro or Max subscription, Node.js 18+.
@@ -23,16 +33,16 @@ opencode
 
 That's it. OpenCode will now use your Claude subscription directly. All model costs show as $0.00.
 
-## Why This Fork?
+## What This Fork Adds
 
-The [upstream plugin](https://github.com/anomalyco/opencode-anthropic-auth) ships as a built-in default with OpenCode. This fork adds:
+The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) provided basic OAuth support. This fork adds:
 
 - **Multi-account support** &mdash; add up to 10 Claude accounts and rotate between them
 - **Automatic rate limit handling** &mdash; when one account hits a limit, the plugin switches to another
 - **Health scoring** &mdash; tracks account reliability and prefers healthy accounts
 - **Standalone CLI** &mdash; manage accounts without opening OpenCode
 - **Configurable strategies** &mdash; sticky, round-robin, or hybrid account selection
-- **Claude Code signature emulation** &mdash; optional Claude-style request headers with startup version lookup
+- **Claude Code signature emulation** &mdash; full HTTP header, system prompt, beta flag, and metadata mimicry derived from Claude Code's open source code
 - **Adaptive thinking for Opus 4.6** &mdash; automatically uses `adaptive-thinking-2026-01-28` and maps `budgetTokens` to effort levels (`low`/`medium`/`high`/`max`)
 - **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
 
