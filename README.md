@@ -38,6 +38,18 @@ The [upstream plugin](https://github.com/anomalyco/opencode-anthropic-auth) ship
 
 ## Installation
 
+### From npm (recommended)
+
+Add to your `opencode.json`:
+
+```json
+{
+  "plugins": ["opencode-anthropic-fix@latest"]
+}
+```
+
+OpenCode will install and load the plugin automatically on next start.
+
 ### Development (symlink)
 
 Best for active development. Edits to source files take effect immediately.
