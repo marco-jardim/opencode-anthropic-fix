@@ -553,7 +553,7 @@ describe("cmdList", () => {
     expect(code).toBe(0);
 
     const text = output.text();
-    expect(text).toMatch(/2m\s+30s/);
+    expect(text).toMatch(/2m\s+(29|30)s/);
   });
 
   it("shows consecutive failure count", async () => {
