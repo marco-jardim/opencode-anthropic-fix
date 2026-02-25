@@ -295,6 +295,20 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
     "prompt_compaction": "minimal",
   },
 
+  // Context limit override for 1M-window models.
+  // Prevents OpenCode from compacting too early when models.dev hasn't been
+  // updated yet (e.g. claude-opus-4-6 and any *-1m model variants).
+  // Only applied for OAuth (Max Plan) sessions — API key users use the
+  // context-1m-2025-08-07 beta header instead.
+  "override_model_limits": {
+    // Enable/disable the override
+    "enabled": true,
+    // Context window to inject (tokens). Default: 1_000_000.
+    "context": 1000000,
+    // Max output tokens to inject. 0 = leave the model's default unchanged.
+    "output": 0,
+  },
+
   // Health score tuning (0-100 scale)
   "health_score": {
     "initial": 70,
@@ -325,15 +339,16 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 
 ### Environment Variables
 
-| Variable                                           | Description                                                                                               |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `OPENCODE_ANTHROPIC_STRATEGY`                      | Override the account selection strategy at runtime.                                                       |
-| `OPENCODE_ANTHROPIC_DEBUG`                         | Set to `1` to enable debug logging.                                                                       |
-| `OPENCODE_ANTHROPIC_QUIET`                         | Set to `1` to suppress non-error toasts (account status, switching).                                      |
-| `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).                                           |
-| `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                                                         |
-| `OPENCODE_ANTHROPIC_PROMPT_COMPACTION`             | Set to `off` to disable default minimal system prompt compaction.                                         |
-| `OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT`           | Set to `1` to log the final transformed `system` prompt to stderr (title-generator requests are skipped). |
+| Variable                                           | Description                                                                                                 |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `OPENCODE_ANTHROPIC_STRATEGY`                      | Override the account selection strategy at runtime.                                                         |
+| `OPENCODE_ANTHROPIC_DEBUG`                         | Set to `1` to enable debug logging.                                                                         |
+| `OPENCODE_ANTHROPIC_QUIET`                         | Set to `1` to suppress non-error toasts (account status, switching).                                        |
+| `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).                                             |
+| `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                                                           |
+| `OPENCODE_ANTHROPIC_PROMPT_COMPACTION`             | Set to `off` to disable default minimal system prompt compaction.                                           |
+| `OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT`           | Set to `1` to log the final transformed `system` prompt to stderr (title-generator requests are skipped).   |
+| `OPENCODE_ANTHROPIC_OVERRIDE_MODEL_LIMITS`         | Set to `0` to disable context limit overrides for 1M-window models (e.g. when models.dev has been updated). |
 
 ### OAuth-only behavior
 

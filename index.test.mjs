@@ -43,6 +43,9 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
         ...original.DEFAULT_CONFIG.signature_emulation,
         fetch_claude_code_version_on_startup: false,
       },
+      override_model_limits: {
+        ...original.DEFAULT_CONFIG.override_model_limits,
+      },
     })),
   };
 });
@@ -96,7 +99,19 @@ function makeProvider() {
   return {
     models: {
       "claude-sonnet": {
+        id: "claude-sonnet",
         cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 8192 },
+      },
+      "claude-opus-4-6": {
+        id: "claude-opus-4-6",
+        cost: { input: 15, output: 75, cache: { read: 1.5, write: 18.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-sonnet-4-1m": {
+        id: "claude-sonnet-4-1m",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 16_000 },
       },
     },
   };
@@ -2594,5 +2609,82 @@ describe("markSuccess wiring", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// override_model_limits — uses setupFetchFn which wires auth.loader via makeProvider()
+// ---------------------------------------------------------------------------
+describe("override_model_limits", () => {
+  let client;
+
+  beforeEach(async () => {
+    client = makeClient();
+    loadAccounts.mockResolvedValue(makeAccountsData());
+    saveAccounts.mockResolvedValue(undefined);
+    mockFetch.mockResolvedValue(new Response("", { status: 200 }));
+    delete process.env.OPENCODE_ANTHROPIC_OVERRIDE_MODEL_LIMITS;
+  });
+
+  it("overrides context limit to 1M for 1M-window models by default (OAuth)", async () => {
+    const provider = makeProvider();
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 3_600_000,
+    });
+    await plugin.auth.loader(getAuth, provider);
+
+    expect(provider.models["claude-opus-4-6"].limit.context).toBe(1_000_000);
+    expect(provider.models["claude-sonnet-4-1m"].limit.context).toBe(1_000_000);
+    // non-1M model untouched
+    expect(provider.models["claude-sonnet"].limit.context).toBe(200_000);
+  });
+
+  it("preserves original output limit when override_model_limits.output is 0 (default)", async () => {
+    const provider = makeProvider();
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 3_600_000,
+    });
+    await plugin.auth.loader(getAuth, provider);
+
+    expect(provider.models["claude-opus-4-6"].limit.output).toBe(32_000);
+    expect(provider.models["claude-sonnet-4-1m"].limit.output).toBe(16_000);
+  });
+
+  it("does not modify limits for non-OAuth auth (API key path)", async () => {
+    const provider = makeProvider();
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({ type: "api" });
+    await plugin.auth.loader(getAuth, provider);
+
+    expect(provider.models["claude-opus-4-6"].limit.context).toBe(200_000);
+    expect(provider.models["claude-sonnet-4-1m"].limit.context).toBe(200_000);
+  });
+
+  it("does not override limits when override_model_limits.enabled is false in config", async () => {
+    const configModule = await import("./lib/config.mjs");
+    configModule.loadConfig.mockReturnValueOnce({
+      ...configModule.loadConfig(),
+      override_model_limits: { enabled: false, context: 1_000_000, output: 0 },
+    });
+    const provider = makeProvider();
+    const pluginDisabled = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 3_600_000,
+    });
+    await pluginDisabled.auth.loader(getAuth, provider);
+
+    expect(provider.models["claude-opus-4-6"].limit.context).toBe(200_000);
+    expect(provider.models["claude-sonnet-4-1m"].limit.context).toBe(200_000);
   });
 });

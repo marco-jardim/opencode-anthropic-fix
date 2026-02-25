@@ -1825,16 +1825,24 @@ export async function AnthropicAuthPlugin({ client }) {
       async loader(getAuth, provider) {
         const auth = await getAuth();
         if (auth.type === "oauth") {
-          // B1-B2: Zero out cost for max plan
+          // B1-B2: Zero out cost for max plan and optionally override context limits.
           for (const model of Object.values(provider.models)) {
             model.cost = {
               input: 0,
               output: 0,
-              cache: {
-                read: 0,
-                write: 0,
-              },
+              cache: { read: 0, write: 0 },
             };
+
+            // Override context limits for 1M-window models so OpenCode
+            // triggers compaction at the right threshold instead of relying
+            // on potentially stale models.dev data.
+            if (config.override_model_limits.enabled && (hasOneMillionContext(model.id) || isOpus46Model(model.id))) {
+              model.limit = {
+                ...(model.limit ?? {}),
+                context: config.override_model_limits.context,
+                ...(config.override_model_limits.output > 0 ? { output: config.override_model_limits.output } : {}),
+              };
+            }
           }
 
           // Initialize AccountManager from disk + OpenCode auth fallback
