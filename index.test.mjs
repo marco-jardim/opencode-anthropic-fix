@@ -798,8 +798,135 @@ describe("fetch interceptor", () => {
     });
 
     const text = await response.text();
-    expect(text).toContain('"name": "read_file"');
+    expect(text).toContain('"name":"read_file"');
     expect(text).not.toContain("mcp_read_file");
+  });
+
+  it("strips mcp_ prefix when a tool_use SSE data line is split across chunks", async () => {
+    const encoder = new TextEncoder();
+    const splitStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode('data:{"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_'),
+        );
+        controller.enqueue(encoder.encode('read_file","id":"t1"}}\n'));
+        controller.enqueue(encoder.encode("\n"));
+        controller.close();
+      },
+    });
+
+    mockFetch.mockResolvedValueOnce(
+      new Response(splitStream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    const text = await response.text();
+    expect(text).toContain('"name":"read_file"');
+    expect(text).not.toContain("mcp_read_file");
+  });
+
+  it("double-prefixes tools already named mcp_* in request body", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        tools: [{ name: "mcp_server", description: "An MCP server tool" }],
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", name: "mcp_server", id: "t1", input: {} }],
+          },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    // Must become mcp_mcp_server so that response stripping restores the original name
+    expect(body.tools[0].name).toBe("mcp_mcp_server");
+    expect(body.messages[0].content[0].name).toBe("mcp_mcp_server");
+  });
+
+  it("round-trips mcp_-prefixed tool names correctly", async () => {
+    // Tool already named mcp_server → sent as mcp_mcp_server → response strips back to mcp_server
+    const responseBody =
+      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_mcp_server","id":"t1"}}\n\n';
+    mockFetch.mockResolvedValueOnce(
+      new Response(responseBody, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        tools: [{ name: "mcp_server", description: "An MCP server tool" }],
+        messages: [],
+      }),
+    });
+
+    const text = await response.text();
+    // Should strip one mcp_ prefix, restoring original name
+    expect(text).toContain('"name":"mcp_server"');
+    expect(text).not.toContain("mcp_mcp_server");
+  });
+
+  it("does not strip mcp_ from text content in response stream", async () => {
+    // A text content block that happens to contain "name": "mcp_foo" — should NOT be modified
+    const responseBody =
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The tool \\"name\\": \\"mcp_foo\\" was called."}}\n\n';
+    mockFetch.mockResolvedValueOnce(
+      new Response(responseBody, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    const text = await response.text();
+    // The mcp_foo in text content should be preserved
+    expect(text).toContain("mcp_foo");
+  });
+
+  it("strips mcp_ from tool_use blocks but not text blocks in response stream", async () => {
+    // Two SSE events: one tool_use (should strip), one text (should preserve)
+    const sseBody = [
+      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_write_file","id":"t1"}}',
+      "",
+      'data: {"type":"content_block_start","content_block":{"type":"text","text":"Using tool \\"name\\": \\"mcp_write_file\\""}}',
+      "",
+    ].join("\n");
+
+    mockFetch.mockResolvedValueOnce(
+      new Response(sseBody, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    const text = await response.text();
+    // tool_use name should have mcp_ stripped
+    expect(text).toContain('"name":"write_file"');
+    // text content should still have mcp_write_file
+    expect(text).toContain("mcp_write_file");
   });
 
   it("does not show account usage toast for non-message endpoints", async () => {
@@ -982,6 +1109,34 @@ describe("fetch interceptor — token refresh", () => {
     );
   });
 
+  it("continues request flow when auth.json persistence fails after successful refresh", async () => {
+    loadAccounts.mockResolvedValue(makeAccountsData());
+    saveAccounts.mockResolvedValue(undefined);
+    client.auth.set.mockRejectedValueOnce(new Error("disk temporarily unavailable"));
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "expired-access",
+      expires: Date.now() - 1000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("fresh-access", "refresh-1-rotated"));
+    mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const [, apiInit] = mockFetch.mock.calls[1];
+    expect(apiInit.headers.get("authorization")).toBe("Bearer fresh-access");
+  });
+
   it("coalesces concurrent refreshes for the same account", async () => {
     loadAccounts.mockResolvedValue(makeAccountsData());
     saveAccounts.mockResolvedValue(undefined);
@@ -1000,11 +1155,26 @@ describe("fetch interceptor — token refresh", () => {
       resolveRefresh = resolve;
     });
 
-    mockFetch.mockImplementation((url) => {
+    let refreshCallCount = 0;
+    /** @type {() => void} */
+    let markRefreshInFlight;
+    const refreshInFlight = new Promise((resolve) => {
+      markRefreshInFlight = resolve;
+    });
+
+    /** @type {string[]} */
+    const apiAuthHeaders = [];
+
+    mockFetch.mockImplementation((url, init) => {
       const s = String(url);
       if (s.includes("/v1/oauth/token")) {
+        refreshCallCount += 1;
+        if (refreshCallCount === 1) markRefreshInFlight();
         return refreshPromise;
       }
+
+      const headers = new Headers(init?.headers ?? undefined);
+      apiAuthHeaders.push(headers.get("authorization") || "");
       return Promise.resolve(new Response('{"content":[]}', { status: 200 }));
     });
 
@@ -1017,8 +1187,8 @@ describe("fetch interceptor — token refresh", () => {
       body: JSON.stringify({ messages: [] }),
     });
 
-    // Let both requests reach refresh path
-    await Promise.resolve();
+    // Wait until refresh is definitely in-flight, then resolve it.
+    await refreshInFlight;
 
     resolveRefresh(mockTokenRefresh("fresh-access", "refresh-1-rotated"));
 
@@ -1028,6 +1198,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const refreshCalls = mockFetch.mock.calls.filter(([u]) => String(u).includes("/v1/oauth/token"));
     expect(refreshCalls).toHaveLength(1);
+    expect(apiAuthHeaders).toEqual(["Bearer fresh-access", "Bearer fresh-access"]);
   });
 
   it("disables account on 401 token refresh failure and retries with next account", async () => {
@@ -1201,18 +1372,15 @@ describe("fetch interceptor — token refresh", () => {
     });
     const result = await plugin.auth.loader(getAuth, makeProvider());
 
-    // Track loadAccounts calls from this point so we can intercept the retry disk-read.
-    // The request will call loadAccounts for: (1) Option A disk-read before refresh,
-    // (2) Option D retry disk-read after invalid_grant.
-    // We want #1 to return old token (same as memory), #2 to return rotated.
-    let diskReadCount = 0;
+    // Request-time disk reads happen in this order:
+    // 1) syncActiveIndexFromDisk, 2) pre-refresh disk read, 3) retry disk read after invalid_grant.
+    const requestDiskReads = [
+      makeAccountsData([{ id: accountId, refreshToken: oldToken }]),
+      makeAccountsData([{ id: accountId, refreshToken: oldToken }]),
+      makeAccountsData([{ id: accountId, refreshToken: rotatedToken }]),
+    ];
     loadAccounts.mockImplementation(async () => {
-      diskReadCount++;
-      // The 2nd disk-read during the request is the retry after invalid_grant
-      if (diskReadCount === 2) {
-        return makeAccountsData([{ id: accountId, refreshToken: rotatedToken }]);
-      }
-      return makeAccountsData([{ id: accountId, refreshToken: oldToken }]);
+      return requestDiskReads.shift() ?? makeAccountsData([{ id: accountId, refreshToken: rotatedToken }]);
     });
 
     // First refresh fails with invalid_grant (old token was rotated by other instance)
@@ -1234,6 +1402,13 @@ describe("fetch interceptor — token refresh", () => {
     expect(response.status).toBe(200);
     // 3 fetch calls: failed refresh + successful retry refresh + API call
     expect(mockFetch).toHaveBeenCalledTimes(3);
+
+    const refreshCalls = mockFetch.mock.calls.filter(([url]) => String(url).includes("/v1/oauth/token"));
+    expect(refreshCalls).toHaveLength(2);
+    const firstRefreshBody = JSON.parse(refreshCalls[0][1].body);
+    const secondRefreshBody = JSON.parse(refreshCalls[1][1].body);
+    expect(firstRefreshBody.refresh_token).toBe(oldToken);
+    expect(secondRefreshBody.refresh_token).toBe(rotatedToken);
   });
 
   it("still disables account when retry also fails", async () => {
@@ -1252,14 +1427,14 @@ describe("fetch interceptor — token refresh", () => {
     });
     const result = await plugin.auth.loader(getAuth, makeProvider());
 
-    // Option A returns same token, Option D returns a different (but also invalid) token
-    let diskReadCount = 0;
+    // Request-time reads: sync, pre-refresh disk read, retry-read.
+    const requestDiskReads = [
+      makeAccountsData([{ id: accountId, refreshToken: oldToken }]),
+      makeAccountsData([{ id: accountId, refreshToken: oldToken }]),
+      makeAccountsData([{ id: accountId, refreshToken: "also-bad-token" }]),
+    ];
     loadAccounts.mockImplementation(async () => {
-      diskReadCount++;
-      if (diskReadCount === 2) {
-        return makeAccountsData([{ id: accountId, refreshToken: "also-bad-token" }]);
-      }
-      return makeAccountsData([{ id: accountId, refreshToken: oldToken }]);
+      return requestDiskReads.shift() ?? makeAccountsData([{ id: accountId, refreshToken: "also-bad-token" }]);
     });
 
     // First refresh fails
@@ -1282,6 +1457,13 @@ describe("fetch interceptor — token refresh", () => {
         body: JSON.stringify({ messages: [] }),
       }),
     ).rejects.toThrow();
+
+    const refreshCalls = mockFetch.mock.calls.filter(([url]) => String(url).includes("/v1/oauth/token"));
+    expect(refreshCalls).toHaveLength(2);
+    const firstRefreshBody = JSON.parse(refreshCalls[0][1].body);
+    const secondRefreshBody = JSON.parse(refreshCalls[1][1].body);
+    expect(firstRefreshBody.refresh_token).toBe(oldToken);
+    expect(secondRefreshBody.refresh_token).toBe("also-bad-token");
   });
 });
 
@@ -2375,55 +2557,57 @@ describe("markSuccess wiring", () => {
     vi.resetAllMocks();
     const client = makeClient();
     const fetchFn = await setupFetchFn(client);
-
-    // Build an SSE stream with message_start and message_delta usage events
-    const sseBody = [
-      "event: message_start",
-      'data: {"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}',
-      "",
-      "event: content_block_delta",
-      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}',
-      "",
-      "event: message_delta",
-      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":25,"output_tokens":42,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}',
-      "",
-      "event: message_stop",
-      'data: {"type":"message_stop"}',
-      "",
-    ].join("\n");
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(sseBody, {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      }),
-    );
-
-    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
-    });
-
-    expect(response.status).toBe(200);
-
-    // Consume the stream so the onUsage callback fires
-    const text = await response.text();
-    expect(text).toContain("Hello");
-
-    // The recordUsage triggers a debounced save; flush it
     vi.useFakeTimers();
-    vi.advanceTimersByTime(1500);
-    vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 10));
 
-    // Verify usage was recorded: the stats should reflect the message_delta usage
-    const saveCalls = saveAccounts.mock.calls;
-    expect(saveCalls.length).toBeGreaterThan(0);
-    const lastSave = saveCalls[saveCalls.length - 1][0];
-    const acc = lastSave.accounts[0];
-    expect(acc.stats.requests).toBeGreaterThan(0);
-    expect(acc.stats.outputTokens).toBe(42);
-    expect(acc.stats.inputTokens).toBe(25);
+    try {
+      // Build an SSE stream with message_start and message_delta usage events
+      const sseBody = [
+        "event: message_start",
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":1,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}',
+        "",
+        "event: content_block_delta",
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}',
+        "",
+        "event: message_delta",
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":25,"output_tokens":42,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}',
+        "",
+        "event: message_stop",
+        'data: {"type":"message_stop"}',
+        "",
+      ].join("\n");
+
+      mockFetch.mockResolvedValueOnce(
+        new Response(sseBody, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+      );
+
+      const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
+      });
+
+      expect(response.status).toBe(200);
+
+      // Consume the stream so the onUsage callback fires
+      const text = await response.text();
+      expect(text).toContain("Hello");
+
+      // recordUsage triggers a debounced save (1s); flush deterministically.
+      await vi.advanceTimersByTimeAsync(1500);
+
+      // Verify usage was recorded: the stats should reflect the message_delta usage
+      const saveCalls = saveAccounts.mock.calls;
+      expect(saveCalls.length).toBeGreaterThan(0);
+      const lastSave = saveCalls[saveCalls.length - 1][0];
+      const acc = lastSave.accounts[0];
+      expect(acc.stats.requests).toBeGreaterThan(0);
+      expect(acc.stats.outputTokens).toBe(42);
+      expect(acc.stats.inputTokens).toBe(25);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("detects whitespace-formatted mid-stream error events and switches account on next request", async () => {
