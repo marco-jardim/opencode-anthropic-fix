@@ -1136,6 +1136,153 @@ describe("fetch interceptor — token refresh", () => {
     expect(response.status).toBe(200);
     expect(mockFetch).toHaveBeenCalledTimes(3);
   });
+
+  it("recovers when another instance rotated the refresh token (disk read before refresh)", async () => {
+    // Simulate: in-memory has stale token, disk has the rotated token from another instance.
+    // Plugin loads with the stale token, but readDiskRefreshToken finds the new one.
+    const staleToken = "stale-refresh";
+    const rotatedToken = "rotated-by-other-instance";
+    const accountId = "stable-id-1";
+
+    // First loadAccounts call (plugin init) — stale token
+    loadAccounts.mockResolvedValue(makeAccountsData([{ id: accountId, refreshToken: staleToken }]));
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: staleToken,
+      access: "expired-access",
+      expires: Date.now() - 1000, // expired — forces refresh
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Subsequent loadAccounts calls (readDiskRefreshToken) — return the rotated token
+    loadAccounts.mockResolvedValue(makeAccountsData([{ id: accountId, refreshToken: rotatedToken }]));
+
+    // Refresh with rotated token succeeds
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("new-access", "new-refresh"));
+    // API call succeeds
+    mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    // Only 2 fetch calls: successful refresh (with rotated token) + API call
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Verify the refresh used the rotated token, not the stale one
+    const refreshCall = mockFetch.mock.calls[0];
+    const refreshBody = JSON.parse(refreshCall[1].body);
+    expect(refreshBody.refresh_token).toBe(rotatedToken);
+  });
+
+  it("retries with disk token when initial refresh fails with invalid_grant", async () => {
+    // Simulate: two instances loaded the same token. Instance A rotated it.
+    // Instance B's memory still has the old token. refreshAccountToken reads disk
+    // (gets old token, same as memory), refresh fails. Retry reads disk again,
+    // this time instance A's save has landed, finds the rotated token.
+    const oldToken = "old-refresh";
+    const rotatedToken = "rotated-refresh";
+    const accountId = "stable-id-1";
+
+    // Default: return old token for all loadAccounts calls (init, saveToDisk merge, Option A)
+    loadAccounts.mockResolvedValue(makeAccountsData([{ id: accountId, refreshToken: oldToken }]));
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: oldToken,
+      access: "expired-access",
+      expires: Date.now() - 1000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Track loadAccounts calls from this point so we can intercept the retry disk-read.
+    // The request will call loadAccounts for: (1) Option A disk-read before refresh,
+    // (2) Option D retry disk-read after invalid_grant.
+    // We want #1 to return old token (same as memory), #2 to return rotated.
+    let diskReadCount = 0;
+    loadAccounts.mockImplementation(async () => {
+      diskReadCount++;
+      // The 2nd disk-read during the request is the retry after invalid_grant
+      if (diskReadCount === 2) {
+        return makeAccountsData([{ id: accountId, refreshToken: rotatedToken }]);
+      }
+      return makeAccountsData([{ id: accountId, refreshToken: oldToken }]);
+    });
+
+    // First refresh fails with invalid_grant (old token was rotated by other instance)
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: "invalid_grant" }),
+    });
+    // Retry refresh with rotated token succeeds
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("recovered-access", "recovered-refresh"));
+    // API call succeeds
+    mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    // 3 fetch calls: failed refresh + successful retry refresh + API call
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("still disables account when retry also fails", async () => {
+    const oldToken = "doomed-refresh";
+    const accountId = "stable-id-1";
+
+    loadAccounts.mockResolvedValue(makeAccountsData([{ id: accountId, refreshToken: oldToken }]));
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: oldToken,
+      access: "expired-access",
+      expires: Date.now() - 1000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Option A returns same token, Option D returns a different (but also invalid) token
+    let diskReadCount = 0;
+    loadAccounts.mockImplementation(async () => {
+      diskReadCount++;
+      if (diskReadCount === 2) {
+        return makeAccountsData([{ id: accountId, refreshToken: "also-bad-token" }]);
+      }
+      return makeAccountsData([{ id: accountId, refreshToken: oldToken }]);
+    });
+
+    // First refresh fails
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: "invalid_grant" }),
+    });
+    // Retry refresh also fails
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      text: async () => JSON.stringify({ error: "invalid_grant" }),
+    });
+
+    // No more accounts — should throw
+    await expect(
+      result.fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ messages: [] }),
+      }),
+    ).rejects.toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

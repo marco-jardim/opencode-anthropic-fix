@@ -1248,13 +1248,42 @@ function formatSwitchReason(status, reason) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Read the latest refresh token for an account from disk.
+ * Another instance may have rotated it since we loaded into memory.
+ * @param {string} accountId
+ * @returns {Promise<string | null>}
+ */
+async function readDiskRefreshToken(accountId) {
+  try {
+    const diskData = await loadAccounts();
+    if (!diskData) return null;
+    const diskAccount = diskData.accounts.find((a) => a.id === accountId);
+    return diskAccount?.refreshToken || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Refresh an account's access token.
+ *
+ * Before refreshing, reads the latest refresh token from disk in case
+ * another concurrent instance has already rotated it. This prevents
+ * `invalid_grant` errors caused by using a stale (pre-rotation) token.
+ *
  * @param {import('./lib/accounts.mjs').ManagedAccount} account
  * @param {ReturnType<typeof import('@opencode-ai/sdk').createOpencodeClient>} client
  * @returns {Promise<string>} The new access token
  * @throws {Error} If refresh fails
  */
 async function refreshAccountToken(account, client) {
+  // Read the latest refresh token from disk — another instance may have
+  // rotated it since we loaded into memory.
+  const diskToken = await readDiskRefreshToken(account.id);
+  if (diskToken && diskToken !== account.refreshToken) {
+    account.refreshToken = diskToken;
+  }
+
   const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
     method: "POST",
     headers: {
@@ -1265,6 +1294,7 @@ async function refreshAccountToken(account, client) {
       refresh_token: account.refreshToken,
       client_id: CLIENT_ID,
     }),
+    signal: AbortSignal.timeout(10_000),
   });
 
   if (!response.ok) {
@@ -1930,32 +1960,71 @@ export async function AnthropicAuthPlugin({ client }) {
                     // Persist updated tokens (especially if refresh token rotated)
                     accountManager.requestSaveToDisk();
                   } catch (err) {
-                    // Token refresh failed — mark account as failed
-                    accountManager.markFailure(account);
-                    // Disable account on terminal refresh errors
+                    // Token refresh failed — check if another instance rotated the
+                    // refresh token between our disk-read and the refresh call.
                     const msg = err instanceof Error ? err.message : String(err);
                     const status = typeof err === "object" && err && "status" in err ? Number(err.status) : NaN;
                     const errorCode =
-                      typeof err === "object" && err && "errorCode" in err ? String(err.errorCode || "") : "";
-                    const shouldDisable =
-                      status === 400 ||
-                      status === 401 ||
-                      status === 403 ||
-                      errorCode === "invalid_grant" ||
-                      errorCode === "invalid_request" ||
-                      msg.includes("invalid_grant");
+                      typeof err === "object" && err && ("errorCode" in err || "code" in err)
+                        ? String(err.errorCode || err.code || "")
+                        : "";
+                    const isInvalidGrant =
+                      errorCode === "invalid_grant" || errorCode === "invalid_request" || msg.includes("invalid_grant");
+                    const isTerminalStatus = status === 400 || status === 401 || status === 403;
 
-                    if (shouldDisable) {
-                      account.enabled = false;
-                      accountManager.requestSaveToDisk();
-                      const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
-                      await toast(`Disabled ${name} (token refresh failed)`, "error");
-                    } else {
-                      // Skip this account for the remainder of this request.
-                      transientRefreshSkips.add(account.index);
+                    // Retry once: re-read the disk token in case another instance
+                    // rotated it between our initial read and the refresh call.
+                    if (isInvalidGrant || isTerminalStatus) {
+                      const retryToken = await readDiskRefreshToken(account.id);
+                      if (retryToken && retryToken !== account.refreshToken) {
+                        debugLog("refresh token on disk differs from in-memory, retrying with disk token", {
+                          accountIndex: account.index,
+                        });
+                        account.refreshToken = retryToken;
+                        // Clear the single-flight cache so the retry isn't deduped
+                        refreshInFlight.delete(account.id);
+                        try {
+                          accessToken = await refreshAccountTokenSingleFlight(account);
+                          accountManager.requestSaveToDisk();
+                          // Retry succeeded — fall through to use the token
+                        } catch (retryErr) {
+                          // Retry also failed — fall through to disable logic below
+                          debugLog("retry refresh also failed", {
+                            accountIndex: account.index,
+                            message: retryErr instanceof Error ? retryErr.message : String(retryErr),
+                          });
+                          accessToken = undefined;
+                        }
+                      }
                     }
-                    lastError = err;
-                    continue; // Try next account
+
+                    // If we got a token from the retry, skip the failure handling
+                    if (accessToken) {
+                      // Success via retry — continue to use this account
+                    } else {
+                      accountManager.markFailure(account);
+
+                      if (isInvalidGrant || isTerminalStatus) {
+                        const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
+                        debugLog("disabling account after terminal refresh failure", {
+                          accountIndex: account.index,
+                          status,
+                          errorCode,
+                          message: msg,
+                        });
+                        account.enabled = false;
+                        accountManager.requestSaveToDisk();
+                        await toast(
+                          `Disabled ${name} (token refresh failed: ${errorCode || `HTTP ${status}`})`,
+                          "error",
+                        );
+                      } else {
+                        // Skip this account for the remainder of this request.
+                        transientRefreshSkips.add(account.index);
+                      }
+                      lastError = err;
+                      continue; // Try next account
+                    }
                   }
                 } else {
                   accessToken = account.access;
