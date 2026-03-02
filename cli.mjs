@@ -160,6 +160,7 @@ export async function refreshAccessToken(account) {
     account.access = json.access_token;
     account.expires = Date.now() + json.expires_in * 1000;
     if (json.refresh_token) account.refreshToken = json.refresh_token;
+    account.token_updated_at = Date.now();
     return json.access_token;
   } catch {
     return null;
@@ -393,6 +394,7 @@ export async function cmdLogin() {
     refreshToken: credentials.refresh,
     access: credentials.access,
     expires: credentials.expires,
+    token_updated_at: now,
     addedAt: now,
     lastUsed: 0,
     enabled: true,

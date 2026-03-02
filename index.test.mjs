@@ -32,6 +32,11 @@ vi.mock("./lib/storage.mjs", async (importOriginal) => {
   };
 });
 
+vi.mock("./lib/refresh-lock.mjs", () => ({
+  acquireRefreshLock: vi.fn().mockResolvedValue({ acquired: true, lockPath: "/tmp/opencode-test.lock" }),
+  releaseRefreshLock: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Mock config — always return defaults
 vi.mock("./lib/config.mjs", async (importOriginal) => {
   const original = await importOriginal();
@@ -57,6 +62,7 @@ vi.stubGlobal("fetch", mockFetch);
 
 import { AnthropicAuthPlugin } from "./index.mjs";
 import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
+import { acquireRefreshLock } from "./lib/refresh-lock.mjs";
 import { loadConfig, DEFAULT_CONFIG } from "./lib/config.mjs";
 
 beforeEach(() => {
@@ -1219,6 +1225,75 @@ describe("fetch interceptor — token refresh", () => {
     const refreshCalls = mockFetch.mock.calls.filter(([u]) => String(u).includes("/v1/oauth/token"));
     expect(refreshCalls).toHaveLength(1);
     expect(apiAuthHeaders).toEqual(["Bearer fresh-access", "Bearer fresh-access"]);
+  });
+
+  it("uses disk-updated token state when refresh lock is held by another process", async () => {
+    const staleToken = "refresh-1-stale";
+    const rotatedToken = "refresh-1-rotated";
+    const rotatedAccess = "access-from-other-process";
+    const accountId = "stable-id-1";
+
+    loadAccounts.mockResolvedValue(
+      makeAccountsData([
+        {
+          id: accountId,
+          refreshToken: staleToken,
+          access: "expired-access",
+          expires: Date.now() - 1_000,
+          token_updated_at: 10,
+        },
+      ]),
+    );
+    saveAccounts.mockResolvedValue(undefined);
+
+    acquireRefreshLock.mockResolvedValue({ acquired: false, lockPath: null });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: staleToken,
+      access: "expired-access",
+      expires: Date.now() - 1_000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Request-time reads: sync + lock-held disk reread.
+    const requestDiskReads = [
+      makeAccountsData([
+        {
+          id: accountId,
+          refreshToken: staleToken,
+          access: "expired-access",
+          expires: Date.now() - 1_000,
+          token_updated_at: 10,
+        },
+      ]),
+      makeAccountsData([
+        {
+          id: accountId,
+          refreshToken: rotatedToken,
+          access: rotatedAccess,
+          expires: Date.now() + 3_600_000,
+          token_updated_at: 999,
+        },
+      ]),
+    ];
+    loadAccounts.mockImplementation(async () => requestDiskReads.shift() ?? requestDiskReads.at(-1));
+
+    // No oauth refresh should be issued; only API call should happen.
+    mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+    const oauthCalls = mockFetch.mock.calls.filter(([u]) => String(u).includes("/v1/oauth/token"));
+    expect(oauthCalls).toHaveLength(0);
+
+    const [, apiInit] = mockFetch.mock.calls[0];
+    expect(apiInit.headers.get("authorization")).toBe(`Bearer ${rotatedAccess}`);
   });
 
   it("refreshes near-expiry idle account in background while serving active account", async () => {
