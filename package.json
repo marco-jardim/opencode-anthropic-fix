@@ -1,7 +1,13 @@
 {
   "name": "opencode-anthropic-fix",
-  "version": "0.0.16",
+  "version": "0.0.18",
   "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "lib/**/*.mjs",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "vitest run",
