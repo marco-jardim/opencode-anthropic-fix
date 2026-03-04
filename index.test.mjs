@@ -82,6 +82,10 @@ beforeEach(() => {
   delete process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
   delete process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION;
   delete process.env.OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT;
+  delete process.env.CLAUDE_CODE_ACCOUNT_UUID;
+  delete process.env.CLAUDE_CODE_USER_EMAIL;
+  delete process.env.CLAUDE_CODE_ORGANIZATION_UUID;
+  delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
   process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID = "test-signature-user";
 });
 
@@ -576,6 +580,10 @@ describe("fetch interceptor", () => {
     delete process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
     delete process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION;
     delete process.env.OPENCODE_ANTHROPIC_PROMPT_COMPACTION;
+    delete process.env.CLAUDE_CODE_ACCOUNT_UUID;
+    delete process.env.CLAUDE_CODE_USER_EMAIL;
+    delete process.env.CLAUDE_CODE_ORGANIZATION_UUID;
+    delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
     process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID = "test-signature-user";
     delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER;
     delete process.env.CLAUDE_CODE_ENTRYPOINT;
@@ -615,7 +623,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.68");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.has("x-api-key")).toBe(false);
@@ -2448,6 +2456,24 @@ describe("header handling", () => {
     }
   });
 
+  it("defaults to medium effort for Opus 4.6 when thinking has no budget_tokens", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-6",
+        messages: [],
+        thinking: { type: "enabled" },
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.thinking).toEqual({ type: "enabled", effort: "medium" });
+  });
+
   it("keeps effort if already provided for Opus 4.6", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
@@ -2618,6 +2644,25 @@ describe("header handling", () => {
       /^user_test-signature-user_account_[^_]+_session_[0-9a-f]{8}-[0-9a-f-]{27}$/,
     );
     expect(parsed.betas).toBeUndefined();
+  });
+
+  it("adds metadata fields from CLAUDE_CODE_* env vars", async () => {
+    process.env.CLAUDE_CODE_ACCOUNT_UUID = "acct-uuid-123";
+    process.env.CLAUDE_CODE_ORGANIZATION_UUID = "org-uuid-456";
+    process.env.CLAUDE_CODE_USER_EMAIL = "dev@example.com";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hello" }], system: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.metadata.user_id).toContain("_account_acct-uuid-123_");
+    expect(parsed.metadata.organization_uuid).toBe("org-uuid-456");
+    expect(parsed.metadata.user_email).toBe("dev@example.com");
   });
 
   it("removes unsupported top-level betas field from request body", async () => {
@@ -3248,6 +3293,23 @@ describe("override_model_limits", () => {
     expect(provider.models["claude-sonnet-4-1m"].limit.context).toBe(1_000_000);
     // non-1M model untouched
     expect(provider.models["claude-sonnet"].limit.context).toBe(200_000);
+  });
+
+  it("does not override 1M context when CLAUDE_CODE_DISABLE_1M_CONTEXT is set", async () => {
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1";
+    const provider = makeProvider();
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 3_600_000,
+    });
+
+    await plugin.auth.loader(getAuth, provider);
+
+    expect(provider.models["claude-opus-4-6"].limit.context).toBe(200_000);
+    expect(provider.models["claude-sonnet-4-1m"].limit.context).toBe(200_000);
   });
 
   it("preserves original output limit when override_model_limits.output is 0 (default)", async () => {

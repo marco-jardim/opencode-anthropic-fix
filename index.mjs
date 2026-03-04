@@ -103,7 +103,7 @@ async function promptManageAccounts(accountManager) {
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.2";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.68";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
 const BILLING_HASH_SALT = "59cf53e54c78";
@@ -421,6 +421,9 @@ function getFirstUserText(messages) {
  * @returns {string}
  */
 function getAccountIdentifier(account) {
+  // Prefer env-provided account UUID (v2.1.51+), then account record fields
+  const envUuid = process.env.CLAUDE_CODE_ACCOUNT_UUID?.trim();
+  if (envUuid) return envUuid;
   if (account?.accountUuid && typeof account.accountUuid === "string") {
     return account.accountUuid;
   }
@@ -435,9 +438,18 @@ function getAccountIdentifier(account) {
  * @returns {{user_id: string}}
  */
 function buildRequestMetadata(input) {
-  return {
+  /** @type {Record<string, any>} */
+  const metadata = {
     user_id: `user_${input.persistentUserId}_account_${input.accountId}_session_${input.sessionId}`,
   };
+
+  // v2.1.51: pass through SDK caller metadata when available
+  const orgUuid = process.env.CLAUDE_CODE_ORGANIZATION_UUID?.trim();
+  if (orgUuid) metadata.organization_uuid = orgUuid;
+  const userEmail = process.env.CLAUDE_CODE_USER_EMAIL?.trim();
+  if (userEmail) metadata.user_email = userEmail;
+
+  return metadata;
 }
 
 /**
@@ -775,7 +787,7 @@ function normalizeThinkingBlock(thinking, model) {
     return rest;
   }
 
-  const effort = typeof thinking.budget_tokens === "number" ? budgetTokensToEffort(thinking.budget_tokens) : "high"; // safe default
+  const effort = typeof thinking.budget_tokens === "number" ? budgetTokensToEffort(thinking.budget_tokens) : "medium"; // v2.1.68 default
 
   return { type: "enabled", effort };
 }
@@ -2144,7 +2156,11 @@ export async function AnthropicAuthPlugin({ client }) {
             // Override context limits for 1M-window models so OpenCode
             // triggers compaction at the right threshold instead of relying
             // on potentially stale models.dev data.
-            if (config.override_model_limits.enabled && (hasOneMillionContext(model.id) || isOpus46Model(model.id))) {
+            if (
+              config.override_model_limits.enabled &&
+              !isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT) &&
+              (hasOneMillionContext(model.id) || isOpus46Model(model.id))
+            ) {
               model.limit = {
                 ...(model.limit ?? {}),
                 context: config.override_model_limits.context,
