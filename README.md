@@ -43,8 +43,9 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Standalone CLI** &mdash; manage accounts without opening OpenCode
 - **Configurable strategies** &mdash; sticky, round-robin, or hybrid account selection
 - **Claude Code signature emulation** &mdash; full HTTP header, system prompt, beta flag, and metadata mimicry derived from Claude Code's open source code
-- **Adaptive thinking for Opus 4.6** &mdash; automatically uses `adaptive-thinking-2026-01-28` and maps `budgetTokens` to effort levels (`low`/`medium`/`high`/`max`)
+- **Adaptive thinking for Opus 4.6** &mdash; automatically uses `adaptive-thinking-2026-01-28` and maps `budgetTokens` to effort levels (`low`/`medium`/`high`)
 - **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
+- **Runtime config + custom betas** &mdash; `/anthropic set`, `/anthropic config`, and `/anthropic betas` slash commands for live feature toggling without restarting OpenCode
 
 ## Installation
 
@@ -231,20 +232,65 @@ Most commands have short aliases: `ln`, `lo`, `ra`, `rf`, `ls`, `st`, `sw`, `en`
 
 ## Slash Commands in OpenCode
 
-The plugin also registers a built-in `/anthropic` slash command so you can manage accounts without leaving OpenCode.
+The plugin registers a built-in `/anthropic` slash command for account management, feature toggles, and custom beta headers — all without leaving OpenCode.
 
-### Common examples
+### Account management
 
 ```text
-/anthropic                # list (default)
+/anthropic                # list accounts (default)
 /anthropic usage          # full account list + quota windows
 /anthropic switch 2
 /anthropic refresh 1
 /anthropic logout 2       # revoke tokens and remove account 2
 /anthropic logout --all   # revoke all tokens and clear all accounts
-/anthropic strategy hybrid
 /anthropic stats
-/anthropic config
+```
+
+### Runtime configuration
+
+Toggle features live without restarting OpenCode. Changes are persisted to `anthropic-auth.json`.
+
+```text
+/anthropic config                  # show all current settings
+/anthropic set emulation on        # enable/disable Claude signature emulation
+/anthropic set compaction minimal  # set prompt compaction mode (minimal/off)
+/anthropic set 1m-context on       # enable/disable 1M context limit override
+/anthropic set idle-refresh on     # enable/disable idle account refresh
+/anthropic set strategy round-robin # change account selection strategy
+/anthropic set debug on            # enable/disable debug logging
+/anthropic set quiet on            # suppress non-error toasts
+```
+
+### Custom beta headers
+
+Add or remove beta flags that get included in every `anthropic-beta` header. Persisted across sessions.
+
+```text
+/anthropic betas                   # show active betas (auto + custom) with presets
+/anthropic betas add <beta-name>   # add a custom beta
+/anthropic betas remove <beta-name> # remove a custom beta
+```
+
+**Available preset betas** (shown by `/anthropic betas`):
+
+| Beta                              | Description                                       |
+| --------------------------------- | ------------------------------------------------- |
+| `prompt-caching-scope-2026-01-05` | Cache control with `scope: "org"` — free perf win |
+| `context-management-2025-06-27`   | Server-side auto-summarization when context fills |
+| `structured-outputs-2025-12-15`   | Strict JSON schema output enforcement             |
+| `tool-examples-2025-10-29`        | Input/output examples in tool definitions         |
+| `code-execution-2025-08-25`       | Python sandbox execution by the model             |
+| `files-api-2025-04-14`            | Upload once, reuse file ID across requests        |
+| `compact-2026-01-12`              | Conversation compaction endpoint                  |
+| `mcp-servers-2025-12-04`          | MCP servers in API request payload                |
+| `web-search-2025-03-05`           | Web search (Vertex/Foundry only)                  |
+
+Example workflow:
+
+```text
+/anthropic betas add prompt-caching-scope-2026-01-05
+/anthropic betas add context-management-2025-06-27
+/anthropic betas   # verify
 ```
 
 ### OAuth flows from slash command
@@ -272,11 +318,11 @@ Pending slash OAuth flows expire after 10 minutes. If completion fails with an e
 
 Control how the plugin picks which account to use for each request.
 
-| Strategy               | Behavior                                                                                  | Best For                                              |
-| ---------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| **`sticky`** (default) | Stay on one account until it fails or is rate-limited                                     | Single account, or when you want predictable behavior |
-| **`round-robin`**      | Rotate through accounts on every request                                                  | Spreading load evenly across accounts                 |
-| **`hybrid`**           | Score-based selection with stickiness bias. Considers health, token budget, and freshness | Multiple accounts with varying rate limits            |
+| Strategy                    | Behavior                                                                                  | Best For                                              |
+| --------------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| **`round-robin`** (default) | Rotate through accounts on every request                                                  | Spreading load evenly across accounts                 |
+| **`sticky`**                | Stay on one account until it fails or is rate-limited                                     | Single account, or when you want predictable behavior |
+| **`hybrid`**                | Score-based selection with stickiness bias. Considers health, token budget, and freshness | Multiple accounts with varying rate limits            |
 
 ### Change Strategy
 
@@ -297,8 +343,8 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 
 ```jsonc
 {
-  // Account selection strategy: "sticky" | "round-robin" | "hybrid"
-  "account_selection_strategy": "sticky",
+  // Account selection strategy: "round-robin" | "sticky" | "hybrid"
+  "account_selection_strategy": "round-robin",
 
   // Seconds before consecutive failure count resets (60-7200)
   "failure_ttl_seconds": 3600,
@@ -325,8 +371,8 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
   // Only applied for OAuth (Max Plan) sessions — API key users use the
   // context-1m-2025-08-07 beta header instead.
   "override_model_limits": {
-    // Enable/disable the override
-    "enabled": true,
+    // Enable/disable the override (default: off — enable if you need 1M context)
+    "enabled": false,
     // Context window to inject (tokens). Default: 1_000_000.
     "context": 1000000,
     // Max output tokens to inject. 0 = leave the model's default unchanged.
@@ -350,6 +396,9 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
     "regeneration_rate_per_minute": 6,
     "initial_tokens": 50,
   },
+
+  // Custom beta headers (added to every request via /anthropic betas add)
+  "custom_betas": [],
 
   // Toast notification settings
   "toasts": {
