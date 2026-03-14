@@ -62,7 +62,7 @@ vi.stubGlobal("fetch", mockFetch);
 
 import { AnthropicAuthPlugin } from "./index.mjs";
 import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
-import { acquireRefreshLock } from "./lib/refresh-lock.mjs";
+import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import { loadConfig, DEFAULT_CONFIG } from "./lib/config.mjs";
 
 beforeEach(() => {
@@ -623,7 +623,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.68");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.76");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.has("x-api-key")).toBe(false);
@@ -1695,6 +1695,65 @@ describe("fetch interceptor — token refresh", () => {
     expect(secondRefreshBody.refresh_token).toBe(rotatedToken);
   });
 
+  it("persists new tokens to disk before releasing the refresh lock", async () => {
+    // This is the critical race-prevention test.  Previously, refreshAccountToken
+    // released the lock, then the caller scheduled a debounced save (~1 s later).
+    // A second process could acquire the lock and read the stale (rotated-away)
+    // refresh token from disk, causing an invalid_grant cascade.
+    const accountId = "stable-id-1";
+    const oldToken = "pre-rotation-refresh";
+
+    loadAccounts.mockResolvedValue(makeAccountsData([{ id: accountId, refreshToken: oldToken }]));
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: oldToken,
+      access: "expired-access",
+      expires: Date.now() - 1000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Disk reads during request: syncActiveIndexFromDisk
+    loadAccounts.mockResolvedValue(makeAccountsData([{ id: accountId, refreshToken: oldToken }]));
+
+    // Token refresh succeeds — returns a rotated refresh token
+    mockFetch.mockResolvedValueOnce(mockTokenRefresh("new-access", "rotated-refresh"));
+    // API call succeeds
+    mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
+
+    // Track call ordering between saveAccounts and releaseRefreshLock
+    const callOrder = [];
+    saveAccounts.mockImplementation(async () => {
+      callOrder.push("save");
+    });
+    releaseRefreshLock.mockImplementation(async () => {
+      callOrder.push("unlock");
+    });
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(200);
+
+    // The save that contains the rotated token must happen before the lock
+    // is released so other processes see it on disk immediately.
+    const saveIdx = callOrder.indexOf("save");
+    const unlockIdx = callOrder.indexOf("unlock");
+    expect(saveIdx).toBeGreaterThanOrEqual(0);
+    expect(unlockIdx).toBeGreaterThanOrEqual(0);
+    expect(saveIdx).toBeLessThan(unlockIdx);
+
+    // Verify the saved data contains the rotated token
+    const savedData = saveAccounts.mock.calls.find(
+      (call) => call[0]?.accounts?.[0]?.refreshToken === "rotated-refresh",
+    );
+    expect(savedData).toBeTruthy();
+  });
+
   it("still disables account when retry also fails", async () => {
     const oldToken = "doomed-refresh";
     const accountId = "stable-id-1";
@@ -2418,7 +2477,7 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.thinking).toEqual({ type: "enabled", effort: "max" });
+    expect(parsed.thinking).toEqual({ type: "enabled", effort: "high" });
     expect(parsed.thinking.budget_tokens).toBeUndefined();
   });
 
@@ -2431,8 +2490,8 @@ describe("header handling", () => {
       [8000, "medium"],
       [8001, "high"],
       [16000, "high"],
-      [16001, "max"],
-      [100000, "max"],
+      [16001, "high"],
+      [100000, "high"],
     ];
 
     for (const [budget, expectedEffort] of cases) {

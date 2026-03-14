@@ -103,7 +103,7 @@ async function promptManageAccounts(accountManager) {
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.68";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.76";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
 const BILLING_HASH_SALT = "59cf53e54c78";
@@ -292,7 +292,10 @@ function supportsThinking(model) {
  */
 function isOpus46Model(model) {
   if (!model) return false;
-  return /claude-opus-4[._-]6/i.test(model);
+  // Match standard IDs (claude-opus-4-6, claude-opus-4.6) and Bedrock ARNs
+  // (arn:aws:bedrock:...anthropic.claude-opus-4-6-...).
+  // Also match bare "opus-4-6" / "opus-4.6" fragments for non-standard strings.
+  return /claude-opus-4[._-]6|opus[._-]4[._-]6/i.test(model);
 }
 
 /**
@@ -300,7 +303,8 @@ function isOpus46Model(model) {
  * @returns {boolean}
  */
 function hasOneMillionContext(model) {
-  return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model);
+  // Models with explicit 1m suffix, or Opus 4.6 (1M by default since v2.1.75).
+  return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model) || isOpus46Model(model);
 }
 
 /**
@@ -732,7 +736,7 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
   return mergedBetas.join(",");
 }
 
-/** @typedef {'low' | 'medium' | 'high' | 'max'} ThinkingEffort */
+/** @typedef {'low' | 'medium' | 'high'} ThinkingEffort */
 
 /**
  * Map budgetTokens to an adaptive thinking effort level.
@@ -743,8 +747,7 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
 function budgetTokensToEffort(budgetTokens) {
   if (budgetTokens <= 1024) return "low";
   if (budgetTokens <= 8000) return "medium";
-  if (budgetTokens <= 16000) return "high";
-  return "max";
+  return "high";
 }
 
 /**
@@ -753,7 +756,7 @@ function budgetTokensToEffort(budgetTokens) {
  * @returns {value is ThinkingEffort}
  */
 function isValidEffort(value) {
-  return value === "low" || value === "medium" || value === "high" || value === "max";
+  return value === "low" || value === "medium" || value === "high";
 }
 
 /**
@@ -1427,10 +1430,14 @@ function applyDiskAuthIfFresher(account, diskAuth, options = {}) {
  * @param {import('./lib/accounts.mjs').ManagedAccount} account
  * @param {ReturnType<typeof import('@opencode-ai/sdk').createOpencodeClient>} client
  * @param {"foreground" | "idle"} [source]
+ * @param {{ onTokensUpdated?: () => Promise<void> }} [options] - If provided,
+ *   called under the cross-process lock after token update to persist rotated
+ *   tokens before the lock is released.  Omitting means tokens won't be saved
+ *   to disk until the caller arranges it (risking the rotation race).
  * @returns {Promise<string>} The new access token
  * @throws {Error} If refresh fails
  */
-async function refreshAccountToken(account, client, source = "foreground") {
+async function refreshAccountToken(account, client, source = "foreground", { onTokensUpdated } = {}) {
   const lockResult = await acquireRefreshLock(account.id, {
     timeoutMs: 2_000,
     backoffMs: 60,
@@ -1470,6 +1477,22 @@ async function refreshAccountToken(account, client, source = "foreground") {
       account.refreshToken = json.refresh_token;
     }
     markTokenStateUpdated(account);
+
+    // Persist new tokens to disk BEFORE releasing the cross-process lock.
+    // This is critical: if we release the lock first, another process can
+    // acquire it and read the old (now-rotated) refresh token from disk,
+    // leading to an invalid_grant failure.  The debounced requestSaveToDisk()
+    // that callers used previously left a ~1 s window where this race could
+    // (and did) happen.
+    if (onTokensUpdated) {
+      try {
+        await onTokensUpdated();
+      } catch {
+        // Best-effort: in-memory tokens remain valid for this process.
+        // The callback is responsible for scheduling its own fallback
+        // (e.g. a debounced retry) if the synchronous save fails.
+      }
+    }
 
     // Also persist to OpenCode's auth.json for compatibility.
     // This should be best-effort: a persistence hiccup should not invalidate an
@@ -2011,7 +2034,21 @@ export async function AnthropicAuthPlugin({ client }) {
     const entry = { source, promise: Promise.resolve("") };
     const p = (async () => {
       try {
-        return await refreshAccountToken(account, client, source);
+        return await refreshAccountToken(account, client, source, {
+          onTokensUpdated: async () => {
+            try {
+              await accountManager.saveToDisk();
+            } catch {
+              // Synchronous save failed (disk full, permissions, etc.).
+              // Schedule a debounced retry so the rotated token eventually
+              // reaches disk.  Another process may hit invalid_grant in the
+              // interim, but its retry-from-disk logic can recover once this
+              // save lands.
+              accountManager.requestSaveToDisk();
+              throw new Error("save failed, debounced retry scheduled");
+            }
+          },
+        });
       } finally {
         if (refreshInFlight.get(key) === entry) {
           refreshInFlight.delete(key);
@@ -2040,7 +2077,6 @@ export async function AnthropicAuthPlugin({ client }) {
     try {
       try {
         await refreshAccountTokenSingleFlight(account, "idle");
-        accountManager.requestSaveToDisk();
         return;
       } catch (err) {
         let details = parseRefreshFailure(err);
@@ -2068,7 +2104,6 @@ export async function AnthropicAuthPlugin({ client }) {
 
         try {
           await refreshAccountTokenSingleFlight(account, "idle");
-          accountManager.requestSaveToDisk();
           return;
         } catch (retryErr) {
           details = parseRefreshFailure(retryErr);
@@ -2252,8 +2287,8 @@ export async function AnthropicAuthPlugin({ client }) {
                   const attemptedRefreshToken = account.refreshToken;
                   try {
                     accessToken = await refreshAccountTokenSingleFlight(account);
-                    // Persist updated tokens (especially if refresh token rotated)
-                    accountManager.requestSaveToDisk();
+                    // Tokens are now saved under the refresh lock (inside
+                    // refreshAccountToken) so no debounced save needed here.
                   } catch (err) {
                     // Token refresh failed — check if another instance rotated the
                     // refresh token and persisted it between attempts.
@@ -2287,7 +2322,6 @@ export async function AnthropicAuthPlugin({ client }) {
 
                       try {
                         accessToken = await refreshAccountTokenSingleFlight(account);
-                        accountManager.requestSaveToDisk();
                       } catch (retryErr) {
                         finalError = retryErr;
                         details = parseRefreshFailure(retryErr);
