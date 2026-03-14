@@ -2445,6 +2445,8 @@ describe("header handling", () => {
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).toContain("claude-code-20250219");
     expect(betaHeader).toContain("fine-grained-tool-streaming-2025-05-14");
+    expect(betaHeader).toContain("code-execution-2025-08-25");
+    expect(betaHeader).toContain("files-api-2025-04-14");
     expect(betaHeader).toContain("custom-beta-2025-01-01");
     expect(betaHeader).toContain("another-beta-2025-02-01");
   });
@@ -2599,6 +2601,36 @@ describe("header handling", () => {
     const betaHeader = init.headers.get("anthropic-beta");
     expect(betaHeader).toContain("custom-a");
     expect(betaHeader).toContain("custom-b");
+  });
+
+  it("auto-includes code-execution and files-api betas for non-Haiku models", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    expect(betaHeader).toContain("code-execution-2025-08-25");
+    expect(betaHeader).toContain("files-api-2025-04-14");
+  });
+
+  it("excludes code-execution beta for Haiku models but includes files-api", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-haiku-3-5", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    expect(betaHeader).not.toContain("code-execution-2025-08-25");
+    expect(betaHeader).toContain("files-api-2025-04-14");
   });
 
   it("computes x-stainless-helper from tools and message content", async () => {
@@ -2869,6 +2901,8 @@ describe("header handling", () => {
     const betaHeader = init.headers.get("anthropic-beta");
     expect(betaHeader).not.toContain("context-1m-2025-08-07");
     expect(betaHeader).not.toContain("tool-examples-2025-10-29");
+    expect(betaHeader).not.toContain("code-execution-2025-08-25");
+    expect(betaHeader).not.toContain("files-api-2025-04-14");
     expect(betaHeader).toContain("claude-code-20250219");
   });
 

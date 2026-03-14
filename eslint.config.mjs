@@ -31,6 +31,9 @@ export default [
         atob: "readonly",
         crypto: "readonly",
         Buffer: "readonly",
+        Blob: "readonly",
+        FormData: "readonly",
+        File: "readonly",
       },
     },
     rules: {

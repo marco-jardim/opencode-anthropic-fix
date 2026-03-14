@@ -165,6 +165,8 @@ When `signatureEnabled=false`:
 When `signatureEnabled=true`, current implementation may add dynamically:
 
 - `claude-code-20250219` (not added for Haiku models)
+- `code-execution-2025-08-25` (not added for Haiku models)
+- `files-api-2025-04-14` (always; enables `/v1/files` endpoint and `file_id` references)
 - `interleaved-thinking-2025-05-14` (if model supports it and not disabled by `DISABLE_INTERLEAVED_THINKING`)
 - `context-1m-2025-08-07` (if model indicates 1M context)
 - `context-management-2025-06-27` (non-interactive mode + flags)
@@ -177,7 +179,7 @@ When `signatureEnabled=true`, current implementation may add dynamically:
 
 Provider filter:
 
-- if detected provider is `bedrock`, remove betas listed in `BEDROCK_UNSUPPORTED_BETAS`.
+- if detected provider is `bedrock`, remove betas listed in `BEDROCK_UNSUPPORTED_BETAS` (includes `code-execution-2025-08-25` and `files-api-2025-04-14`).
 
 Provider detection is based on request URL hostname (`anthropic`, `bedrock`, `vertex`, `foundry`).
 
@@ -198,11 +200,14 @@ Automatically enabled by Claude Code (functional reference):
 - `oauth-2025-04-20`
 - `token-counting-2024-11-01` (preflight `/v1/messages/count_tokens`)
 
-Useful in specific integrations:
+Now auto-included by the plugin (moved from manual-only):
 
-- `files-api-2025-04-14`
+- `files-api-2025-04-14` (always in signature mode)
+- `code-execution-2025-08-25` (non-Haiku models, in signature mode)
+
+Available via `/anthropic betas add` or `ANTHROPIC_BETAS`:
+
 - `message-batches-2024-09-24`
-- `code-execution-2025-08-25`
 - `compact-2026-01-12`
 - `mcp-servers-2025-12-04`
 

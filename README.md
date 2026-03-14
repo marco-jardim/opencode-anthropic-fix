@@ -46,6 +46,8 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Adaptive thinking for Opus 4.6** &mdash; automatically uses `adaptive-thinking-2026-01-28` and maps `budgetTokens` to effort levels (`low`/`medium`/`high`)
 - **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
 - **Runtime config + custom betas** &mdash; `/anthropic set`, `/anthropic config`, and `/anthropic betas` slash commands for live feature toggling without restarting OpenCode
+- **Files API integration** &mdash; upload, list, download, and manage files via `/anthropic files` with auto-included `files-api-2025-04-14` beta
+- **Code execution support** &mdash; auto-includes `code-execution-2025-08-25` beta for sandbox code execution (non-Haiku models)
 
 ## Installation
 
@@ -279,8 +281,6 @@ Add or remove beta flags that get included in every `anthropic-beta` header. Per
 | `context-management-2025-06-27`   | Server-side auto-summarization when context fills |
 | `structured-outputs-2025-12-15`   | Strict JSON schema output enforcement             |
 | `tool-examples-2025-10-29`        | Input/output examples in tool definitions         |
-| `code-execution-2025-08-25`       | Python sandbox execution by the model             |
-| `files-api-2025-04-14`            | Upload once, reuse file ID across requests        |
 | `compact-2026-01-12`              | Conversation compaction endpoint                  |
 | `mcp-servers-2025-12-04`          | MCP servers in API request payload                |
 | `web-search-2025-03-05`           | Web search (Vertex/Foundry only)                  |
@@ -292,6 +292,21 @@ Example workflow:
 /anthropic betas add context-management-2025-06-27
 /anthropic betas   # verify
 ```
+
+### Files API management
+
+Upload, list, download, and delete files via the Anthropic Files API. The `files-api-2025-04-14` beta is auto-included in every request.
+
+```text
+/anthropic files                       # list uploaded files
+/anthropic files upload ./report.pdf   # upload a file
+/anthropic files get file_abc123       # get file metadata
+/anthropic files download file_abc123  # download to current directory
+/anthropic files download file_abc123 ./out.pdf  # download to specific path
+/anthropic files delete file_abc123    # delete a file
+```
+
+Supported formats: PDF, DOCX, TXT, CSV, Excel, Markdown, images (max 350 MB per file). Uploaded files can be referenced by `file_id` in Messages API requests.
 
 ### OAuth flows from slash command
 

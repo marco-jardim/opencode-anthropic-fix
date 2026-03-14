@@ -2,7 +2,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, basename } from "node:path";
 import { AccountManager } from "./lib/accounts.mjs";
 import { authorize, exchange, refreshToken } from "./lib/oauth.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, CLIENT_ID, getConfigDir } from "./lib/config.mjs";
@@ -119,6 +119,8 @@ const BEDROCK_UNSUPPORTED_BETAS = new Set([
   "context-1m-2025-08-07",
   "tool-search-tool-2025-10-19",
   "tool-examples-2025-10-29",
+  "code-execution-2025-08-25",
+  "files-api-2025-04-14",
 ]);
 const STAINLESS_HELPER_KEYS = [
   "x_stainless_helper",
@@ -680,7 +682,11 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
 
   if (!haiku) {
     betas.push(CLAUDE_CODE_BETA_FLAG);
+    betas.push("code-execution-2025-08-25");
   }
+
+  // Files API is model-independent; enables /v1/files endpoint and file_id references.
+  betas.push("files-api-2025-04-14");
 
   if (isOpus46Model(model)) {
     // Opus 4.6 uses adaptive thinking — model decides how much to think based on task complexity.
@@ -1978,7 +1984,9 @@ export async function AnthropicAuthPlugin({ client }) {
           "Preset betas (auto-computed per model/provider):",
           "  oauth-2025-04-20, claude-code-20250219,",
           "  interleaved-thinking-2025-05-14 OR adaptive-thinking-2026-01-28,",
-          "  fine-grained-tool-streaming-2025-05-14",
+          "  fine-grained-tool-streaming-2025-05-14,",
+          "  code-execution-2025-08-25 (non-Haiku),",
+          "  files-api-2025-04-14",
           "",
           `Custom betas: ${fresh.custom_betas.length ? fresh.custom_betas.join(", ") : "(none)"}`,
           "",
@@ -1988,10 +1996,8 @@ export async function AnthropicAuthPlugin({ client }) {
           "  /anthropic betas add prompt-caching-scope-2026-01-05",
           "  /anthropic betas add tool-examples-2025-10-29",
           "  /anthropic betas add web-search-2025-03-05",
-          "  /anthropic betas add code-execution-2025-08-25",
           "  /anthropic betas add compact-2026-01-12",
           "  /anthropic betas add mcp-servers-2025-12-04",
-          "  /anthropic betas add files-api-2025-04-14",
           "",
           "Remove: /anthropic betas remove <beta>",
         ];
@@ -2037,6 +2043,228 @@ export async function AnthropicAuthPlugin({ client }) {
 
       await sendCommandMessage(input.sessionID, "▣ Anthropic Betas\n\nUsage: /anthropic betas [add|remove <beta>]");
       return;
+    }
+
+    // /anthropic files [list|upload|get|delete|download] — Files API management
+    if (primary === "files") {
+      const action = (args[1] || "").toLowerCase();
+
+      // Get current account and ensure valid token
+      const account = accountManager?.getCurrentAccount();
+      if (!account) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic Files (error)\n\nNo accounts configured. Use /anthropic login first.",
+        );
+        return;
+      }
+
+      let token = account.access;
+      if (!token || !account.expires || account.expires < Date.now()) {
+        try {
+          token = await refreshAccountTokenSingleFlight(account);
+        } catch (err) {
+          await sendCommandMessage(
+            input.sessionID,
+            `▣ Anthropic Files (error)\n\nToken refresh failed: ${err.message}`,
+          );
+          return;
+        }
+      }
+
+      const apiBase = "https://api.anthropic.com";
+      const authHeaders = {
+        authorization: `Bearer ${token}`,
+        "anthropic-beta": "files-api-2025-04-14",
+      };
+
+      try {
+        // /anthropic files list — list all uploaded files
+        if (!action || action === "list") {
+          const res = await fetch(`${apiBase}/v1/files`, { headers: authHeaders });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\nHTTP ${res.status}: ${errBody}`);
+            return;
+          }
+          const data = await res.json();
+          const files = data.data || [];
+          if (files.length === 0) {
+            await sendCommandMessage(input.sessionID, "▣ Anthropic Files\n\nNo files uploaded.");
+            return;
+          }
+          const lines = ["▣ Anthropic Files", "", `${files.length} file(s):`, ""];
+          for (const f of files) {
+            const sizeKB = (f.size / 1024).toFixed(1);
+            lines.push(`  ${f.id}  ${f.filename}  (${sizeKB} KB, ${f.purpose})`);
+          }
+          await sendCommandMessage(input.sessionID, lines.join("\n"));
+          return;
+        }
+
+        // /anthropic files upload <path> — upload a file
+        if (action === "upload") {
+          const filePath = args.slice(2).join(" ").trim();
+          if (!filePath) {
+            await sendCommandMessage(input.sessionID, "▣ Anthropic Files\n\nUsage: /anthropic files upload <path>");
+            return;
+          }
+          const resolvedPath = resolve(filePath);
+          if (!existsSync(resolvedPath)) {
+            await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\nFile not found: ${resolvedPath}`);
+            return;
+          }
+          const content = readFileSync(resolvedPath);
+          const filename = basename(resolvedPath);
+          const blob = new Blob([content]);
+          const form = new FormData();
+          form.append("file", blob, filename);
+          form.append("purpose", "assistants");
+
+          const res = await fetch(`${apiBase}/v1/files`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "anthropic-beta": "files-api-2025-04-14",
+            },
+            body: form,
+          });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Files (error)\n\nUpload failed (HTTP ${res.status}): ${errBody}`,
+            );
+            return;
+          }
+          const file = await res.json();
+          const sizeKB = ((file.size || 0) / 1024).toFixed(1);
+          await sendCommandMessage(
+            input.sessionID,
+            `▣ Anthropic Files\n\nUploaded: ${file.id}\n  Filename: ${file.filename}\n  Size: ${sizeKB} KB`,
+          );
+          return;
+        }
+
+        // /anthropic files get <file_id> — get file metadata
+        if (action === "get" || action === "info") {
+          const fileId = args[2]?.trim();
+          if (!fileId) {
+            await sendCommandMessage(input.sessionID, "▣ Anthropic Files\n\nUsage: /anthropic files get <file_id>");
+            return;
+          }
+          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, { headers: authHeaders });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\nHTTP ${res.status}: ${errBody}`);
+            return;
+          }
+          const file = await res.json();
+          const lines = [
+            "▣ Anthropic Files",
+            "",
+            `  ID:       ${file.id}`,
+            `  Filename: ${file.filename}`,
+            `  Purpose:  ${file.purpose}`,
+            `  Size:     ${((file.size || 0) / 1024).toFixed(1)} KB`,
+            `  Type:     ${file.mime_type || "unknown"}`,
+            `  Created:  ${file.created_at || "unknown"}`,
+          ];
+          await sendCommandMessage(input.sessionID, lines.join("\n"));
+          return;
+        }
+
+        // /anthropic files delete <file_id> — delete a file
+        if (action === "delete" || action === "rm") {
+          const fileId = args[2]?.trim();
+          if (!fileId) {
+            await sendCommandMessage(input.sessionID, "▣ Anthropic Files\n\nUsage: /anthropic files delete <file_id>");
+            return;
+          }
+          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, {
+            method: "DELETE",
+            headers: authHeaders,
+          });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\nHTTP ${res.status}: ${errBody}`);
+            return;
+          }
+          await sendCommandMessage(input.sessionID, `▣ Anthropic Files\n\nDeleted: ${fileId}`);
+          return;
+        }
+
+        // /anthropic files download <file_id> [output_path] — download file content
+        if (action === "download" || action === "dl") {
+          const fileId = args[2]?.trim();
+          if (!fileId) {
+            await sendCommandMessage(
+              input.sessionID,
+              "▣ Anthropic Files\n\nUsage: /anthropic files download <file_id> [output_path]",
+            );
+            return;
+          }
+          const outputPath = args.slice(3).join(" ").trim();
+
+          // Get file metadata first for the filename
+          const metaRes = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, {
+            headers: authHeaders,
+          });
+          if (!metaRes.ok) {
+            const errBody = await metaRes.text();
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Files (error)\n\nHTTP ${metaRes.status}: ${errBody}`,
+            );
+            return;
+          }
+          const meta = await metaRes.json();
+          const savePath = outputPath ? resolve(outputPath) : resolve(meta.filename);
+
+          // Download file content
+          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}/content`, {
+            headers: authHeaders,
+          });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Files (error)\n\nDownload failed (HTTP ${res.status}): ${errBody}`,
+            );
+            return;
+          }
+          const buffer = Buffer.from(await res.arrayBuffer());
+          writeFileSync(savePath, buffer);
+          const sizeKB = (buffer.length / 1024).toFixed(1);
+          await sendCommandMessage(
+            input.sessionID,
+            `▣ Anthropic Files\n\nDownloaded: ${meta.filename}\n  Saved to: ${savePath}\n  Size: ${sizeKB} KB`,
+          );
+          return;
+        }
+
+        // Unknown action — show help
+        const helpLines = [
+          "▣ Anthropic Files",
+          "",
+          "Usage: /anthropic files <action>",
+          "",
+          "Actions:",
+          "  list                          List uploaded files",
+          "  upload <path>                 Upload a file (max 350MB)",
+          "  get <file_id>                 Get file metadata",
+          "  delete <file_id>              Delete a file",
+          "  download <file_id> [path]     Download file content",
+          "",
+          "Supported formats: PDF, DOCX, TXT, CSV, Excel, Markdown, images",
+          "Files can be referenced by file_id in Messages API requests.",
+        ];
+        await sendCommandMessage(input.sessionID, helpLines.join("\n"));
+        return;
+      } catch (err) {
+        await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\n${err.message}`);
+        return;
+      }
     }
 
     // Interactive CLI command is not compatible with slash flow.
