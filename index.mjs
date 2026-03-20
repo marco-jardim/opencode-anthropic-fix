@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { AccountManager } from "./lib/accounts.mjs";
@@ -107,9 +107,10 @@ const FALLBACK_CLAUDE_CLI_VERSION = "2.1.79";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
 const EFFORT_BETA_FLAG = "effort-2025-11-24";
+const REDACT_THINKING_BETA_FLAG = "redact-thinking-2026-02-12";
+const ADVANCED_TOOL_USE_BETA_FLAG = "advanced-tool-use-2025-11-20";
+const FAST_MODE_BETA_FLAG = "fast-mode-2026-02-01";
 const TOKEN_COUNTING_BETA_FLAG = "token-counting-2024-11-01";
-const BILLING_HASH_SALT = "59cf53e54c78";
-const BILLING_HASH_POSITIONS = [4, 7, 20];
 const CLAUDE_CODE_IDENTITY_STRING = "You are Claude Code, Anthropic's official CLI for Claude.";
 const KNOWN_IDENTITY_STRINGS = new Set([
   CLAUDE_CODE_IDENTITY_STRING,
@@ -430,39 +431,6 @@ function buildStainlessHelperHeader(tools, messages) {
 }
 
 /**
- * @param {any} content
- * @returns {string}
- */
-function extractTextContent(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-
-  const parts = [];
-  for (const block of content) {
-    if (!block || typeof block !== "object") continue;
-    if (block.type === "text" && typeof block.text === "string") {
-      parts.push(block.text);
-    }
-  }
-  return parts.join("\n");
-}
-
-/**
- * @param {any[]} messages
- * @returns {string}
- */
-function getFirstUserText(messages) {
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    if (message.role !== "user") continue;
-
-    const text = extractTextContent(message.content);
-    if (text) return text;
-  }
-  return "";
-}
-
-/**
  * @param {{id?: string, accountUuid?: string} | null | undefined} account
  * @returns {string}
  */
@@ -503,18 +471,12 @@ function buildRequestMetadata(input) {
  * @param {any[]} messages
  * @returns {string}
  */
-function buildAnthropicBillingHeader(claudeCliVersion, messages) {
+function buildAnthropicBillingHeader(claudeCliVersion) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
 
-  const firstUserText = getFirstUserText(messages);
-  const sampled = BILLING_HASH_POSITIONS.map((position) => firstUserText[position] || "0").join("");
-  const hash = createHash("sha256")
-    .update(`${BILLING_HASH_SALT}${sampled}${claudeCliVersion}`)
-    .digest("hex")
-    .slice(0, 3);
-
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "unknown";
-  return `x-anthropic-billing-header: cc_version=${claudeCliVersion}.${hash}; cc_entrypoint=${entrypoint}; cch=00000;`;
+  const cch = randomBytes(3).toString("hex").slice(0, 5);
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
+  return `x-anthropic-billing-header: cc_version=${claudeCliVersion}; cc_entrypoint=${entrypoint}; cch=${cch};`;
 }
 
 /**
@@ -659,10 +621,9 @@ function normalizeSystemTextBlocks(system) {
 /**
  * @param {Array<{type: string, text: string, cache_control?: {type: string}}>} system
  * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off'}} signature
- * @param {any[]} messages
  * @returns {Array<{type: string, text: string, cache_control?: {type: string}}>}
  */
-function buildSystemPromptBlocks(system, signature, messages) {
+function buildSystemPromptBlocks(system, signature) {
   const titleGeneratorRequest = isTitleGeneratorSystemBlocks(system);
 
   let sanitized = system.map((item) => ({
@@ -685,7 +646,7 @@ function buildSystemPromptBlocks(system, signature, messages) {
   );
 
   const blocks = [];
-  const billingHeader = buildAnthropicBillingHeader(signature.claudeCliVersion, messages);
+  const billingHeader = buildAnthropicBillingHeader(signature.claudeCliVersion);
   if (billingHeader) {
     blocks.push({ type: "text", text: billingHeader });
   }
@@ -750,6 +711,20 @@ function buildAnthropicBetaHeader(
   // Files API beta is endpoint/content-scoped instead of globally applied.
   if ((isFilesEndpoint || hasFileReferences) && !disableExperimentalBetas) {
     betas.push("files-api-2025-04-14");
+  }
+
+  // NOTE: redact-thinking-2026-02-12 is in upstream 2.1.79+ base profile but
+  // intentionally NOT auto-included here — OpenCode users benefit from seeing
+  // thinking blocks. Available via /anthropic betas add redact-thinking-2026-02-12.
+
+  // Advanced tool use improvements — in upstream 2.1.79+ base profile.
+  if (!disableExperimentalBetas) {
+    betas.push(ADVANCED_TOOL_USE_BETA_FLAG);
+  }
+
+  // Fast mode — in upstream 2.1.79+ base profile.
+  if (!disableExperimentalBetas) {
+    betas.push(FAST_MODE_BETA_FLAG);
   }
 
   if (isOpus46Model(model)) {
@@ -1049,15 +1024,13 @@ function transformRequestBody(body, signature, runtime) {
     if (Object.prototype.hasOwnProperty.call(parsed, "betas")) {
       delete parsed.betas;
     }
-    const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
-
     // Normalize thinking block for adaptive (Opus 4.6) vs manual (older models).
     if (Object.prototype.hasOwnProperty.call(parsed, "thinking")) {
       parsed.thinking = normalizeThinkingBlock(parsed.thinking, parsed.model || "");
     }
 
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
-    parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signature, messages);
+    parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signature);
 
     if (signature.enabled) {
       const currentMetadata =
@@ -2114,6 +2087,7 @@ export async function AnthropicAuthPlugin({ client }) {
           "",
           "Preset betas (auto-computed per model/provider):",
           "  oauth-2025-04-20, claude-code-20250219,",
+          "  advanced-tool-use-2025-11-20, fast-mode-2026-02-01,",
           "  interleaved-thinking-2025-05-14 (non-Opus 4.6) OR effort-2025-11-24 (Opus 4.6),",
           "  files-api-2025-04-14 (only /v1/files and requests with file_id),",
           "  token-counting-2024-11-01 (only /v1/messages/count_tokens),",
@@ -2130,8 +2104,8 @@ export async function AnthropicAuthPlugin({ client }) {
           "  /anthropic betas add web-search-2025-03-05",
           "  /anthropic betas add compact-2026-01-12",
           "  /anthropic betas add mcp-servers-2025-12-04",
+          "  /anthropic betas add redact-thinking-2026-02-12",
           "  /anthropic betas add 1m   (shortcut for context-1m-2025-08-07)",
-          "  /anthropic betas add fast (shortcut for fast-mode-2026-02-01)",
           "",
           "Remove: /anthropic betas remove <beta>",
         ];

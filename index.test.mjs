@@ -2740,6 +2740,9 @@ describe("header handling", () => {
     expect(betaHeader).toContain("oauth-2025-04-20");
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).toContain("claude-code-20250219");
+    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).toContain("fast-mode-2026-02-01");
+    expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
     expect(betaHeader).not.toContain("fine-grained-tool-streaming-2025-05-14");
     expect(betaHeader).not.toContain("code-execution-2025-08-25");
     expect(betaHeader).not.toContain("files-api-2025-04-14");
@@ -2773,6 +2776,9 @@ describe("header handling", () => {
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
     expect(betaHeader).toContain("effort-2025-11-24");
+    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).toContain("fast-mode-2026-02-01");
+    expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
     expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
   });
 
@@ -3059,6 +3065,9 @@ describe("header handling", () => {
     expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).not.toContain("prompt-caching-scope-2026-01-05");
     expect(betaHeader).not.toContain("tool-examples-2025-10-29");
+    expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
+    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).not.toContain("fast-mode-2026-02-01");
   });
 
   it("computes x-stainless-helper from tools and message content", async () => {
@@ -3100,6 +3109,7 @@ describe("header handling", () => {
     const parsed = JSON.parse(init.body);
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
     expect(parsed.system[0].text).toContain("cc_entrypoint=cli");
+    expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{5}/);
     expect(parsed.system[0].cache_control).toBeUndefined();
     expect(parsed.system[1]).toEqual({
       type: "text",

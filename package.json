@@ -1,6 +1,6 @@
 {
   "name": "opencode-anthropic-fix",
-  "version": "0.0.24",
+  "version": "0.0.25",
   "main": "./index.mjs",
   "files": [
     "index.mjs",

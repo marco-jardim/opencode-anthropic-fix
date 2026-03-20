@@ -45,6 +45,7 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Claude Code signature emulation** &mdash; full HTTP header, system prompt, beta flag, and metadata mimicry derived from Claude Code's open source code
 - **OAuth endpoint fingerprint parity** &mdash; sends Claude Code-style `User-Agent` on `/v1/oauth/token` and `/v1/oauth/revoke` to match current OAuth validation
 - **Effort-based thinking for Opus 4.6** &mdash; maps `budgetTokens` to effort levels (`low`/`medium`/`high`) and includes `effort-2025-11-24`
+- **Upstream-aligned auto betas** &mdash; `advanced-tool-use-2025-11-20` and `fast-mode-2026-02-01` auto-included to match Claude Code 2.1.79+ (`redact-thinking-2026-02-12` available as opt-in to preserve thinking block visibility)
 - **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
 - **Runtime config + custom betas** &mdash; `/anthropic set`, `/anthropic config`, and `/anthropic betas` slash commands for live feature toggling without restarting OpenCode
 - **Files API integration** &mdash; upload, list, download, and manage files via `/anthropic files` with endpoint/content-scoped `files-api-2025-04-14` beta injection
@@ -273,7 +274,6 @@ Add or remove beta flags that get included in every `anthropic-beta` header. Per
 /anthropic betas add <beta-name>   # add a custom beta
 /anthropic betas remove <beta-name> # remove a custom beta
 /anthropic betas add 1m            # shortcut => context-1m-2025-08-07
-/anthropic betas add fast          # shortcut => fast-mode-2026-02-01
 ```
 
 **Available preset betas** (shown by `/anthropic betas`):
@@ -288,7 +288,7 @@ Add or remove beta flags that get included in every `anthropic-beta` header. Per
 | `mcp-servers-2025-12-04`          | MCP servers in API request payload                |
 | `web-search-2025-03-05`           | Web search (Vertex/Foundry only)                  |
 | `context-1m-2025-08-07`           | 1M context beta (provider/model dependent)        |
-| `fast-mode-2026-02-01`            | Faster Opus mode (experimental)                   |
+| `redact-thinking-2026-02-12`      | Hide thinking blocks from responses (opt-in)      |
 
 Example workflow:
 

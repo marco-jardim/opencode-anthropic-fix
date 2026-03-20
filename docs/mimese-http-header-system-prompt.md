@@ -52,7 +52,7 @@ This version is used by:
 
 - `user-agent`
 - `x-stainless-package-version`
-- `x-anthropic-billing-header` hash generation in `system`
+- `x-anthropic-billing-header` generation in `system`
 
 ## 3) Request flow where mimicry is applied
 
@@ -229,6 +229,8 @@ Automatically enabled by Claude Code (functional reference):
 
 Now auto-included by the plugin:
 
+- `advanced-tool-use-2025-11-20` (upstream 2.1.79+ base profile)
+- `fast-mode-2026-02-01` (upstream 2.1.79+ base profile)
 - `files-api-2025-04-14` (only `/v1/files` and Messages requests that reference `file_id`)
 - `effort-2025-11-24` (Opus 4.6)
 - `token-counting-2024-11-01` (preflight `/v1/messages/count_tokens`)
@@ -251,13 +253,11 @@ Platform-specific betas (not cross-provider defaults):
 
 No dedicated automatic composition yet for:
 
-- `advanced-tool-use-2025-11-20`
-- `fast-mode-2026-02-01`
-- `redact-thinking-2026-02-12`
+- `redact-thinking-2026-02-12` (intentionally opt-in — OpenCode users benefit from seeing thinking blocks)
 - `afk-mode-2026-01-31`
 - `tool-search-tool-2025-10-19`
 
-These can still be injected manually through `ANTHROPIC_BETAS` when operationally required.
+These can still be injected manually through `ANTHROPIC_BETAS` or `/anthropic betas add` when operationally required.
 
 ### 5.4 Important note on fine-grained tool streaming
 
@@ -302,21 +302,17 @@ Canonical identity string:
 
 ### 6.4 Billing header generation
 
-`buildAnthropicBillingHeader(claudeCliVersion, messages)`:
+`buildAnthropicBillingHeader(claudeCliVersion)`:
 
 - can be disabled by `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
-- extracts first `user` message text
-- samples chars at positions `[4, 7, 20]` (fallback `"0"` if missing)
-- computes `sha256(BILLING_HASH_SALT + sampled + claudeCliVersion)`
-  - `BILLING_HASH_SALT = "59cf53e54c78"`
-- uses first 3 hex chars as hash suffix
+- generates a random 5-hex-char `cch` value per request (`randomBytes(3).toString("hex").slice(0, 5)`)
 - builds:
 
 ```text
-x-anthropic-billing-header: cc_version=<claudeCliVersion>.<hash3>; cc_entrypoint=<entrypoint>; cch=00000;
+x-anthropic-billing-header: cc_version=<claudeCliVersion>; cc_entrypoint=<entrypoint>; cch=<5-hex>;
 ```
 
-Detail: `cc_entrypoint` here uses `CLAUDE_CODE_ENTRYPOINT` or `unknown` (different from `user-agent`, whose default is `cli`).
+Detail: `cc_entrypoint` uses `CLAUDE_CODE_ENTRYPOINT` or `cli` (matching upstream default). The `cch` is non-deterministic per request, matching upstream Claude Code behavior.
 
 ## 7) Body fields related to mimicry
 
