@@ -107,7 +107,6 @@ const FALLBACK_CLAUDE_CLI_VERSION = "2.1.79";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
 const EFFORT_BETA_FLAG = "effort-2025-11-24";
-const REDACT_THINKING_BETA_FLAG = "redact-thinking-2026-02-12";
 const ADVANCED_TOOL_USE_BETA_FLAG = "advanced-tool-use-2025-11-20";
 const FAST_MODE_BETA_FLAG = "fast-mode-2026-02-01";
 const TOKEN_COUNTING_BETA_FLAG = "token-counting-2024-11-01";
