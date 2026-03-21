@@ -484,6 +484,10 @@ describe("slash commands", () => {
     expect(text).toContain("Started login flow");
     expect(text).toContain("claude.ai/oauth/authorize");
 
+    // Extract the state from the authorize URL to pass back in the completion
+    const stateMatch = text.match(/[?&]state=([^&\s]+)/);
+    const state = stateMatch ? stateMatch[1] : "test-state";
+
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -494,7 +498,7 @@ describe("slash commands", () => {
       }),
     });
 
-    text = await runAnthropic("login complete test-code#test-state");
+    text = await runAnthropic(`login complete test-code#${state}`);
     expect(text).toContain("Added account #1");
     expect(client.auth.set).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -521,7 +525,11 @@ describe("slash commands", () => {
   });
 
   it("surfaces token exchange error details in slash OAuth flow", async () => {
-    await runAnthropic("login");
+    const loginText = await runAnthropic("login");
+
+    // Extract the state from the authorize URL to pass back correctly
+    const stateMatch = loginText.match(/[?&]state=([^&\s]+)/);
+    const state = stateMatch ? stateMatch[1] : "test-state";
 
     mockFetch.mockResolvedValueOnce({
       ok: false,
@@ -529,7 +537,7 @@ describe("slash commands", () => {
       text: async () => JSON.stringify({ error: "invalid_grant", error_description: "state mismatch" }),
     });
 
-    const text = await runAnthropic("login complete bad-code#bad-state");
+    const text = await runAnthropic(`login complete bad-code#${state}`);
     expect(text).toContain("Token exchange failed");
     expect(text).toContain("HTTP 400");
     expect(text).toContain("invalid_grant");
@@ -564,6 +572,10 @@ describe("slash commands", () => {
     let text = await runAnthropic("reauth 1");
     expect(text).toContain("Started reauth 1 flow");
 
+    // Extract the state from the authorize URL
+    const stateMatch = text.match(/[?&]state=([^&\s]+)/);
+    const state = stateMatch ? stateMatch[1] : "state";
+
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -574,7 +586,7 @@ describe("slash commands", () => {
       }),
     });
 
-    text = await runAnthropic("reauth complete another-code#state");
+    text = await runAnthropic(`reauth complete another-code#${state}`);
     expect(text).toContain("Re-authenticated account #1");
     expect(client.auth.set).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -683,7 +695,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.79");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.80");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.has("x-api-key")).toBe(false);
@@ -1436,7 +1448,7 @@ describe("fetch interceptor — token refresh", () => {
     const [refreshUrl, refreshInit] = mockFetch.mock.calls[0];
     expect(refreshUrl).toBe("https://platform.claude.com/v1/oauth/token");
     expect(JSON.parse(refreshInit.body).grant_type).toBe("refresh_token");
-    expect(refreshInit.headers["User-Agent"]).toBe("claude-cli/2.1.79 (external, cli)");
+    expect(refreshInit.headers["User-Agent"]).toBe("claude-code/2.1.80");
 
     // Second call should use the fresh token
     const [, apiInit] = mockFetch.mock.calls[1];
@@ -2222,13 +2234,15 @@ describe("fetch interceptor — account exhaustion", () => {
   it.each([
     { status: 529, errorType: "overloaded_error", errorMsg: "Server is overloaded" },
     { status: 503, errorType: "service_unavailable", errorMsg: "temporarily unavailable" },
-    { status: 500, errorType: "internal_error", errorMsg: "internal server error" },
-  ])("returns $status directly without switching accounts", async ({ status, errorType, errorMsg }) => {
+  ])("retries $status up to 2 times then returns directly", async ({ status, errorType, errorMsg }) => {
     const fetchFn = await setupFetchFn(client, [{}, {}]);
 
-    mockFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { type: errorType, message: errorMsg } }), { status }),
-    );
+    // 529/503 are retried up to 2 times (RE doc §5.5)
+    const makeErrorResponse = () =>
+      new Response(JSON.stringify({ error: { type: errorType, message: errorMsg } }), { status });
+    mockFetch.mockResolvedValueOnce(makeErrorResponse());
+    mockFetch.mockResolvedValueOnce(makeErrorResponse());
+    mockFetch.mockResolvedValueOnce(makeErrorResponse());
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -2236,6 +2250,25 @@ describe("fetch interceptor — account exhaustion", () => {
     });
 
     expect(response.status).toBe(status);
+    // 1 initial + 2 retries = 3 total attempts
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("returns 500 directly without switching accounts", async () => {
+    const fetchFn = await setupFetchFn(client, [{}, {}]);
+
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { type: "internal_error", message: "internal server error" } }), {
+        status: 500,
+      }),
+    );
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(500);
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
@@ -2485,10 +2518,12 @@ describe("fetch interceptor — account exhaustion", () => {
 
     expect(response.status).toBe(200);
 
-    const warningToasts = client.tui.showToast.mock.calls.filter((call) => call[0]?.body?.variant === "warning");
+    const switchToasts = client.tui.showToast.mock.calls.filter(
+      (call) => call[0]?.body?.variant === "warning" && call[0]?.body?.message?.includes("switching account"),
+    );
 
     // Debounce should suppress immediate duplicate switch warnings.
-    expect(warningToasts).toHaveLength(1);
+    expect(switchToasts).toHaveLength(1);
   });
 });
 
@@ -2522,7 +2557,7 @@ describe("OAuth exchange failure", () => {
 
     expect(credentials.type).toBe("failed");
     const [, exchangeInit] = mockFetch.mock.calls[0];
-    expect(exchangeInit.headers["User-Agent"]).toBe("claude-cli/2.1.79 (external, cli)");
+    expect(exchangeInit.headers["User-Agent"]).toBe("claude-code/2.1.80");
     // saveAccounts should NOT have been called
     expect(saveAccounts).not.toHaveBeenCalled();
   });
@@ -2750,7 +2785,7 @@ describe("header handling", () => {
     expect(betaHeader).toContain("another-beta-2025-02-01");
   });
 
-  it("does NOT add context-1m beta for anthropic/OAuth provider (not supported)", async () => {
+  it("adds context-1m beta for eligible models on all providers including OAuth", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -2760,11 +2795,11 @@ describe("header handling", () => {
     });
 
     const [, init] = mockFetch.mock.calls[0];
-    // context-1m beta is unsupported on OAuth; compaction is gated by model.limit.input instead.
-    expect(init.headers.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+    // Claude Code v2.1.80: context-1m is always-on for eligible models regardless of provider.
+    expect(init.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
   });
 
-  it("adds effort beta instead of interleaved-thinking for Opus 4.6 models", async () => {
+  it("adds effort beta AND interleaved-thinking for Opus 4.6 models (both always-on)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -2778,11 +2813,12 @@ describe("header handling", () => {
     expect(betaHeader).toContain("effort-2025-11-24");
     expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).toContain("fast-mode-2026-02-01");
+    // Claude Code v2.1.80: interleaved-thinking is now always-on (not model-gated)
+    expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
-    expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
   });
 
-  it("transforms budget_tokens thinking to effort for Opus 4.6", async () => {
+  it("normalizes thinking to adaptive for Opus 4.6 (regardless of incoming format)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -2797,24 +2833,15 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.thinking).toEqual({ type: "enabled", effort: "high" });
-    expect(parsed.thinking.budget_tokens).toBeUndefined();
+    // RE doc §5.2: Opus 4.6 always uses adaptive thinking
+    expect(parsed.thinking).toEqual({ type: "adaptive" });
   });
 
-  it("maps budget_tokens to effort levels correctly for Opus 4.6", async () => {
-    /** @type {Array<[number, string]>} */
-    const cases = [
-      [512, "low"],
-      [1024, "low"],
-      [1025, "medium"],
-      [8000, "medium"],
-      [8001, "high"],
-      [16000, "high"],
-      [16001, "high"],
-      [100000, "high"],
-    ];
+  it("normalizes all budget_tokens variants to adaptive for Opus 4.6", async () => {
+    /** @type {Array<number>} */
+    const budgets = [512, 1024, 1025, 8000, 8001, 16000, 16001, 100000];
 
-    for (const [budget, expectedEffort] of cases) {
+    for (const budget of budgets) {
       mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
       mockFetch.mockClear();
 
@@ -2830,12 +2857,12 @@ describe("header handling", () => {
 
       const [, init] = mockFetch.mock.calls[0];
       const parsed = JSON.parse(init.body);
-      expect(parsed.thinking.effort).toBe(expectedEffort);
-      expect(parsed.thinking.budget_tokens).toBeUndefined();
+      // RE doc §5.2: adaptive for all Opus 4.6 regardless of budget
+      expect(parsed.thinking).toEqual({ type: "adaptive" });
     }
   });
 
-  it("defaults to medium effort for Opus 4.6 when thinking has no budget_tokens", async () => {
+  it("normalizes enabled thinking (no budget) to adaptive for Opus 4.6", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -2850,10 +2877,10 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.thinking).toEqual({ type: "enabled", effort: "medium" });
+    expect(parsed.thinking).toEqual({ type: "adaptive" });
   });
 
-  it("keeps effort if already provided for Opus 4.6", async () => {
+  it("normalizes effort-based thinking to adaptive for Opus 4.6", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -2868,7 +2895,7 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.thinking).toEqual({ type: "enabled", effort: "low" });
+    expect(parsed.thinking).toEqual({ type: "adaptive" });
   });
 
   it("passes thinking through unchanged for older models (budget_tokens preserved)", async () => {
@@ -2889,8 +2916,7 @@ describe("header handling", () => {
     expect(parsed.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
   });
 
-  it("adds ANTHROPIC_BETAS entries for haiku models too", async () => {
-    process.env.ANTHROPIC_BETAS = "custom-a, custom-b";
+  it("haiku models get always-on betas but skip the claude-code flag", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -2901,8 +2927,12 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    expect(betaHeader).toContain("custom-a");
-    expect(betaHeader).toContain("custom-b");
+    // Haiku skips CLAUDE_CODE_BETA_FLAG but gets all other always-on betas
+    expect(betaHeader).not.toContain("claude-code-20250219");
+    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).toContain("fast-mode-2026-02-01");
+    expect(betaHeader).toContain("effort-2025-11-24");
+    expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
   });
 
   it("does not auto-include code-execution beta", async () => {
@@ -3048,7 +3078,6 @@ describe("header handling", () => {
 
   it("disables experimental betas when CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1", async () => {
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
-    process.env.ANTHROPIC_BETAS = "custom-stable-beta,tool-examples-2025-10-29";
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -3059,9 +3088,12 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
+    // Non-experimental betas survive
     expect(betaHeader).toContain("oauth-2025-04-20");
     expect(betaHeader).toContain("claude-code-20250219");
-    expect(betaHeader).toContain("custom-stable-beta");
+    // effort-2025-11-24 is NOT in EXPERIMENTAL_BETA_FLAGS so it survives
+    expect(betaHeader).toContain("effort-2025-11-24");
+    // All EXPERIMENTAL_BETA_FLAGS members are filtered out
     expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).not.toContain("prompt-caching-scope-2026-01-05");
     expect(betaHeader).not.toContain("tool-examples-2025-10-29");
@@ -3114,7 +3146,7 @@ describe("header handling", () => {
     expect(parsed.system[1]).toEqual({
       type: "text",
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      cache_control: { type: "ephemeral" },
+      cache_control: { type: "ephemeral", ttl: "1h" },
     });
     expect(parsed.system[2].text).toBe("Use Claude Code defaults");
   });
@@ -3164,12 +3196,13 @@ describe("header handling", () => {
     expect(parsed.system[0]).toEqual({
       type: "text",
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      cache_control: { type: "ephemeral" },
+      cache_control: { type: "ephemeral", ttl: "1h" },
     });
     expect(parsed.system.some((item) => item.text.startsWith("x-anthropic-billing-header:"))).toBe(false);
   });
 
   it("adds metadata.user_id to request body", async () => {
+    delete process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID;
     process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
@@ -3185,13 +3218,19 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.metadata.user_id).toMatch(
-      /^user_test-signature-user_account_[^_]+_session_[0-9a-f]{8}-[0-9a-f-]{27}$/,
-    );
+    // metadata.user_id is now JSON.stringify({device_id, account_uuid, session_id})
+    const userId = JSON.parse(parsed.metadata.user_id);
+    expect(userId).toHaveProperty("device_id");
+    expect(userId.device_id).toMatch(/^[0-9a-f]{64}$/);
+    expect(userId).toHaveProperty("account_uuid");
+    expect(userId).toHaveProperty("session_id");
+    expect(userId.session_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    // First-party API rejects "betas" in body — betas are header-only
     expect(parsed.betas).toBeUndefined();
   });
 
   it("adds metadata fields from CLAUDE_CODE_* env vars", async () => {
+    delete process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID;
     process.env.CLAUDE_CODE_ACCOUNT_UUID = "acct-uuid-123";
     process.env.CLAUDE_CODE_ORGANIZATION_UUID = "org-uuid-456";
     process.env.CLAUDE_CODE_USER_EMAIL = "dev@example.com";
@@ -3205,12 +3244,15 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.metadata.user_id).toContain("_account_acct-uuid-123_");
-    expect(parsed.metadata.organization_uuid).toBe("org-uuid-456");
-    expect(parsed.metadata.user_email).toBe("dev@example.com");
+    // metadata.user_id is JSON with device_id, account_uuid, session_id
+    const userId = JSON.parse(parsed.metadata.user_id);
+    expect(userId).toHaveProperty("device_id");
+    expect(userId).toHaveProperty("account_uuid");
+    expect(userId).toHaveProperty("session_id");
+    // organization_uuid and user_email are NOT in request metadata — only in telemetry events
   });
 
-  it("removes unsupported top-level betas field from request body", async () => {
+  it("strips any incoming betas from request body (API rejects betas in body)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -3221,7 +3263,11 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
+    // First-party API rejects "betas" in body with "Extra inputs are not permitted"
+    // Betas are header-only; any incoming body betas must be stripped
     expect(parsed.betas).toBeUndefined();
+    // Betas still present in header
+    expect(init.headers.get("anthropic-beta")).toContain("claude-code-20250219");
   });
 
   it("uses ANTHROPIC_AUTH_TOKEN when provided", async () => {

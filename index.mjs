@@ -9,7 +9,13 @@ import { loadConfig, loadConfigFresh, saveConfig, CLIENT_ID, getConfigDir } from
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { applyOAuthCredentials, resetAccountTracking } from "./lib/account-state.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
-import { isAccountSpecificError, parseRateLimitReason, parseRetryAfterHeader } from "./lib/backoff.mjs";
+import {
+  isAccountSpecificError,
+  parseRateLimitReason,
+  parseRetryAfterHeader,
+  parseRetryAfterMsHeader,
+  parseShouldRetryHeader,
+} from "./lib/backoff.mjs";
 
 // ---------------------------------------------------------------------------
 // Account management CLI prompts
@@ -100,11 +106,297 @@ async function promptManageAccounts(accountManager) {
 }
 
 // ---------------------------------------------------------------------------
+// Session-level cache & cost tracking (Phase 4)
+// ---------------------------------------------------------------------------
+
+/** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, recentCacheRates: number[], sessionCostUsd: number}} */
+const sessionMetrics = {
+  turns: 0,
+  totalInput: 0,
+  totalOutput: 0,
+  totalCacheRead: 0,
+  totalCacheWrite: 0,
+  recentCacheRates: [], // rolling window of last 5 turns
+  sessionCostUsd: 0,
+};
+
+const MODEL_PRICING = {
+  "claude-opus-4-6": { input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75 },
+  "claude-sonnet-4-6": { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
+  "claude-haiku-4-5": { input: 0.8, output: 4.0, cacheRead: 0.08, cacheWrite: 1.0 },
+};
+const DEFAULT_PRICING = MODEL_PRICING["claude-sonnet-4-6"];
+
+/**
+ * Get pricing for a model, falling back to sonnet pricing for unknown models.
+ * @param {string} model
+ * @returns {{input: number, output: number, cacheRead: number, cacheWrite: number}}
+ */
+function getModelPricing(model) {
+  if (!model) return DEFAULT_PRICING;
+  // Prefix match: "claude-opus-4-6-20260101" matches "claude-opus-4-6"
+  for (const [key, pricing] of Object.entries(MODEL_PRICING)) {
+    if (model.startsWith(key)) return pricing;
+  }
+  return DEFAULT_PRICING;
+}
+
+/**
+ * Calculate the cost in USD for a set of token counts.
+ * @param {UsageStats} usage
+ * @param {string} model
+ * @returns {number}
+ */
+function calculateCostUsd(usage, model) {
+  const p = getModelPricing(model);
+  return (
+    (usage.inputTokens / 1_000_000) * p.input +
+    (usage.outputTokens / 1_000_000) * p.output +
+    (usage.cacheReadTokens / 1_000_000) * p.cacheRead +
+    (usage.cacheWriteTokens / 1_000_000) * p.cacheWrite
+  );
+}
+
+/**
+ * Update session metrics after a completed turn.
+ * @param {UsageStats} usage
+ * @param {string} model
+ */
+function updateSessionMetrics(usage, model) {
+  sessionMetrics.turns += 1;
+  sessionMetrics.totalInput += usage.inputTokens;
+  sessionMetrics.totalOutput += usage.outputTokens;
+  sessionMetrics.totalCacheRead += usage.cacheReadTokens;
+  sessionMetrics.totalCacheWrite += usage.cacheWriteTokens;
+
+  // Cache hit rate for this turn
+  const totalPrompt = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  const hitRate = totalPrompt > 0 ? usage.cacheReadTokens / totalPrompt : 0;
+  sessionMetrics.recentCacheRates.push(hitRate);
+  if (sessionMetrics.recentCacheRates.length > 5) {
+    sessionMetrics.recentCacheRates.shift();
+  }
+
+  // Cost
+  sessionMetrics.sessionCostUsd += calculateCostUsd(usage, model);
+}
+
+/**
+ * Get rolling average cache hit rate over last 5 turns.
+ * @returns {number} 0-1
+ */
+function getAverageCacheHitRate() {
+  const rates = sessionMetrics.recentCacheRates;
+  if (rates.length === 0) return 0;
+  return rates.reduce((a, b) => a + b, 0) / rates.length;
+}
+
+// --- Phase 5: Auto-strategy adaptation ---
+// strategyState is created per-plugin instance inside AnthropicAuthPlugin() to avoid
+// cross-instance pollution (critical for test isolation and multi-instance scenarios).
+// See createStrategyState() below.
+
+// --- Phase 5: Minimal telemetry emulation ("Silent Observer") ---
+
+class TelemetryEmitter {
+  #enabled = false;
+  #sent = false;
+  #disabled = false; // permanently disabled for this session (on auth failure)
+  #deviceId = null;
+  #sessionId = null;
+  #cliVersion = null;
+  #accountUuid = "";
+  #orgUuid = "";
+
+  constructor() {
+    this.#sessionId = randomUUID();
+  }
+
+  /**
+   * Initialize with session context. Call once config and accounts are ready.
+   * @param {object} opts
+   * @param {boolean} opts.enabled
+   * @param {string} opts.deviceId
+   * @param {string} opts.cliVersion
+   * @param {string} [opts.accountUuid]
+   * @param {string} [opts.orgUuid]
+   * @param {string} [opts.sessionId] - Must match signatureSessionId for correlation
+   */
+  init({ enabled, deviceId, cliVersion, accountUuid, orgUuid, sessionId }) {
+    this.#enabled = enabled;
+    this.#deviceId = deviceId;
+    this.#cliVersion = cliVersion;
+    this.#accountUuid = accountUuid || "";
+    this.#orgUuid = orgUuid || "";
+    if (sessionId) this.#sessionId = sessionId;
+  }
+
+  /**
+   * Build a ClaudeCodeInternalEvent matching the schema from reverse-engineering.
+   * @param {string} eventName
+   * @param {object} [extras]
+   * @returns {object}
+   */
+  #buildEvent(eventName, extras = {}) {
+    return {
+      event_type: "ClaudeCodeInternalEvent",
+      event_data: {
+        event_id: randomUUID(),
+        event_name: eventName,
+        client_timestamp: new Date().toISOString(),
+        device_id: this.#deviceId,
+        email: "", // RE doc §7.2 — present but empty (privacy: don't leak email in telemetry)
+        auth: {
+          account_uuid: this.#accountUuid,
+          organization_uuid: this.#orgUuid,
+        },
+        core: {
+          session_id: this.#sessionId,
+          model: "", // empty — don't reveal model choice
+          user_type: "consumer", // RE doc §7.2 — default consumer for Claude.ai OAuth
+          client_type: "cli", // RE doc §7.2 — always cli
+          betas: [], // RE doc §7.2 — populated at send time if needed
+          is_interactive: true,
+          entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT || "cli",
+        },
+        env: {
+          platform: process.platform,
+          arch: process.arch,
+          node_version: process.version,
+          terminal: process.env.TERM_PROGRAM || process.env.TERM || "",
+          version: this.#cliVersion,
+          build_time: "", // omit — we don't know the real build time
+          is_ci: false,
+        },
+        ...extras,
+      },
+    };
+  }
+
+  /**
+   * Send a batch of events to the telemetry endpoint.
+   * @param {object[]} events
+   * @param {string} accessToken
+   * @returns {Promise<boolean>}
+   */
+  async #sendBatch(events, accessToken) {
+    if (!accessToken || events.length === 0) return false;
+
+    try {
+      const response = await fetch("https://api.anthropic.com/api/event_logging/batch", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+          "anthropic-version": "2023-06-01",
+          "User-Agent": `claude-code/${this.#cliVersion}`,
+          "x-service-name": "claude-code",
+        },
+        body: JSON.stringify({ events }),
+        signal: AbortSignal.timeout(10000), // 10s timeout
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        this.#disabled = true;
+        return false;
+      }
+      if (response.status === 400) {
+        this.#disabled = true;
+        return false;
+      }
+      return response.ok;
+    } catch {
+      // Network error — don't retry, don't disable
+      return false;
+    }
+  }
+
+  /**
+   * Send startup events after first successful API response.
+   * Called once per session with random jitter.
+   * @param {string} accessToken
+   */
+  async sendStartupEvents(accessToken) {
+    if (!this.#enabled || this.#sent || this.#disabled) return;
+    this.#sent = true;
+
+    // Random jitter: 500ms - 2000ms after first successful response
+    const jitter = 500 + Math.random() * 1500;
+    await new Promise((resolve) => setTimeout(resolve, jitter));
+
+    if (this.#disabled) return;
+
+    const startedEvent = this.#buildEvent("tengu_started");
+    const startupTelemetryEvent = this.#buildEvent("tengu_startup_telemetry", {
+      is_git: true,
+      sandbox_enabled: false,
+    });
+
+    await this.#sendBatch([startedEvent, startupTelemetryEvent], accessToken);
+  }
+
+  /**
+   * Send exit event on shutdown. Best-effort, no retry.
+   * @param {string} accessToken
+   * @param {number} sessionDurationMs
+   */
+  async sendExitEvent(accessToken, sessionDurationMs) {
+    if (!this.#enabled || !this.#sent || this.#disabled) return;
+
+    const exitEvent = this.#buildEvent("tengu_exit", {
+      last_session_duration: sessionDurationMs,
+      last_session_id: this.#sessionId,
+    });
+
+    // Best-effort, short timeout
+    await this.#sendBatch([exitEvent], accessToken).catch(() => {});
+  }
+
+  get sessionId() {
+    return this.#sessionId;
+  }
+  get enabled() {
+    return this.#enabled && !this.#disabled;
+  }
+}
+
+const telemetryEmitter = new TelemetryEmitter();
+const SESSION_START_TIME = Date.now();
+/** @type {{ token: string }} Mutable ref to latest live access token for exit telemetry */
+const liveTokenRef = { token: "" };
+
+// Best-effort exit telemetry
+process.on("beforeExit", () => {
+  const duration = Date.now() - SESSION_START_TIME;
+  telemetryEmitter.sendExitEvent(liveTokenRef.token, duration).catch(() => {});
+});
+
+// ---------------------------------------------------------------------------
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.79";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.80";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
+
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.80.
+// This is distinct from the CLI version and goes in X-Stainless-Package-Version.
+const ANTHROPIC_SDK_VERSION = "0.52.0";
+
+// Map of CLI version → bundled SDK version (update when CLI version changes)
+const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.80", "0.52.0"],
+  ["2.1.79", "0.51.0"],
+]);
+
+/**
+ * Get the SDK version corresponding to a CLI version.
+ * Falls back to ANTHROPIC_SDK_VERSION constant.
+ * @param {string} cliVersion
+ * @returns {string}
+ */
+function getSdkVersion(cliVersion) {
+  return CLI_TO_SDK_VERSION.get(cliVersion) ?? ANTHROPIC_SDK_VERSION;
+}
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
 const EFFORT_BETA_FLAG = "effort-2025-11-24";
 const ADVANCED_TOOL_USE_BETA_FLAG = "advanced-tool-use-2025-11-20";
@@ -159,6 +451,7 @@ const STAINLESS_HELPER_KEYS = [
 ];
 const USER_ID_STORAGE_FILE = "anthropic-signature-user-id";
 const DEBUG_SYSTEM_PROMPT_ENV = "OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT";
+const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 const COMPACT_TITLE_GENERATOR_SYSTEM_PROMPT = [
   "You are a title generator. You output ONLY a thread title. Nothing else.",
   "",
@@ -229,6 +522,31 @@ function buildUserAgent(claudeCliVersion) {
 }
 
 /**
+ * Build the minimal User-Agent for OAuth/token endpoints.
+ * Claude Code sends "claude-code/{version}" on token exchange/refresh.
+ * @param {string} version
+ * @returns {string}
+ */
+function buildMinimalUserAgent(version) {
+  return `claude-code/${version}`;
+}
+
+/**
+ * Build the extended User-Agent for API calls.
+ * Claude Code sends "claude-cli/{version} (external, {entrypoint})".
+ * @param {string} version
+ * @returns {string}
+ */
+function buildExtendedUserAgent(version) {
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT ?? "cli";
+  const sdkVersion = process.env.CLAUDE_AGENT_SDK_VERSION ? `, agent-sdk/${process.env.CLAUDE_AGENT_SDK_VERSION}` : "";
+  const clientApp = process.env.CLAUDE_AGENT_SDK_CLIENT_APP
+    ? `, client-app/${process.env.CLAUDE_AGENT_SDK_CLIENT_APP}`
+    : "";
+  return `claude-cli/${version} (external, ${entrypoint}${sdkVersion}${clientApp})`;
+}
+
+/**
  * @returns {Record<string, string>}
  */
 function parseAnthropicCustomHeaders() {
@@ -252,25 +570,25 @@ function parseAnthropicCustomHeaders() {
 }
 
 /**
+ * Returns the persistent device ID (64-char hex string).
+ * Migrates legacy UUID-format values to the new 64-hex format automatically.
  * @returns {string}
  */
-function getOrCreateSignatureUserId() {
-  const envUserId = process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID?.trim();
-  if (envUserId) return envUserId;
-
+function getOrCreateDeviceId() {
   const configDir = getConfigDir();
   const userIdPath = join(configDir, USER_ID_STORAGE_FILE);
 
   try {
     if (existsSync(userIdPath)) {
       const existing = readFileSync(userIdPath, "utf-8").trim();
-      if (existing) return existing;
+      // Accept only valid 64-char lowercase hex; UUID (36 chars with dashes) triggers migration.
+      if (existing && /^[0-9a-f]{64}$/.test(existing)) return existing;
     }
   } catch {
     // fall through and generate a new id
   }
 
-  const generated = randomUUID();
+  const generated = randomBytes(32).toString("hex");
   try {
     mkdirSync(configDir, { recursive: true });
     writeFileSync(userIdPath, `${generated}\n`, { encoding: "utf-8", mode: 0o600 });
@@ -337,6 +655,26 @@ function isOpus46Model(model) {
   // (arn:aws:bedrock:...anthropic.claude-opus-4-6-...).
   // Also match bare "opus-4-6" / "opus-4.6" fragments for non-standard strings.
   return /claude-opus-4[._-]6|opus[._-]4[._-]6/i.test(model);
+}
+
+/**
+ * Detects claude-sonnet-4.6 / claude-sonnet-4-6 model IDs.
+ * @param {string} model
+ * @returns {boolean}
+ */
+function isSonnet46Model(model) {
+  if (!model) return false;
+  return /claude-sonnet-4[._-]6|sonnet[._-]4[._-]6/i.test(model);
+}
+
+/**
+ * Detects models that support adaptive thinking ({type: "adaptive"}).
+ * Currently: Opus 4.6 and Sonnet 4.6.
+ * @param {string} model
+ * @returns {boolean}
+ */
+function isAdaptiveThinkingModel(model) {
+  return isOpus46Model(model) || isSonnet46Model(model);
 }
 
 /**
@@ -451,31 +789,51 @@ function getAccountIdentifier(account) {
  * @returns {{user_id: string}}
  */
 function buildRequestMetadata(input) {
-  /** @type {Record<string, any>} */
-  const metadata = {
-    user_id: `user_${input.persistentUserId}_account_${input.accountId}_session_${input.sessionId}`,
+  // Backward-compat override: raw user_id passed through without JSON-encoding.
+  const envUserId = process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID?.trim();
+  if (envUserId) return { user_id: envUserId };
+
+  const extraMetadataEnv = process.env.CLAUDE_CODE_EXTRA_METADATA?.trim();
+  let extraMetadata = {};
+  if (extraMetadataEnv) {
+    try {
+      const parsed = JSON.parse(extraMetadataEnv);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        extraMetadata = parsed;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return {
+    user_id: JSON.stringify({
+      ...extraMetadata,
+      device_id: input.persistentUserId,
+      account_uuid: input.accountId,
+      session_id: input.sessionId,
+    }),
   };
-
-  // v2.1.51: pass through SDK caller metadata when available
-  const orgUuid = process.env.CLAUDE_CODE_ORGANIZATION_UUID?.trim();
-  if (orgUuid) metadata.organization_uuid = orgUuid;
-  const userEmail = process.env.CLAUDE_CODE_USER_EMAIL?.trim();
-  if (userEmail) metadata.user_email = userEmail;
-
-  return metadata;
 }
 
 /**
- * @param {string} claudeCliVersion
- * @param {any[]} messages
+ * Build the billing header block for Claude Code system prompt injection.
+ * Claude Code v2.1.80: cch=00000 (hardcoded), cc_version includes model ID.
+ *
+ * @param {string} version - CLI version (e.g., "2.1.80")
+ * @param {string} [modelId] - Model ID to append (e.g., "claude-opus-4-6")
  * @returns {string}
  */
-function buildAnthropicBillingHeader(claudeCliVersion) {
+function buildAnthropicBillingHeader(version, modelId) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
-
-  const cch = randomBytes(3).toString("hex").slice(0, 5);
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
-  return `x-anthropic-billing-header: cc_version=${claudeCliVersion}; cc_entrypoint=${entrypoint}; cch=${cch};`;
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "unknown";
+  const ccVersion = modelId ? `${version}.${modelId}` : version;
+  let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint}; cch=00000;`;
+  const workload = process.env.CLAUDE_CODE_WORKLOAD;
+  if (workload) {
+    header = header.replace(/;$/, ` cc_workload=${workload};`);
+  }
+  return header;
 }
 
 /**
@@ -618,8 +976,21 @@ function normalizeSystemTextBlocks(system) {
 }
 
 /**
+ * Return the cache_control object appropriate for the given cache policy.
+ * @param {{ttl: string, ttl_supported: boolean, boundary_marker?: boolean} | undefined} cachePolicy
+ * @returns {{type: string, ttl?: string}}
+ */
+function getCacheControlForPolicy(cachePolicy) {
+  if (!cachePolicy) return { type: "ephemeral" };
+  if (cachePolicy.ttl === "off" || cachePolicy.ttl_supported === false) {
+    return { type: "ephemeral" };
+  }
+  return { type: "ephemeral", ttl: cachePolicy.ttl };
+}
+
+/**
  * @param {Array<{type: string, text: string, cache_control?: {type: string}}>} system
- * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off'}} signature
+ * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off', cachePolicy?: {ttl: string, ttl_supported: boolean, boundary_marker?: boolean}}} signature
  * @returns {Array<{type: string, text: string, cache_control?: {type: string}}>}
  */
 function buildSystemPromptBlocks(system, signature) {
@@ -645,13 +1016,73 @@ function buildSystemPromptBlocks(system, signature) {
   );
 
   const blocks = [];
-  const billingHeader = buildAnthropicBillingHeader(signature.claudeCliVersion);
+  const billingHeader = buildAnthropicBillingHeader(signature.claudeCliVersion, signature.modelId);
   if (billingHeader) {
+    // Billing header: no cache_control (null scope — never cached)
     blocks.push({ type: "text", text: billingHeader });
   }
 
-  blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cache_control: { type: "ephemeral" } });
-  blocks.push(...filtered);
+  // Compute cache_control once — used for identity block AND filtered blocks.
+  // TTL must be non-decreasing across tools → system → messages, so all cached
+  // system blocks must share the same TTL to avoid "1h after 5m" API rejection.
+  const effectiveCachePolicy = signature.cachePolicy || { ttl: "1h", ttl_supported: true };
+  const cacheControl =
+    effectiveCachePolicy.ttl !== "off" && effectiveCachePolicy.ttl_supported !== false
+      ? { type: "ephemeral", ttl: effectiveCachePolicy.ttl }
+      : { type: "ephemeral" };
+
+  // Identity block: org-scope cached per RE doc §14.1, §15.17
+  // Uses same TTL as other cached blocks to satisfy API ordering constraint.
+  blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cache_control: cacheControl });
+
+  // Filtered blocks: keep as-is, with optional static/dynamic boundary marker
+  if (filtered.length > 0) {
+    const useBoundary =
+      signature.cachePolicy?.boundary_marker || isTruthyEnv(process.env.CLAUDE_CODE_FORCE_GLOBAL_CACHE);
+
+    if (useBoundary) {
+      // Heuristic: treat first half as "static" (tool defs, instructions)
+      // and second half as "dynamic" (env info, memory, etc.)
+      // Find a split point: look for blocks containing environment/date/CWD info
+      // as the boundary between static and dynamic.
+      const splitIndex = filtered.findIndex((block) => {
+        const text = block.text.toLowerCase();
+        return (
+          text.includes("working directory") ||
+          text.includes("today's date") ||
+          text.includes("current date") ||
+          text.includes("environment") ||
+          text.includes("platform:")
+        );
+      });
+
+      const effectiveSplit = splitIndex > 0 ? splitIndex : Math.ceil(filtered.length / 2);
+
+      // Static blocks (before boundary) get cache_control
+      for (let i = 0; i < effectiveSplit; i++) {
+        blocks.push({ ...filtered[i], cache_control: cacheControl });
+      }
+
+      // Boundary marker
+      blocks.push({ type: "text", text: SYSTEM_PROMPT_DYNAMIC_BOUNDARY });
+
+      // Dynamic blocks (after boundary) get NO cache_control
+      for (let i = effectiveSplit; i < filtered.length; i++) {
+        const { cache_control: _cc, ...rest } = filtered[i];
+        blocks.push(rest);
+      }
+    } else {
+      // Original behavior: only last block gets cache_control.
+      // Strip any upstream cache_control from intermediate blocks to prevent
+      // TTL ordering violations (e.g., upstream 5m followed by our 1h).
+      for (let i = 0; i < filtered.length - 1; i++) {
+        const { cache_control: _cc, ...rest } = filtered[i];
+        blocks.push(rest);
+      }
+      const lastFiltered = filtered[filtered.length - 1];
+      blocks.push({ ...lastFiltered, cache_control: cacheControl });
+    }
+  }
 
   return blocks;
 }
@@ -703,94 +1134,96 @@ function buildAnthropicBetaHeader(
   const haiku = isHaikuModel(model);
   const isRoundRobin = strategy === "round-robin";
 
+  // === ALWAYS-ON BETAS (Claude Code v2.1.80 base set) ===
+  // These are ALWAYS included regardless of env vars or feature flags.
   if (!haiku) {
-    betas.push(CLAUDE_CODE_BETA_FLAG);
+    betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"
   }
+  betas.push(ADVANCED_TOOL_USE_BETA_FLAG); // "advanced-tool-use-2025-11-20"
+  betas.push(FAST_MODE_BETA_FLAG); // "fast-mode-2026-02-01"
+  betas.push(EFFORT_BETA_FLAG); // "effort-2025-11-24"
 
-  // Files API beta is endpoint/content-scoped instead of globally applied.
-  if ((isFilesEndpoint || hasFileReferences) && !disableExperimentalBetas) {
-    betas.push("files-api-2025-04-14");
-  }
-
-  // NOTE: redact-thinking-2026-02-12 is in upstream 2.1.79+ base profile but
-  // intentionally NOT auto-included here — OpenCode users benefit from seeing
-  // thinking blocks. Available via /anthropic betas add redact-thinking-2026-02-12.
-
-  // Advanced tool use improvements — in upstream 2.1.79+ base profile.
-  if (!disableExperimentalBetas) {
-    betas.push(ADVANCED_TOOL_USE_BETA_FLAG);
-  }
-
-  // Fast mode — in upstream 2.1.79+ base profile.
-  if (!disableExperimentalBetas) {
-    betas.push(FAST_MODE_BETA_FLAG);
-  }
-
-  if (isOpus46Model(model)) {
-    // Opus 4.6 uses effort-based thinking controls.
-    betas.push(EFFORT_BETA_FLAG);
-  } else if (
-    !disableExperimentalBetas &&
-    !isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) &&
-    supportsThinking(model)
-  ) {
+  // Interleaved thinking — always-on unless explicitly disabled
+  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING)) {
     betas.push("interleaved-thinking-2025-05-14");
   }
 
-  // context-1m-2025-08-07 is only supported for API key users; OAuth provider does not support it.
-  // For OAuth (this plugin's only auth mode), compaction is gated by model.limit.input instead.
-  if (!disableExperimentalBetas && hasOneMillionContext(model) && provider !== "anthropic") {
+  // Context 1M — always-on for eligible models (Claude Code includes this for OAuth too)
+  if (hasOneMillionContext(model)) {
     betas.push("context-1m-2025-08-07");
   }
 
-  if (
-    !disableExperimentalBetas &&
-    nonInteractive &&
-    (isTruthyEnv(process.env.USE_API_CONTEXT_MANAGEMENT) || isTruthyEnv(process.env.TENGU_MARBLE_ANVIL))
-  ) {
-    betas.push("context-management-2025-06-27");
-  }
-
-  if (!disableExperimentalBetas && supportsStructuredOutputs(model) && isTruthyEnv(process.env.TENGU_TOOL_PEAR)) {
-    betas.push("structured-outputs-2025-12-15");
-  }
-
-  if (!disableExperimentalBetas && nonInteractive && isTruthyEnv(process.env.TENGU_SCARF_COFFEE)) {
-    betas.push("tool-examples-2025-10-29");
-  }
-
-  if (!disableExperimentalBetas && (provider === "vertex" || provider === "foundry") && supportsWebSearch(model)) {
-    betas.push("web-search-2025-03-05");
-  }
-
-  // Prompt caching is per-workspace (since Feb 2026); round-robin across accounts
-  // means zero cache hits and doubled token costs. Skip in round-robin.
-  if (!disableExperimentalBetas && nonInteractive && !isRoundRobin) {
+  // Prompt caching scope — always-on EXCEPT in round-robin (per-workspace state conflicts)
+  if (!isRoundRobin) {
     betas.push("prompt-caching-scope-2026-01-05");
   }
 
+  // === CONDITIONAL BETAS (model/context-dependent) ===
+
+  // Context management — always-on in Claude Code (not env-gated)
+  betas.push("context-management-2025-06-27");
+
+  // Structured outputs — always-on for capable models
+  if (supportsStructuredOutputs(model)) {
+    betas.push("structured-outputs-2025-12-15");
+  }
+
+  // Tool examples — always-on in Claude Code
+  betas.push("tool-examples-2025-10-29");
+
+  // Web search — for models that support it
+  if (supportsWebSearch(model)) {
+    betas.push("web-search-2025-03-05");
+  }
+
+  // Tool search tool
+  betas.push("tool-search-tool-2025-10-19");
+
+  // Files API — scoped to file endpoints/references
+  if (isFilesEndpoint || hasFileReferences) {
+    betas.push("files-api-2025-04-14");
+  }
+
+  // Token counting endpoint
   if (isMessagesCountTokensPath) {
     betas.push(TOKEN_COUNTING_BETA_FLAG);
   }
 
-  if (process.env.ANTHROPIC_BETAS) {
-    const envBetas = process.env.ANTHROPIC_BETAS.split(",")
-      .map((b) => b.trim())
-      .filter(Boolean);
-    betas.push(...envBetas);
-  }
+  // === OPTIONAL BETAS (env-gated, intentionally NOT always-on) ===
 
-  if (Array.isArray(customBetas)) {
-    betas.push(...customBetas.filter(Boolean));
-  }
+  // redact-thinking — NOT auto-included (users benefit from seeing thinking blocks)
+  // Available via: /anthropic betas add redact-thinking-2026-02-12
 
+  // afk-mode — NOT auto-included (requires user opt-in)
+  // Available via: /anthropic betas add afk-mode-2026-01-31
+
+  // Merge incoming betas from the original request
   let mergedBetas = [...new Set([...betas, ...incomingBetasList])];
+
+  // Add custom betas from config
+  if (customBetas?.length) {
+    for (const custom of customBetas) {
+      const resolved = BETA_SHORTCUTS.get(custom) || custom;
+      if (resolved && !mergedBetas.includes(resolved)) {
+        mergedBetas.push(resolved);
+      }
+    }
+  }
+
+  // Filter out experimental betas only if explicitly disabled.
+  // WARNING: The EXPERIMENTAL_BETA_FLAGS set overlaps with most always-on betas.
+  // Enabling CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS effectively strips Claude Code
+  // mimicry betas, leaving only oauth-2025-04-20, claude-code-20250219, and effort-*.
+  // Use this escape hatch only for debugging or when betas cause API rejections.
   if (disableExperimentalBetas) {
     mergedBetas = mergedBetas.filter((beta) => !EXPERIMENTAL_BETA_FLAGS.has(beta));
   }
+
+  // Remove betas unsupported by Bedrock
   if (provider === "bedrock") {
-    return mergedBetas.filter((beta) => !BEDROCK_UNSUPPORTED_BETAS.has(beta)).join(",");
+    mergedBetas = mergedBetas.filter((beta) => !BEDROCK_UNSUPPORTED_BETAS.has(beta));
   }
+
   return mergedBetas.join(",");
 }
 
@@ -819,38 +1252,35 @@ function isValidEffort(value) {
 
 /**
  * Normalise the `thinking` block in the request body for the target model:
- * - Opus 4.6 (effort-based thinking): produces `{ type: "enabled", effort: <effort> }`
+ * - Opus 4.6 / Sonnet 4.6 (adaptive thinking): produces `{ type: "adaptive" }`
  * - Older models: passes the existing thinking block through unchanged.
- *
- * Handles three incoming shapes:
- *   1. Already effort-based: `{ type: "enabled", effort: "..." }` → kept as-is for Opus 4.6
- *   2. Legacy manual: `{ type: "enabled", budget_tokens: N }` → mapped to effort for Opus 4.6
- *   3. Absent / disabled: no transform
  *
  * @param {any} thinking
  * @param {string} model
  * @returns {any}
  */
 function normalizeThinkingBlock(thinking, model) {
-  if (!thinking || typeof thinking !== "object" || thinking.type !== "enabled") {
+  // If thinking is absent or not an object, pass through
+  if (!thinking || typeof thinking !== "object") {
     return thinking;
   }
 
-  if (!isOpus46Model(model)) {
-    // Older models: pass through unchanged (may have budget_tokens)
-    return thinking;
+  // Adaptive thinking models always get {type: "adaptive"}
+  // regardless of what format the incoming thinking block has
+  if (isAdaptiveThinkingModel(model)) {
+    // Check for env-var override to force budget_tokens fallback
+    if (isTruthyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING)) {
+      // Fallback: return as-is if already budget_tokens shape, otherwise default
+      if (thinking.type === "enabled" && typeof thinking.budget_tokens === "number") {
+        return thinking;
+      }
+      return { type: "enabled", budget_tokens: parseInt(process.env.MAX_THINKING_TOKENS, 10) || 16000 };
+    }
+    return { type: "adaptive" };
   }
 
-  // Opus 4.6: use adaptive thinking with effort
-  if (isValidEffort(thinking.effort)) {
-    // Already in adaptive shape — just strip any legacy budget_tokens field
-    const { budget_tokens: _dropped, ...rest } = thinking;
-    return rest;
-  }
-
-  const effort = typeof thinking.budget_tokens === "number" ? budgetTokensToEffort(thinking.budget_tokens) : "medium"; // v2.1.68 default
-
-  return { type: "enabled", effort };
+  // Non-adaptive models: pass through unchanged
+  return thinking;
 }
 
 /**
@@ -859,7 +1289,7 @@ function normalizeThinkingBlock(thinking, model) {
  * @returns {string}
  */
 function getStainlessOs(value) {
-  if (value === "darwin") return "MacOS";
+  if (value === "darwin") return "macOS";
   if (value === "win32") return "Windows";
   if (value === "linux") return "Linux";
   return value;
@@ -961,23 +1391,36 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
 
   requestHeaders.set("authorization", `Bearer ${bearerToken}`);
   requestHeaders.set("anthropic-beta", mergedBetas);
-  requestHeaders.set("user-agent", buildUserAgent(signature.claudeCliVersion));
+  requestHeaders.set("user-agent", buildExtendedUserAgent(signature.claudeCliVersion));
   if (signature.enabled) {
     requestHeaders.set("anthropic-version", "2023-06-01");
-    requestHeaders.set("anthropic-dangerous-direct-browser-access", "true");
     requestHeaders.set("x-app", "cli");
     requestHeaders.set("x-stainless-arch", getStainlessArch(process.arch));
     requestHeaders.set("x-stainless-lang", "js");
     requestHeaders.set("x-stainless-os", getStainlessOs(process.platform));
-    requestHeaders.set("x-stainless-package-version", signature.claudeCliVersion);
+    requestHeaders.set("x-stainless-package-version", getSdkVersion(signature.claudeCliVersion));
     requestHeaders.set("x-stainless-runtime", "node");
     requestHeaders.set("x-stainless-runtime-version", process.version);
-    requestHeaders.set("x-stainless-helper-method", "stream");
     const incomingRetryCount = requestHeaders.get("x-stainless-retry-count");
     requestHeaders.set(
       "x-stainless-retry-count",
       incomingRetryCount && !isFalsyEnv(incomingRetryCount) ? incomingRetryCount : "0",
     );
+    // x-stainless-timeout: sent only for non-streaming requests.
+    // Claude Code sends 600 (10 minutes) as the default timeout in seconds.
+    // We detect streaming from the request body.
+    const isStreaming = (() => {
+      try {
+        if (!requestBody) return true;
+        const parsed = JSON.parse(requestBody);
+        return parsed.stream !== false;
+      } catch {
+        return true; // assume streaming if body can't be parsed
+      }
+    })();
+    if (!isStreaming) {
+      requestHeaders.set("x-stainless-timeout", "600");
+    }
     const stainlessHelpers = buildStainlessHelperHeader(tools, messages);
     if (stainlessHelpers) {
       requestHeaders.set("x-stainless-helper", stainlessHelpers);
@@ -1009,25 +1452,54 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
  * Preserves behaviors E1-E7.
  *
  * @param {string | undefined} body
- * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off'}} signature
+ * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off', provider?: string}} signature
  * @param {{persistentUserId: string, sessionId: string, accountId: string}} runtime
+ * @param {string} [betaHeader] - Pre-computed anthropic-beta header value to inject into the body.
  * @returns {string | undefined}
  */
-function transformRequestBody(body, signature, runtime) {
+function transformRequestBody(body, signature, runtime, betaHeader) {
   if (!body || typeof body !== "string") return body;
 
   const TOOL_PREFIX = "mcp_";
 
   try {
     const parsed = JSON.parse(body);
+    // Bedrock requires betas in the body as "anthropic_beta" (underscore) since it
+    // doesn't forward custom HTTP headers. First-party API rejects "betas" in body
+    // with "Extra inputs are not permitted" — betas are header-only for first-party.
+    if (signature.enabled && betaHeader && signature.provider === "bedrock") {
+      const betaArray = betaHeader
+        .split(",")
+        .map((b) => b.trim())
+        .filter(Boolean)
+        .filter((b) => b !== "oauth-2025-04-20");
+      parsed.anthropic_beta = betaArray;
+    }
+    // Strip any incoming "betas" field — API rejects it as unknown
     if (Object.prototype.hasOwnProperty.call(parsed, "betas")) {
       delete parsed.betas;
     }
-    // Normalize thinking block for adaptive (Opus 4.6) vs manual (older models).
+    // Normalize thinking block for adaptive (Opus 4.6 / Sonnet 4.6) vs manual (older models).
     if (Object.prototype.hasOwnProperty.call(parsed, "thinking")) {
       parsed.thinking = normalizeThinkingBlock(parsed.thinking, parsed.model || "");
     }
 
+    // Claude Code temperature rule: when extended thinking is active (any type),
+    // temperature must be omitted (undefined). Otherwise default to 1.
+    const thinkingActive =
+      parsed.thinking &&
+      typeof parsed.thinking === "object" &&
+      (parsed.thinking.type === "adaptive" || parsed.thinking.type === "enabled");
+    if (thinkingActive) {
+      // Anthropic API rejects temperature when thinking is enabled
+      delete parsed.temperature;
+    } else {
+      // Claude Code always uses temperature: 1 for non-thinking requests (RE doc §5.2, never 0)
+      parsed.temperature = 1;
+    }
+
+    // Pass the model ID to system prompt builder for billing header
+    signature.modelId = parsed.model || "";
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signature);
 
@@ -1069,6 +1541,11 @@ function transformRequestBody(body, signature, runtime) {
         }
         return msg;
       });
+    }
+    // Fast mode: inject speed parameter for supported models
+    const fastModeEnabled = signature.fastMode && !isFalsyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_FAST_MODE);
+    if (fastModeEnabled && parsed.model && (isOpus46Model(parsed.model) || isSonnet46Model(parsed.model))) {
+      parsed.speed = "fast";
     }
     return JSON.stringify(parsed);
   } catch {
@@ -1538,7 +2015,7 @@ async function refreshAccountToken(account, client, source = "foreground", { onT
       return account.access;
     }
 
-    const json = await refreshToken(account.refreshToken, { signal: AbortSignal.timeout(10_000) });
+    const json = await refreshToken(account.refreshToken, { signal: AbortSignal.timeout(15_000) });
 
     account.access = json.access_token;
     account.expires = Date.now() + json.expires_in * 1000;
@@ -1657,6 +2134,18 @@ export async function AnthropicAuthPlugin({ client }) {
   const promptCompactionMode = config.signature_emulation.prompt_compaction === "off" ? "off" : "minimal";
   const shouldFetchClaudeCodeVersion =
     signatureEmulationEnabled && config.signature_emulation.fetch_claude_code_version_on_startup;
+
+  // Per-instance strategy state (moved from module-level for test isolation)
+  const strategyState = {
+    mode: "CONFIGURED", // "CONFIGURED" | "DEGRADED"
+    rateLimitEvents: [], // timestamps of rate limit events in current window
+    windowMs: 5 * 60 * 1000, // 5-minute sliding window
+    thresholdCount: 3, // rate limits needed to trigger DEGRADED
+    recoveryMs: 5 * 60 * 1000, // 5 minutes clean to recover
+    lastRateLimitTime: 0,
+    manualOverride: false, // user explicitly set strategy — disable auto-adaptation
+    originalStrategy: null, // the user's configured strategy before DEGRADED override
+  };
 
   /** @type {AccountManager | null} */
   let accountManager = null;
@@ -1785,10 +2274,11 @@ export async function AnthropicAuthPlugin({ client }) {
    */
   async function startSlashOAuth(sessionID, mode, targetIndex) {
     pruneExpiredPendingOAuth();
-    const { url, verifier } = await authorize("max");
+    const { url, verifier, state } = await authorize("max");
     pendingSlashOAuth.set(sessionID, {
       mode,
       verifier,
+      state,
       targetIndex,
       createdAt: Date.now(),
     });
@@ -1833,6 +2323,17 @@ export async function AnthropicAuthPlugin({ client }) {
       return {
         ok: false,
         message: "Pending OAuth flow expired. Start again with /anthropic login or /anthropic reauth <N>.",
+      };
+    }
+
+    // Validate CSRF state parameter (RFC 6749 §10.12)
+    const codeParts = code.split("#");
+    const returnedState = codeParts[1];
+    if (pending.state && returnedState && returnedState !== pending.state) {
+      pendingSlashOAuth.delete(sessionID);
+      return {
+        ok: false,
+        message: "OAuth state mismatch — possible CSRF attack. Please start a new login flow.",
       };
     }
 
@@ -2020,6 +2521,7 @@ export async function AnthropicAuthPlugin({ client }) {
         "▣ Anthropic Config",
         "",
         `strategy: ${fresh.account_selection_strategy}`,
+        `strategy-state: ${strategyState.mode}${strategyState.manualOverride ? " (manual override)" : ""}`,
         `emulation: ${fresh.signature_emulation.enabled ? "on" : "off"}`,
         `compaction: ${fresh.signature_emulation.prompt_compaction}`,
         `1m-context: ${fresh.override_model_limits.enabled ? "on" : "off"}`,
@@ -2027,7 +2529,41 @@ export async function AnthropicAuthPlugin({ client }) {
         `debug: ${fresh.debug ? "on" : "off"}`,
         `quiet: ${fresh.toasts.quiet ? "on" : "off"}`,
         `custom_betas: ${fresh.custom_betas.length ? fresh.custom_betas.join(", ") : "(none)"}`,
+        `cache-boundary: ${fresh.cache_policy?.boundary_marker ? "on" : "off"}`,
+        `cache-ttl: ${fresh.cache_policy?.ttl ?? "1h"}${fresh.cache_policy?.ttl_supported === false ? " (auto-disabled)" : ""}`,
+        `fast-mode: ${fresh.fast_mode ? "on" : "off"}`,
+        `telemetry-emulation: ${fresh.telemetry?.emulate_minimal ? "on (silent observer)" : "off"}`,
       ];
+      await sendCommandMessage(input.sessionID, lines.join("\n"));
+      return;
+    }
+
+    // /anthropic stats — show session statistics
+    if (primary === "stats") {
+      const avgRate = getAverageCacheHitRate();
+      const totalTokens =
+        sessionMetrics.totalInput +
+        sessionMetrics.totalOutput +
+        sessionMetrics.totalCacheRead +
+        sessionMetrics.totalCacheWrite;
+      const lines = [
+        "▣ Anthropic Session Stats",
+        "",
+        `Turns: ${sessionMetrics.turns}`,
+        `Total tokens: ${totalTokens.toLocaleString()}`,
+        `  Input: ${sessionMetrics.totalInput.toLocaleString()}`,
+        `  Output: ${sessionMetrics.totalOutput.toLocaleString()}`,
+        `  Cache read: ${sessionMetrics.totalCacheRead.toLocaleString()}`,
+        `  Cache write: ${sessionMetrics.totalCacheWrite.toLocaleString()}`,
+        `Cache efficiency: ${(avgRate * 100).toFixed(1)}% (last ${sessionMetrics.recentCacheRates.length} turns)`,
+        `Session cost: $${sessionMetrics.sessionCostUsd.toFixed(4)}`,
+      ];
+      const maxBudget = parseFloat(process.env.OPENCODE_ANTHROPIC_MAX_BUDGET_USD || "0");
+      if (maxBudget > 0) {
+        lines.push(
+          `Budget: $${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)} (${((sessionMetrics.sessionCostUsd / maxBudget) * 100).toFixed(0)}%)`,
+        );
+      }
       await sendCommandMessage(input.sessionID, lines.join("\n"));
       return;
     }
@@ -2050,8 +2586,40 @@ export async function AnthropicAuthPlugin({ client }) {
         quiet: () => saveConfig({ toasts: { quiet: value === "on" || value === "1" || value === "true" } }),
         strategy: () => {
           const valid = ["sticky", "round-robin", "hybrid"];
-          if (valid.includes(value)) saveConfig({ account_selection_strategy: value });
-          else throw new Error(`Invalid strategy. Valid: ${valid.join(", ")}`);
+          if (valid.includes(value)) {
+            saveConfig({ account_selection_strategy: value });
+            strategyState.manualOverride = true;
+            strategyState.mode = "CONFIGURED";
+          } else throw new Error(`Invalid strategy. Valid: ${valid.join(", ")}`);
+        },
+        boundary: () =>
+          saveConfig({ cache_policy: { boundary_marker: value === "on" || value === "1" || value === "true" } }),
+        "cache-ttl": () => {
+          const valid = ["1h", "5m", "off"];
+          if (valid.includes(value)) saveConfig({ cache_policy: { ttl: value } });
+          else throw new Error(`Invalid TTL. Valid: ${valid.join(", ")}`);
+        },
+        fast: () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ fast_mode: enabled });
+          config.fast_mode = enabled;
+        },
+        "fast-mode": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ fast_mode: enabled });
+          config.fast_mode = enabled;
+        },
+        telemetry: () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ telemetry: { emulate_minimal: enabled } });
+          config.telemetry = config.telemetry || {};
+          config.telemetry.emulate_minimal = enabled;
+        },
+        "telemetry-emulation": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ telemetry: { emulate_minimal: enabled } });
+          config.telemetry = config.telemetry || {};
+          config.telemetry.emulate_minimal = enabled;
         },
       };
 
@@ -2578,9 +3146,52 @@ export async function AnthropicAuthPlugin({ client }) {
     console.error("[opencode-anthropic-auth]", ...args);
   }
 
+  function recordRateLimitForStrategy() {
+    const now = Date.now();
+    strategyState.rateLimitEvents.push(now);
+    strategyState.lastRateLimitTime = now;
+
+    // Prune events outside window
+    const cutoff = now - strategyState.windowMs;
+    strategyState.rateLimitEvents = strategyState.rateLimitEvents.filter((t) => t > cutoff);
+
+    // Check transition to DEGRADED
+    if (strategyState.mode === "CONFIGURED" && !strategyState.manualOverride) {
+      if (strategyState.rateLimitEvents.length >= strategyState.thresholdCount) {
+        strategyState.originalStrategy = config.account_selection_strategy;
+        strategyState.mode = "DEGRADED";
+        debugLog("auto-strategy: transitioning to DEGRADED mode", {
+          rateLimitsInWindow: strategyState.rateLimitEvents.length,
+        });
+        toast("Multiple rate limits detected, temporarily rotating accounts more aggressively", "warning", {
+          debounceKey: "strategy-degraded",
+        }).catch(() => {});
+      }
+    }
+  }
+
+  function checkStrategyRecovery() {
+    if (strategyState.mode !== "DEGRADED" || strategyState.manualOverride) return;
+
+    const now = Date.now();
+    if (now - strategyState.lastRateLimitTime >= strategyState.recoveryMs) {
+      strategyState.mode = "CONFIGURED";
+      strategyState.rateLimitEvents = [];
+      debugLog("auto-strategy: recovered to CONFIGURED mode");
+      toast("Rate limit pressure relieved, restoring normal account selection", "info", {
+        debounceKey: "strategy-recovered",
+      }).catch(() => {});
+    }
+  }
+
+  function getEffectiveStrategy() {
+    if (strategyState.mode === "DEGRADED") return "hybrid";
+    return config.account_selection_strategy;
+  }
+
   let claudeCliVersion = FALLBACK_CLAUDE_CLI_VERSION;
   const signatureSessionId = randomUUID();
-  const signatureUserId = getOrCreateSignatureUserId();
+  const signatureUserId = getOrCreateDeviceId();
   if (shouldFetchClaudeCodeVersion) {
     fetchLatestClaudeCodeVersion()
       .then((version) => {
@@ -2861,6 +3472,19 @@ export async function AnthropicAuthPlugin({ client }) {
             }
           }
 
+          // Initialize telemetry emitter
+          const telemetryEnabled =
+            config.telemetry?.emulate_minimal || isTruthyEnv(process.env.OPENCODE_ANTHROPIC_TELEMETRY_EMULATE);
+          const firstAccount = accountManager.getEnabledAccounts()[0];
+          telemetryEmitter.init({
+            enabled: telemetryEnabled,
+            deviceId: getOrCreateDeviceId(),
+            cliVersion: claudeCliVersion,
+            accountUuid: getAccountIdentifier(firstAccount),
+            orgUuid: process.env.CLAUDE_CODE_ORGANIZATION_UUID || "",
+            sessionId: signatureSessionId,
+          });
+
           return {
             apiKey: "",
             /**
@@ -2929,6 +3553,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 }
               }
 
+              let serviceWideRetryCount = 0; // Track 529/503 retries (max 2 per RE doc §5.5)
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account — use pinned account on first attempt if available
                 const account =
@@ -2962,7 +3587,8 @@ export async function AnthropicAuthPlugin({ client }) {
                 // Determine access token
                 let accessToken;
                 // Per-account token refresh
-                if (!account.access || !account.expires || account.expires < Date.now()) {
+                // Refresh 5 minutes before expiry to avoid mid-request token expiration (RE doc §1.10)
+                if (!account.access || !account.expires || account.expires < Date.now() + 300_000) {
                   const attemptedRefreshToken = account.refreshToken;
                   try {
                     accessToken = await refreshAccountTokenSingleFlight(account);
@@ -3045,8 +3671,28 @@ export async function AnthropicAuthPlugin({ client }) {
                   accessToken = account.access;
                 }
 
+                // Store live token for exit telemetry
+                if (accessToken) liveTokenRef.token = accessToken;
+
                 // Keep non-active accounts warm without blocking the request.
                 maybeRefreshIdleAccounts(account);
+
+                // Pre-compute the beta header so it can be injected into both the
+                // request body (betas field) and the anthropic-beta header.
+                const { model: _reqModel, hasFileReferences: _reqHasFileRefs } = parseRequestBodyMetadata(
+                  requestInit.body,
+                );
+                const _reqProvider = detectProvider(requestUrl);
+                const computedBetaHeader = buildAnthropicBetaHeader(
+                  "",
+                  signatureEmulationEnabled,
+                  _reqModel,
+                  _reqProvider,
+                  config.custom_betas,
+                  getEffectiveStrategy(),
+                  requestUrl?.pathname,
+                  _reqHasFileRefs,
+                );
 
                 const body = transformRequestBody(
                   requestInit.body,
@@ -3054,12 +3700,16 @@ export async function AnthropicAuthPlugin({ client }) {
                     enabled: signatureEmulationEnabled,
                     claudeCliVersion,
                     promptCompactionMode,
+                    provider: _reqProvider,
+                    cachePolicy: config.cache_policy || { ttl: "1h", ttl_supported: true },
+                    fastMode: config.fast_mode || false,
                   },
                   {
                     persistentUserId: signatureUserId,
                     sessionId: signatureSessionId,
                     accountId: getAccountIdentifier(account),
                   },
+                  computedBetaHeader,
                 );
                 logTransformedSystemPrompt(body);
 
@@ -3068,7 +3718,7 @@ export async function AnthropicAuthPlugin({ client }) {
                   enabled: signatureEmulationEnabled,
                   claudeCliVersion,
                   customBetas: config.custom_betas,
-                  strategy: config.account_selection_strategy,
+                  strategy: getEffectiveStrategy(),
                 });
                 // Execute the request
                 let response;
@@ -3095,6 +3745,56 @@ export async function AnthropicAuthPlugin({ client }) {
                   throw fetchError;
                 }
 
+                // Proactive rate limit detection from response headers
+                // Check all rate-limit subtypes: tokens, requests, input-tokens (RE doc §5.6)
+                if (response.ok && account && accountManager) {
+                  const RATE_LIMIT_SUBTYPES = ["tokens", "requests", "input-tokens"];
+                  let maxUtilization = 0;
+                  let maxUtilizationSubtype = "";
+                  let anySurpassed = false;
+                  let surpassedResetAt = null;
+
+                  for (const subtype of RATE_LIMIT_SUBTYPES) {
+                    const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${subtype}-utilization`);
+                    const surpassed = response.headers.get(
+                      `anthropic-ratelimit-unified-${subtype}-surpassed-threshold`,
+                    );
+                    const resetAt = response.headers.get(`anthropic-ratelimit-unified-${subtype}-reset`);
+
+                    if (utilizationStr) {
+                      const utilization = parseFloat(utilizationStr);
+                      if (!isNaN(utilization) && utilization > maxUtilization) {
+                        maxUtilization = utilization;
+                        maxUtilizationSubtype = subtype;
+                      }
+                    }
+
+                    if (surpassed) {
+                      anySurpassed = true;
+                      surpassedResetAt = surpassedResetAt || resetAt;
+                    }
+                  }
+
+                  if (maxUtilization > 0.8) {
+                    const penalty = Math.round((maxUtilization - 0.8) * 50); // 0-10 points
+                    accountManager.applyUtilizationPenalty(account, penalty);
+                    debugLog("high rate limit utilization", {
+                      accountIndex: account.index,
+                      subtype: maxUtilizationSubtype,
+                      utilization: (maxUtilization * 100).toFixed(1) + "%",
+                      penalty,
+                    });
+                  }
+
+                  if (anySurpassed) {
+                    accountManager.applySurpassedThreshold(account, surpassedResetAt);
+                    debugLog("rate limit threshold surpassed", {
+                      accountIndex: account.index,
+                      resetAt: surpassedResetAt,
+                    });
+                  }
+                }
+
                 // On error, check if it's account-specific or service-wide
                 if (!response.ok && accountManager && account) {
                   let errorBody = null;
@@ -3104,10 +3804,40 @@ export async function AnthropicAuthPlugin({ client }) {
                     // Ignore read errors
                   }
 
+                  // Auto-disable extended cache TTL if the API rejects it with a 400
+                  if (
+                    response.status === 400 &&
+                    errorBody &&
+                    (errorBody.includes("ttl") || errorBody.includes("cache_control"))
+                  ) {
+                    if (config.cache_policy && config.cache_policy.ttl_supported !== false) {
+                      config.cache_policy.ttl_supported = false;
+                      saveConfig({ cache_policy: { ttl_supported: false } });
+                      debugLog("cache TTL not supported by API, auto-disabled");
+                    }
+                  }
+
+                  // Auto-disable fast mode if the API rejects speed parameter
+                  if (response.status === 400 && errorBody && errorBody.includes("speed")) {
+                    if (config.fast_mode) {
+                      config.fast_mode = false;
+                      saveConfig({ fast_mode: false });
+                      debugLog("fast mode not supported by API, auto-disabled");
+                    }
+                  }
+
+                  // Check x-should-retry header first — server override
+                  const shouldRetry = parseShouldRetryHeader(response);
+                  if (shouldRetry === false) {
+                    // Server says DO NOT retry — return error directly
+                    debugLog("x-should-retry: false — not retrying", { status: response.status });
+                    return transformResponse(response);
+                  }
+
                   if (isAccountSpecificError(response.status, errorBody)) {
                     // Account-specific: mark this account, try the next one
                     const reason = parseRateLimitReason(response.status, errorBody);
-                    const retryAfterMs = parseRetryAfterHeader(response);
+                    const retryAfterMs = parseRetryAfterMsHeader(response) || parseRetryAfterHeader(response);
                     const authOrPermissionIssue = reason === "AUTH_FAILED";
 
                     // Auth failures should force token refresh on next use.
@@ -3125,6 +3855,9 @@ export async function AnthropicAuthPlugin({ client }) {
 
                     accountManager.markRateLimited(account, reason, authOrPermissionIssue ? null : retryAfterMs);
 
+                    // Track for auto-strategy adaptation
+                    recordRateLimitForStrategy();
+
                     const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
                     const total = accountManager.getAccountCount();
                     if (total > 1) {
@@ -3137,8 +3870,39 @@ export async function AnthropicAuthPlugin({ client }) {
                     continue; // Try next account immediately
                   }
 
-                  // Service-wide error (529, 503, 500, etc.) — return to caller,
-                  // switching accounts won't help
+                  // Service-wide error (529, 503, 500, etc.)
+                  // x-should-retry: true forces a retry even for service-wide errors (RE doc §5.5)
+                  if (shouldRetry === true) {
+                    const retryDelay = parseRetryAfterMsHeader(response) || parseRetryAfterHeader(response) || 2000;
+                    debugLog("x-should-retry: true on service-wide error, sleeping before retry", {
+                      status: response.status,
+                      retryDelay,
+                    });
+                    await new Promise((resolve) => setTimeout(resolve, retryDelay));
+                    // Decrement attempt so this retry doesn't consume an account slot
+                    attempt--;
+                    continue;
+                  }
+
+                  // 529 (overloaded) and 503 (service unavailable) — brief sleep-and-retry
+                  // per RE doc §5.5 (Stainless SDK retries 500+ codes up to 2 times)
+                  if ((response.status === 529 || response.status === 503) && serviceWideRetryCount < 2) {
+                    serviceWideRetryCount++;
+                    const baseDelay = Math.min(0.5 * Math.pow(2, serviceWideRetryCount), 8);
+                    const jitter = 1 - Math.random() * 0.25;
+                    const sleepMs = Math.round(baseDelay * jitter * 1000);
+                    debugLog("service-wide retryable error, sleeping before retry", {
+                      status: response.status,
+                      attempt: serviceWideRetryCount,
+                      sleepMs,
+                    });
+                    await new Promise((resolve) => setTimeout(resolve, sleepMs));
+                    // Decrement attempt so this retry doesn't consume an account slot
+                    attempt--;
+                    continue;
+                  }
+
+                  // Non-retryable service-wide error — return to caller
                   debugLog("service-wide response error, returning directly", {
                     status: response.status,
                   });
@@ -3149,6 +3913,12 @@ export async function AnthropicAuthPlugin({ client }) {
                 if (account && accountManager) {
                   if (response.ok) {
                     accountManager.markSuccess(account);
+                    checkStrategyRecovery();
+
+                    // Fire startup telemetry (once per session, after first success)
+                    if (telemetryEmitter.enabled && account?.access) {
+                      telemetryEmitter.sendStartupEvents(account.access).catch(() => {});
+                    }
                   }
                 }
 
@@ -3158,6 +3928,37 @@ export async function AnthropicAuthPlugin({ client }) {
                 const usageCallback = shouldInspectStream
                   ? (/** @type {UsageStats} */ usage) => {
                       accountManager.recordUsage(account.index, usage);
+                      // Phase 4: session metrics
+                      updateSessionMetrics(usage, _reqModel);
+                      // Cache hit rate warning
+                      if (sessionMetrics.turns >= 3) {
+                        const avgRate = getAverageCacheHitRate();
+                        const threshold = config.cache_policy?.hit_rate_warning_threshold ?? 0.3;
+                        if (avgRate < threshold) {
+                          debugLog("low cache hit rate", {
+                            avgRate: (avgRate * 100).toFixed(1) + "%",
+                            turns: sessionMetrics.turns,
+                          });
+                        }
+                      }
+                      // Budget warning
+                      const maxBudget = parseFloat(process.env.OPENCODE_ANTHROPIC_MAX_BUDGET_USD || "0");
+                      if (maxBudget > 0) {
+                        const pct = sessionMetrics.sessionCostUsd / maxBudget;
+                        if (pct >= 1.0 && !isTruthyEnv(process.env.OPENCODE_ANTHROPIC_IGNORE_BUDGET)) {
+                          toast(
+                            `Session budget exceeded ($${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)})`,
+                            "warning",
+                            { debounceKey: "budget" },
+                          ).catch(() => {});
+                        } else if (pct >= 0.8) {
+                          toast(
+                            `Session at ${(pct * 100).toFixed(0)}% of budget ($${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)})`,
+                            "warning",
+                            { debounceKey: "budget" },
+                          ).catch(() => {});
+                        }
+                      }
                     }
                   : null;
 

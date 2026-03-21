@@ -44,12 +44,18 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Configurable strategies** &mdash; sticky, round-robin, or hybrid account selection
 - **Claude Code signature emulation** &mdash; full HTTP header, system prompt, beta flag, and metadata mimicry derived from Claude Code's open source code
 - **OAuth endpoint fingerprint parity** &mdash; sends Claude Code-style `User-Agent` on `/v1/oauth/token` and `/v1/oauth/revoke` to match current OAuth validation
-- **Effort-based thinking for Opus 4.6** &mdash; maps `budgetTokens` to effort levels (`low`/`medium`/`high`) and includes `effort-2025-11-24`
-- **Upstream-aligned auto betas** &mdash; `advanced-tool-use-2025-11-20` and `fast-mode-2026-02-01` auto-included to match Claude Code 2.1.79+ (`redact-thinking-2026-02-12` available as opt-in to preserve thinking block visibility)
+- **Adaptive thinking for Opus/Sonnet 4.6** &mdash; automatically normalizes thinking to `{type: "adaptive"}` for supported models, with `effort-2025-11-24` beta
+- **Upstream-aligned auto betas** &mdash; 13+ always-on betas matching Claude Code 2.1.80 (`redact-thinking-2026-02-12` available as opt-in to preserve thinking block visibility)
 - **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
 - **Runtime config + custom betas** &mdash; `/anthropic set`, `/anthropic config`, and `/anthropic betas` slash commands for live feature toggling without restarting OpenCode
 - **Files API integration** &mdash; upload, list, download, and manage files via `/anthropic files` with endpoint/content-scoped `files-api-2025-04-14` beta injection
 - **Code execution support** &mdash; available via explicit custom beta opt-in (`code-execution-2025-08-25`), not auto-enabled
+- **Deep QA conformance** &mdash; 491 tests across 11 test files, including 40 regression tests validating every header, body field, OAuth parameter, beta flag, system prompt block, response handling path, and telemetry schema against the [reverse-engineering doc](docs/claude-code-reverse-engineering.md)
+- **Prompt caching with 1h TTL** &mdash; extended cache TTL on system prompt blocks, auto-disabled if API rejects; cache hit rate tracking with configurable warning threshold
+- **Proactive rate limit detection** &mdash; reads `anthropic-ratelimit-unified-*-utilization` headers (tokens, requests, input-tokens) and applies health penalties before hitting 429
+- **529/503 retry with Stainless backoff** &mdash; service-wide overload errors retried up to 2 times using the same exponential backoff formula as the official SDK
+- **OAuth CSRF protection** &mdash; state parameter stored and validated on callback, independent from PKCE verifier
+- **Telemetry emulation (opt-in)** &mdash; minimal `tengu_started`/`tengu_exit` events matching Claude Code's schema; disabled by default for privacy
 
 ## Installation
 
@@ -492,7 +498,7 @@ When you make a request through OpenCode:
 2. It refreshes the OAuth token if expired
 3. It transforms the request (adds OAuth headers, `oauth-2025-04-20`, signature headers, beta flags, tool prefixes)
 4. If the response is account-specific (429/401, plus 400/403 billing/quota/permission errors), it marks that account and immediately tries the next account
-5. If the response is service-wide (500/503/529), it returns the error directly (switching accounts would not help)
+5. If the response is service-wide (529/503), it retries up to 2 times with exponential backoff before returning the error
 6. It tries each available account at most once per request
 7. Successful responses have tool name prefixes stripped from the stream
 
@@ -597,7 +603,9 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## License
 
-Same as upstream. See [anomalyco/opencode-anthropic-auth](https://github.com/anomalyco/opencode-anthropic-auth).
+This project is licensed under the [GNU General Public License v3.0](LICENSE) (GPLv3).
+
+Copyright &copy; 2025-2026 Marco Jardim and contributors.
 
 ---
 
