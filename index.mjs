@@ -1,10 +1,10 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, createHash as createHashCrypto } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { AccountManager } from "./lib/accounts.mjs";
-import { authorize, exchange, refreshToken } from "./lib/oauth.mjs";
+import { authorize as oauthAuthorize, exchange as oauthExchange, refreshToken } from "./lib/oauth.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, CLIENT_ID, getConfigDir } from "./lib/config.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { applyOAuthCredentials, resetAccountTracking } from "./lib/account-state.mjs";
@@ -59,7 +59,8 @@ async function promptAccountMenu(accountManager) {
  * @returns {Promise<void>}
  */
 async function promptManageAccounts(accountManager) {
-  const accounts = accountManager.getAccountsSnapshot();
+  // QA fix M6: re-snapshot after each mutation to avoid stale index references
+  let accounts = accountManager.getAccountsSnapshot();
   const rl = createInterface({ input: stdin, output: stdout });
 
   try {
@@ -95,6 +96,7 @@ async function promptManageAccounts(accountManager) {
       if (!isNaN(num) && num >= 1 && num <= accounts.length) {
         const newState = accountManager.toggleAccount(num - 1);
         console.log(`Account ${num} is now ${newState ? "enabled" : "disabled"}.`);
+        accounts = accountManager.getAccountsSnapshot(); // re-snapshot after toggle
         continue;
       }
 
@@ -105,19 +107,2338 @@ async function promptManageAccounts(accountManager) {
   }
 }
 
+export async function AnthropicAuthPlugin({ client, project, directory, worktree, serverUrl, $ }) {
+  const config = loadConfig();
+  // QA fix H6: read emulation settings live from config instead of stale const capture
+  // so that runtime toggles via `/anthropic set emulation` take effect immediately
+  const getSignatureEmulationEnabled = () => config.signature_emulation.enabled;
+  const getPromptCompactionMode = () => (config.signature_emulation.prompt_compaction === "off" ? "off" : "minimal");
+  const shouldFetchClaudeCodeVersion =
+    getSignatureEmulationEnabled() && config.signature_emulation.fetch_claude_code_version_on_startup;
+
+  // Per-instance strategy state (moved from module-level for test isolation)
+  const strategyState = {
+    mode: "CONFIGURED", // "CONFIGURED" | "DEGRADED"
+    rateLimitEvents: [], // timestamps of rate limit events in current window
+    windowMs: 5 * 60 * 1000, // 5-minute sliding window
+    thresholdCount: 3, // rate limits needed to trigger DEGRADED
+    recoveryMs: 5 * 60 * 1000, // 5 minutes clean to recover
+    lastRateLimitTime: 0,
+    manualOverride: false, // user explicitly set strategy — disable auto-adaptation
+    originalStrategy: null, // the user's configured strategy before DEGRADED override
+  };
+
+  /** @type {AccountManager | null} */
+  let accountManager = null;
+
+  /** Track account usage toasts; show once per account change (including first use). */
+  let lastToastedIndex = -1;
+  /** @type {Map<string, number>} */
+  const debouncedToastTimestamps = new Map();
+
+  /** @type {Map<string, { promise: Promise<string>, source: "foreground" | "idle" }>} */
+  const refreshInFlight = new Map();
+
+  /** @type {Map<string, number>} */
+  const idleRefreshLastAttempt = new Map();
+  /** @type {Set<string>} */
+  const idleRefreshInFlight = new Set();
+
+  const IDLE_REFRESH_ENABLED = config.idle_refresh.enabled;
+  const IDLE_REFRESH_WINDOW_MS = config.idle_refresh.window_minutes * 60 * 1000;
+  const IDLE_REFRESH_MIN_INTERVAL_MS = config.idle_refresh.min_interval_minutes * 60 * 1000;
+
+  /**
+   * Whether OPENCODE_ANTHROPIC_INITIAL_ACCOUNT env var pinned this session to a
+   * specific account. When true, syncActiveIndexFromDisk is skipped and strategy
+   * is forced to sticky and disables
+   * syncActiveIndexFromDisk so other sessions can't override this one.
+   * Use case: terminal 1 with INITIAL_ACCOUNT=1, terminal 2 with =2.
+   */
+  let initialAccountPinned = false;
+
+  /**
+   * Pending slash-command OAuth flows keyed by session ID.
+   * @type {Map<string, { mode: "login" | "reauth", verifier: string, targetIndex?: number, createdAt: number }>}
+   */
+  const pendingSlashOAuth = new Map();
+
+  /**
+   * Cooldown for slash OAuth token exchange after 429 responses, keyed by session ID.
+   * @type {Map<string, number>}
+   */
+  const slashOAuthExchangeCooldownUntil = new Map();
+
+  /**
+   * In-memory mapping of file_id → account index for file-ID account pinning.
+   * Populated by /anthropic files commands, consumed by the fetch interceptor
+   * to route Messages API requests referencing file_ids to the correct account.
+   * QA fix M1: bounded to prevent unbounded growth; evicts oldest entries when full.
+   * @type {Map<string, number>}
+   */
+  const FILE_ACCOUNT_MAP_MAX = 1000;
+  const fileAccountMap = new Map();
+  /** QA fix M1: bounded set — evicts oldest entries when map exceeds max size */
+  function fileAccountMapSet(fileId, accountIndex) {
+    fileAccountMap.set(fileId, accountIndex);
+    if (fileAccountMap.size > FILE_ACCOUNT_MAP_MAX) {
+      // Delete oldest entries (Map iterates in insertion order)
+      const excess = fileAccountMap.size - FILE_ACCOUNT_MAP_MAX;
+      let deleted = 0;
+      for (const key of fileAccountMap.keys()) {
+        if (deleted >= excess) break;
+        fileAccountMap.delete(key);
+        deleted++;
+      }
+    }
+  }
+
+  /**
+   * Send an informational message into the current session.
+   * @param {string} sessionID
+   * @param {string} text
+   */
+  async function sendCommandMessage(sessionID, text) {
+    await client.session?.prompt({
+      path: { id: sessionID },
+      body: {
+        noReply: true,
+        parts: [{ type: "text", text, ignored: true }],
+      },
+    });
+  }
+
+  /**
+   * Keep in-memory AccountManager in sync with disk mutations made via slash commands.
+   */
+  async function reloadAccountManagerFromDisk() {
+    if (!accountManager) return;
+    accountManager = await AccountManager.load(config, null);
+  }
+
+  /**
+   * Persist OAuth credentials into OpenCode auth storage for immediate compatibility.
+   * @param {string} refresh
+   * @param {string} access
+   * @param {number} expires
+   */
+  async function persistOpenCodeAuth(refresh, access, expires) {
+    await client.auth.set({
+      path: { id: "anthropic" },
+      body: { type: "oauth", refresh, access, expires },
+    });
+  }
+
+  /**
+   * Remove expired pending OAuth flows.
+   */
+  function pruneExpiredPendingOAuth() {
+    const now = Date.now();
+    for (const [sessionID, pending] of pendingSlashOAuth.entries()) {
+      if (now - pending.createdAt > PENDING_OAUTH_TTL_MS) {
+        pendingSlashOAuth.delete(sessionID);
+      }
+    }
+
+    for (const [sessionID, until] of slashOAuthExchangeCooldownUntil.entries()) {
+      if (!pendingSlashOAuth.has(sessionID) || until <= now) {
+        slashOAuthExchangeCooldownUntil.delete(sessionID);
+      }
+    }
+  }
+
+  /**
+   * Execute CLI main(argv) in-process and capture console output.
+   * @param {string[]} argv
+   * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
+   */
+  async function runCliCommand(argv) {
+    const logs = [];
+    const errors = [];
+
+    /** @type {number} */
+    let code = 1;
+    try {
+      const { main: cliMain } = await import("./cli.mjs");
+      code = await cliMain(argv, {
+        io: {
+          log: (...args) => logs.push(args.join(" ")),
+          error: (...args) => errors.push(args.join(" ")),
+        },
+      });
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+
+    return {
+      code,
+      stdout: stripAnsi(logs.join("\n")).trim(),
+      stderr: stripAnsi(errors.join("\n")).trim(),
+    };
+  }
+
+  /**
+   * Start a pending slash-command OAuth flow and store verifier in-memory.
+   * @param {string} sessionID
+   * @param {"login" | "reauth"} mode
+   * @param {number} [targetIndex]
+   */
+  async function startSlashOAuth(sessionID, mode, targetIndex) {
+    pruneExpiredPendingOAuth();
+    const { url, verifier, state } = await oauthAuthorize("max");
+    pendingSlashOAuth.set(sessionID, {
+      mode,
+      verifier,
+      state,
+      targetIndex,
+      createdAt: Date.now(),
+    });
+
+    const action = mode === "login" ? "login" : `reauth ${targetIndex + 1}`;
+    const followup =
+      mode === "login" ? "/anthropic login complete <code#state>" : "/anthropic reauth complete <code#state>";
+
+    await sendCommandMessage(
+      sessionID,
+      [
+        "▣ Anthropic OAuth",
+        "",
+        `Started ${action} flow.`,
+        "Open this URL in your browser:",
+        url,
+        "",
+        `Then run: ${followup}`,
+        "(Paste the full authorization code, including #state)",
+      ].join("\n"),
+    );
+  }
+
+  /**
+   * Complete a pending slash-command OAuth flow.
+   * @param {string} sessionID
+   * @param {string} code
+   * @returns {Promise<{ ok: boolean, message: string }>}
+   */
+  async function completeSlashOAuth(sessionID, code) {
+    const pending = pendingSlashOAuth.get(sessionID);
+    if (!pending) {
+      pruneExpiredPendingOAuth();
+      return {
+        ok: false,
+        message: "No pending OAuth flow. Start with /anthropic login or /anthropic reauth <N>.",
+      };
+    }
+
+    if (Date.now() - pending.createdAt > PENDING_OAUTH_TTL_MS) {
+      pendingSlashOAuth.delete(sessionID);
+      slashOAuthExchangeCooldownUntil.delete(sessionID);
+      return {
+        ok: false,
+        message: "Pending OAuth flow expired. Start again with /anthropic login or /anthropic reauth <N>.",
+      };
+    }
+
+    const now = Date.now();
+    const cooldownUntil = slashOAuthExchangeCooldownUntil.get(sessionID) || 0;
+    if (cooldownUntil > now) {
+      const remainingSec = Math.max(1, Math.ceil((cooldownUntil - now) / 1000));
+      return {
+        ok: false,
+        message: `OAuth token exchange is still rate-limited. Wait about ${remainingSec}s and retry /anthropic ${pending.mode} complete <code#state>.`,
+      };
+    }
+    slashOAuthExchangeCooldownUntil.delete(sessionID);
+
+    // Validate CSRF state parameter (RFC 6749 §10.12)
+    // If we stored a state, the returned code MUST include a matching state (QA fix C2)
+    const codeParts = code.split("#");
+    const returnedState = codeParts[1];
+    if (pending.state) {
+      if (!returnedState || returnedState !== pending.state) {
+        pendingSlashOAuth.delete(sessionID);
+        slashOAuthExchangeCooldownUntil.delete(sessionID);
+        return {
+          ok: false,
+          message: "OAuth state mismatch or missing — possible CSRF attack. Please start a new login flow.",
+        };
+      }
+    }
+
+    const credentials = await oauthExchange(code, pending.verifier);
+    if (credentials.type === "failed") {
+      if (credentials.status === 429) {
+        const retryAfterMs =
+          typeof credentials.retryAfterMs === "number" && Number.isFinite(credentials.retryAfterMs)
+            ? Math.max(1000, credentials.retryAfterMs)
+            : 30_000;
+        const retryAfterSource =
+          typeof credentials.retryAfterSource === "string" && credentials.retryAfterSource
+            ? credentials.retryAfterSource
+            : "unknown";
+        slashOAuthExchangeCooldownUntil.set(sessionID, Date.now() + retryAfterMs);
+        const waitSec = Math.max(1, Math.ceil(retryAfterMs / 1000));
+        debugLog("slash oauth exchange rate limited", {
+          sessionID,
+          retryAfterMs,
+          retryAfterSource,
+        });
+
+        return {
+          ok: false,
+          message: credentials.details
+            ? `Token exchange failed (${credentials.details}).\n\nAnthropic OAuth is rate-limited. Wait about ${waitSec}s and retry /anthropic ${pending.mode} complete <code#state>.`
+            : `Token exchange failed due to rate limiting. Wait about ${waitSec}s and retry /anthropic ${pending.mode} complete <code#state>.`,
+        };
+      }
+
+      return {
+        ok: false,
+        message: credentials.details
+          ? `Token exchange failed (${credentials.details}).`
+          : "Token exchange failed. The code may be invalid or expired.",
+      };
+    }
+
+    const stored = (await loadAccounts()) || { version: 1, accounts: [], activeIndex: 0 };
+
+    if (pending.mode === "login") {
+      const existingIdx = stored.accounts.findIndex((acc) => acc.refreshToken === credentials.refresh);
+      if (existingIdx >= 0) {
+        const acc = stored.accounts[existingIdx];
+        acc.access = credentials.access;
+        acc.expires = credentials.expires;
+        if (credentials.email) acc.email = credentials.email;
+        acc.enabled = true;
+        acc.consecutiveFailures = 0;
+        acc.lastFailureTime = null;
+        acc.rateLimitResetTimes = {};
+        await saveAccounts(stored);
+        await persistOpenCodeAuth(acc.refreshToken, acc.access, acc.expires);
+        await reloadAccountManagerFromDisk();
+        pendingSlashOAuth.delete(sessionID);
+        slashOAuthExchangeCooldownUntil.delete(sessionID);
+        const name = acc.email || `Account ${existingIdx + 1}`;
+        return { ok: true, message: `Updated existing account #${existingIdx + 1} (${name}).` };
+      }
+
+      if (stored.accounts.length >= 10) {
+        return { ok: false, message: "Maximum of 10 accounts reached. Remove one first." };
+      }
+
+      const now = Date.now();
+      stored.accounts.push({
+        id: `${now}:${credentials.refresh.slice(0, 12)}`,
+        email: credentials.email,
+        refreshToken: credentials.refresh,
+        access: credentials.access,
+        expires: credentials.expires,
+        token_updated_at: now,
+        addedAt: now,
+        lastUsed: 0,
+        enabled: true,
+        rateLimitResetTimes: {},
+        consecutiveFailures: 0,
+        lastFailureTime: null,
+        stats: createDefaultStats(now),
+      });
+      await saveAccounts(stored);
+      const newAccount = stored.accounts[stored.accounts.length - 1];
+      await persistOpenCodeAuth(newAccount.refreshToken, newAccount.access, newAccount.expires);
+      await reloadAccountManagerFromDisk();
+      pendingSlashOAuth.delete(sessionID);
+      slashOAuthExchangeCooldownUntil.delete(sessionID);
+      const label = credentials.email || `Account ${stored.accounts.length}`;
+      return { ok: true, message: `Added account #${stored.accounts.length} (${label}).` };
+    }
+
+    // reauth flow
+    const idx = pending.targetIndex ?? -1;
+    if (idx < 0 || idx >= stored.accounts.length) {
+      pendingSlashOAuth.delete(sessionID);
+      slashOAuthExchangeCooldownUntil.delete(sessionID);
+      return { ok: false, message: "Target account no longer exists. Start reauth again." };
+    }
+
+    const existing = stored.accounts[idx];
+    existing.refreshToken = credentials.refresh;
+    existing.access = credentials.access;
+    existing.expires = credentials.expires;
+    if (credentials.email) existing.email = credentials.email;
+    existing.enabled = true;
+    existing.consecutiveFailures = 0;
+    existing.lastFailureTime = null;
+    existing.rateLimitResetTimes = {};
+
+    await saveAccounts(stored);
+    await persistOpenCodeAuth(existing.refreshToken, existing.access, existing.expires);
+    await reloadAccountManagerFromDisk();
+    pendingSlashOAuth.delete(sessionID);
+    slashOAuthExchangeCooldownUntil.delete(sessionID);
+    const name = existing.email || `Account ${idx + 1}`;
+    return { ok: true, message: `Re-authenticated account #${idx + 1} (${name}).` };
+  }
+
+  /**
+   * Handle /anthropic slash commands.
+   *
+   * Supported examples:
+   *   /anthropic
+   *   /anthropic usage
+   *   /anthropic switch 2
+   *   /anthropic login
+   *   /anthropic login complete <code#state>
+   *   /anthropic reauth 1
+   *   /anthropic reauth complete <code#state>
+   *
+   * @param {{ command: string, arguments?: string, sessionID: string }} input
+   */
+  async function handleAnthropicSlashCommand(input) {
+    const args = parseCommandArgs(input.arguments || "");
+    const primary = (args[0] || "list").toLowerCase();
+
+    // Friendly alias: /anthropic usage -> list
+    if (primary === "usage") {
+      const result = await runCliCommand(["list"]);
+      const heading = result.code === 0 ? "▣ Anthropic" : "▣ Anthropic (error)";
+      const body = result.stdout || result.stderr || "No output.";
+      await sendCommandMessage(input.sessionID, [heading, "", body].join("\n"));
+      await reloadAccountManagerFromDisk();
+      return;
+    }
+
+    // Two-step login flow for slash commands
+    if (primary === "login") {
+      if ((args[1] || "").toLowerCase() === "complete") {
+        const code = args.slice(2).join(" ").trim();
+        if (!code) {
+          await sendCommandMessage(
+            input.sessionID,
+            "▣ Anthropic OAuth\n\nMissing code. Use: /anthropic login complete <code#state>",
+          );
+          return;
+        }
+        const result = await completeSlashOAuth(input.sessionID, code);
+        const heading = result.ok ? "▣ Anthropic OAuth" : "▣ Anthropic OAuth (error)";
+        await sendCommandMessage(input.sessionID, `${heading}\n\n${result.message}`);
+        return;
+      }
+
+      await startSlashOAuth(input.sessionID, "login");
+      return;
+    }
+
+    // Two-step reauth flow for slash commands
+    if (primary === "reauth") {
+      if ((args[1] || "").toLowerCase() === "complete") {
+        const code = args.slice(2).join(" ").trim();
+        if (!code) {
+          await sendCommandMessage(
+            input.sessionID,
+            "▣ Anthropic OAuth\n\nMissing code. Use: /anthropic reauth complete <code#state>",
+          );
+          return;
+        }
+        const result = await completeSlashOAuth(input.sessionID, code);
+        const heading = result.ok ? "▣ Anthropic OAuth" : "▣ Anthropic OAuth (error)";
+        await sendCommandMessage(input.sessionID, `${heading}\n\n${result.message}`);
+        return;
+      }
+
+      const n = parseInt(args[1], 10);
+      if (Number.isNaN(n) || n < 1) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic OAuth\n\nProvide an account number. Example: /anthropic reauth 1",
+        );
+        return;
+      }
+      const stored = await loadAccounts();
+      if (!stored || stored.accounts.length === 0) {
+        await sendCommandMessage(input.sessionID, "▣ Anthropic OAuth (error)\n\nNo accounts configured.");
+        return;
+      }
+      const idx = n - 1;
+      if (idx >= stored.accounts.length) {
+        await sendCommandMessage(
+          input.sessionID,
+          `▣ Anthropic OAuth (error)\n\nAccount ${n} does not exist. You have ${stored.accounts.length} account(s).`,
+        );
+        return;
+      }
+
+      await startSlashOAuth(input.sessionID, "reauth", idx);
+      return;
+    }
+
+    // /anthropic config — show effective config
+    if (primary === "config") {
+      const fresh = loadConfigFresh();
+      const lines = [
+        "▣ Anthropic Config",
+        "",
+        `strategy: ${fresh.account_selection_strategy}`,
+        `strategy-state: ${strategyState.mode}${strategyState.manualOverride ? " (manual override)" : ""}`,
+        `emulation: ${fresh.signature_emulation.enabled ? "on" : "off"}`,
+        `compaction: ${fresh.signature_emulation.prompt_compaction}`,
+        `1m-context: ${fresh.override_model_limits.enabled ? "on" : "off"}`,
+        `idle-refresh: ${fresh.idle_refresh.enabled ? "on" : "off"}`,
+        `debug: ${fresh.debug ? "on" : "off"}`,
+        `quiet: ${fresh.toasts.quiet ? "on" : "off"}`,
+        `custom_betas: ${fresh.custom_betas.length ? fresh.custom_betas.join(", ") : "(none)"}`,
+        `cache-boundary: ${fresh.cache_policy?.boundary_marker ? "on" : "off"}`,
+        `cache-ttl: ${fresh.cache_policy?.ttl ?? "1h"}${fresh.cache_policy?.ttl_supported === false ? " (auto-disabled)" : ""}`,
+        `fast-mode: ${fresh.fast_mode ? "on" : "off"}`,
+        `telemetry-emulation: ${fresh.telemetry?.emulate_minimal ? "on (silent observer)" : "off"}`,
+        `usage-toast: ${fresh.usage_toast ? "on" : "off"}`,
+      ];
+      await sendCommandMessage(input.sessionID, lines.join("\n"));
+      return;
+    }
+
+    // /anthropic stats — show enhanced session statistics
+    if (primary === "stats") {
+      const avgRate = getAverageCacheHitRate();
+      const totalTokens =
+        sessionMetrics.totalInput +
+        sessionMetrics.totalOutput +
+        sessionMetrics.totalCacheRead +
+        sessionMetrics.totalCacheWrite;
+      const avgPerTurn = sessionMetrics.turns > 0 ? Math.round(totalTokens / sessionMetrics.turns) : 0;
+      const elapsedMin = (Date.now() - sessionMetrics.sessionStartTime) / 60_000;
+      const burnRate = elapsedMin > 0 ? sessionMetrics.sessionCostUsd / elapsedMin : 0;
+
+      // Cache savings estimate: difference between what cache reads would cost at full input price vs cache read price
+      const pricing = getModelPricing("claude-sonnet-4-6");
+      const cacheSavings =
+        sessionMetrics.totalCacheRead > 0
+          ? (sessionMetrics.totalCacheRead / 1_000_000) * (pricing.input - pricing.cacheRead)
+          : 0;
+
+      const lines = [
+        "▣ Anthropic Session Stats",
+        "",
+        `Turns: ${sessionMetrics.turns} (${elapsedMin.toFixed(0)} min)`,
+        `Avg tokens/turn: ${avgPerTurn.toLocaleString()}`,
+        "",
+        "Tokens:",
+        `  Input:       ${sessionMetrics.totalInput.toLocaleString()}`,
+        `  Output:      ${sessionMetrics.totalOutput.toLocaleString()}`,
+        `  Cache read:  ${sessionMetrics.totalCacheRead.toLocaleString()}`,
+        `  Cache write: ${sessionMetrics.totalCacheWrite.toLocaleString()}`,
+        `  Total:       ${totalTokens.toLocaleString()}`,
+      ];
+      if (sessionMetrics.totalWebSearchRequests > 0) {
+        lines.push(`  Web searches: ${sessionMetrics.totalWebSearchRequests}`);
+      }
+      lines.push(
+        "",
+        `Cache efficiency: ${(avgRate * 100).toFixed(1)}% (last ${sessionMetrics.recentCacheRates.length} turns)`,
+      );
+      if (cacheSavings > 0) {
+        lines.push(`Cache savings:  ~$${cacheSavings.toFixed(4)} saved vs uncached`);
+      }
+      lines.push(
+        "",
+        "Cost breakdown:",
+        `  Input:       $${sessionMetrics.costBreakdown.input.toFixed(4)}`,
+        `  Output:      $${sessionMetrics.costBreakdown.output.toFixed(4)}`,
+        `  Cache read:  $${sessionMetrics.costBreakdown.cacheRead.toFixed(4)}`,
+        `  Cache write: $${sessionMetrics.costBreakdown.cacheWrite.toFixed(4)}`,
+        `  Total:       $${sessionMetrics.sessionCostUsd.toFixed(4)}`,
+      );
+      if (burnRate > 0) {
+        lines.push(`Burn rate: $${(burnRate * 60).toFixed(2)}/hr`);
+      }
+
+      const maxBudget = parseFloat(process.env.OPENCODE_ANTHROPIC_MAX_BUDGET_USD || "0");
+      if (maxBudget > 0) {
+        const pct = (sessionMetrics.sessionCostUsd / maxBudget) * 100;
+        const remaining = maxBudget - sessionMetrics.sessionCostUsd;
+        lines.push(
+          `Budget: $${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)} (${pct.toFixed(0)}%)`,
+        );
+        if (burnRate > 0 && remaining > 0) {
+          const minsLeft = remaining / burnRate;
+          lines.push(
+            `  Est. time remaining: ${minsLeft < 60 ? `${minsLeft.toFixed(0)} min` : `${(minsLeft / 60).toFixed(1)} hr`}`,
+          );
+        }
+      }
+
+      // Quota info (if available from rate-limit headers)
+      if (sessionMetrics.lastQuota.updatedAt > 0) {
+        const q = sessionMetrics.lastQuota;
+        const quotaParts = [];
+        // QA fix L8: show 0% utilization too — valid data point meaning plenty of capacity
+        quotaParts.push(`tokens: ${(q.tokens * 100).toFixed(0)}%`);
+        quotaParts.push(`requests: ${(q.requests * 100).toFixed(0)}%`);
+        quotaParts.push(`input-tokens: ${(q.inputTokens * 100).toFixed(0)}%`);
+        lines.push("", `Rate limit utilization: ${quotaParts.join(", ")}`);
+      }
+
+      await sendCommandMessage(input.sessionID, lines.join("\n"));
+      return;
+    }
+
+    // /anthropic quota — show rate limit utilization
+    if (primary === "quota") {
+      const q = sessionMetrics.lastQuota;
+      if (q.updatedAt === 0) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic Quota\n\nNo rate-limit data yet. Make at least one API request first.",
+        );
+        return;
+      }
+      const agoSec = Math.round((Date.now() - q.updatedAt) / 1000);
+      const agoStr = agoSec < 60 ? `${agoSec}s ago` : `${Math.round(agoSec / 60)}m ago`;
+      const bar = (/** @type {number} */ pct) => {
+        const filled = Math.max(0, Math.min(20, Math.round(pct * 20)));
+        return "[" + "█".repeat(filled) + "░".repeat(20 - filled) + "]";
+      };
+      const lines = [
+        "▣ Anthropic Rate Limit Quota",
+        "",
+        `Tokens:       ${bar(q.tokens)} ${(q.tokens * 100).toFixed(0)}%`,
+        `Requests:     ${bar(q.requests)} ${(q.requests * 100).toFixed(0)}%`,
+        `Input tokens: ${bar(q.inputTokens)} ${(q.inputTokens * 100).toFixed(0)}%`,
+        "",
+        `Last updated: ${agoStr}`,
+      ];
+      const maxUtil = Math.max(q.tokens, q.requests, q.inputTokens);
+      if (maxUtil >= 0.9) {
+        lines.push("", "⚠ High utilization — consider slowing request rate or rotating accounts");
+      } else if (maxUtil >= 0.7) {
+        lines.push("", "Utilization is moderate. Consider monitoring if sustained.");
+      }
+      await sendCommandMessage(input.sessionID, lines.join("\n"));
+      return;
+    }
+
+    // /anthropic accounts — show per-account stats and health
+    if (primary === "accounts") {
+      if (!accountManager || accountManager.getAccountCount() === 0) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic Accounts\n\nNo accounts configured. Use /anthropic login first.",
+        );
+        return;
+      }
+      const accounts = accountManager.getEnabledAccounts();
+      const lines = ["▣ Anthropic Account Stats", ""];
+
+      for (const acc of accounts) {
+        const s = acc.stats;
+        const totalTok = s.inputTokens + s.outputTokens + s.cacheReadTokens + s.cacheWriteTokens;
+        const label = acc.email || `Account #${acc.index + 1}`;
+        const isActive = accountManager.getCurrentIndex?.() === acc.index || false;
+        const statusBadge = isActive ? " ◄ active" : "";
+        const healthScore = accountManager.getHealthScore?.(acc.index) ?? "N/A";
+
+        // Cost estimate (use sonnet as default)
+        const cost = calculateCostUsd(
+          {
+            inputTokens: s.inputTokens,
+            outputTokens: s.outputTokens,
+            cacheReadTokens: s.cacheReadTokens,
+            cacheWriteTokens: s.cacheWriteTokens,
+          },
+          "claude-sonnet-4-6",
+        );
+
+        lines.push(
+          `[${acc.index + 1}] ${label}${statusBadge}`,
+          `  Requests: ${s.requests}  |  Tokens: ${totalTok.toLocaleString()}  |  Health: ${healthScore}`,
+          `  Input: ${s.inputTokens.toLocaleString()}  Output: ${s.outputTokens.toLocaleString()}`,
+          `  Cache R: ${s.cacheReadTokens.toLocaleString()}  Cache W: ${s.cacheWriteTokens.toLocaleString()}`,
+          `  Est. cost: $${cost.toFixed(4)}`,
+          "",
+        );
+      }
+
+      await sendCommandMessage(input.sessionID, lines.join("\n"));
+      return;
+    }
+
+    // /anthropic set <key> <value> — toggle features at runtime
+    if (primary === "set") {
+      const key = (args[1] || "").toLowerCase();
+      const value = (args[2] || "").toLowerCase();
+      /** @type {Record<string, () => void>} */
+      const setters = {
+        emulation: () =>
+          saveConfig({ signature_emulation: { enabled: value === "on" || value === "1" || value === "true" } }),
+        compaction: () =>
+          saveConfig({ signature_emulation: { prompt_compaction: value === "off" ? "off" : "minimal" } }),
+        "1m-context": () =>
+          saveConfig({ override_model_limits: { enabled: value === "on" || value === "1" || value === "true" } }),
+        "idle-refresh": () =>
+          saveConfig({ idle_refresh: { enabled: value === "on" || value === "1" || value === "true" } }),
+        debug: () => saveConfig({ debug: value === "on" || value === "1" || value === "true" }),
+        quiet: () => saveConfig({ toasts: { quiet: value === "on" || value === "1" || value === "true" } }),
+        strategy: () => {
+          const valid = ["sticky", "round-robin", "hybrid"];
+          if (valid.includes(value)) {
+            saveConfig({ account_selection_strategy: value });
+            strategyState.manualOverride = true;
+            strategyState.mode = "CONFIGURED";
+          } else throw new Error(`Invalid strategy. Valid: ${valid.join(", ")}`);
+        },
+        boundary: () =>
+          saveConfig({ cache_policy: { boundary_marker: value === "on" || value === "1" || value === "true" } }),
+        "cache-ttl": () => {
+          const valid = ["1h", "5m", "off"];
+          if (valid.includes(value)) saveConfig({ cache_policy: { ttl: value } });
+          else throw new Error(`Invalid TTL. Valid: ${valid.join(", ")}`);
+        },
+        fast: () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ fast_mode: enabled });
+          config.fast_mode = enabled;
+        },
+        "fast-mode": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ fast_mode: enabled });
+          config.fast_mode = enabled;
+        },
+        telemetry: () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ telemetry: { emulate_minimal: enabled } });
+          config.telemetry = config.telemetry || {};
+          config.telemetry.emulate_minimal = enabled;
+        },
+        "telemetry-emulation": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ telemetry: { emulate_minimal: enabled } });
+          config.telemetry = config.telemetry || {};
+          config.telemetry.emulate_minimal = enabled;
+        },
+        "usage-toast": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ usage_toast: enabled });
+          config.usage_toast = enabled;
+        },
+      };
+
+      if (!key || !setters[key]) {
+        const keys = Object.keys(setters).join(", ");
+        await sendCommandMessage(
+          input.sessionID,
+          `▣ Anthropic Set\n\nUsage: /anthropic set <key> <value>\nKeys: ${keys}\nValues: on/off (or specific values for strategy/compaction)`,
+        );
+        return;
+      }
+      if (!value) {
+        await sendCommandMessage(input.sessionID, `▣ Anthropic Set\n\nMissing value for "${key}".`);
+        return;
+      }
+      setters[key]();
+      // Reload config into runtime
+      Object.assign(config, loadConfigFresh());
+      await sendCommandMessage(input.sessionID, `▣ Anthropic Set\n\n${key} = ${value}`);
+      return;
+    }
+
+    // /anthropic betas [add|remove <beta>] — show/manage custom betas
+    if (primary === "betas") {
+      const action = (args[1] || "").toLowerCase();
+
+      if (!action || action === "list") {
+        const fresh = loadConfigFresh();
+        const strategy = fresh.account_selection_strategy || config.account_selection_strategy;
+        const lines = [
+          "▣ Anthropic Betas",
+          "",
+          "Preset betas (auto-computed per model/provider):",
+          "  oauth-2025-04-20, claude-code-20250219,",
+          "  advanced-tool-use-2025-11-20, fast-mode-2026-02-01,",
+          "  interleaved-thinking-2025-05-14 (non-Opus 4.6) OR effort-2025-11-24 (Opus 4.6),",
+          "  files-api-2025-04-14 (only /v1/files and requests with file_id),",
+          "  token-counting-2024-11-01 (only /v1/messages/count_tokens),",
+          `  prompt-caching-scope-2026-01-05 (non-interactive${strategy === "round-robin" ? ", skipped in round-robin" : ""})`,
+          "",
+          `Experimental betas: ${isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS) ? "disabled (CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1)" : "enabled"}`,
+          `Strategy: ${strategy}${initialAccountPinned ? " (pinned via OPENCODE_ANTHROPIC_INITIAL_ACCOUNT)" : ""}`,
+          `Custom betas: ${fresh.custom_betas.length ? fresh.custom_betas.join(", ") : "(none)"}`,
+          "",
+          "Toggleable presets:",
+          "  /anthropic betas add structured-outputs-2025-12-15",
+          "  /anthropic betas add context-management-2025-06-27",
+          "  /anthropic betas add tool-examples-2025-10-29",
+          "  /anthropic betas add web-search-2025-03-05",
+          "  /anthropic betas add compact-2026-01-12",
+          "  /anthropic betas add mcp-servers-2025-12-04",
+          "  /anthropic betas add redact-thinking-2026-02-12",
+          "  /anthropic betas add 1m   (shortcut for context-1m-2025-08-07)",
+          "",
+          "Remove: /anthropic betas remove <beta>",
+        ];
+        await sendCommandMessage(input.sessionID, lines.join("\n"));
+        return;
+      }
+
+      if (action === "add") {
+        const betaInput = args[2]?.trim();
+        if (!betaInput) {
+          await sendCommandMessage(input.sessionID, "▣ Anthropic Betas\n\nUsage: /anthropic betas add <beta-name>");
+          return;
+        }
+        const beta = resolveBetaShortcut(betaInput);
+        const fresh = loadConfigFresh();
+        const current = fresh.custom_betas || [];
+        if (current.includes(beta)) {
+          await sendCommandMessage(input.sessionID, `▣ Anthropic Betas\n\n"${beta}" already added.`);
+          return;
+        }
+        saveConfig({ custom_betas: [...current, beta] });
+        Object.assign(config, loadConfigFresh());
+        const fromShortcut = beta !== betaInput;
+        await sendCommandMessage(
+          input.sessionID,
+          `▣ Anthropic Betas\n\nAdded: ${beta}${fromShortcut ? ` (from shortcut: ${betaInput})` : ""}`,
+        );
+        return;
+      }
+
+      if (action === "remove" || action === "rm") {
+        const betaInput = args[2]?.trim();
+        if (!betaInput) {
+          await sendCommandMessage(input.sessionID, "▣ Anthropic Betas\n\nUsage: /anthropic betas remove <beta-name>");
+          return;
+        }
+        const beta = resolveBetaShortcut(betaInput);
+        const fresh = loadConfigFresh();
+        const current = fresh.custom_betas || [];
+        if (!current.includes(beta)) {
+          await sendCommandMessage(input.sessionID, `▣ Anthropic Betas\n\n"${beta}" not in custom betas.`);
+          return;
+        }
+        saveConfig({ custom_betas: current.filter((b) => b !== beta) });
+        Object.assign(config, loadConfigFresh());
+        await sendCommandMessage(input.sessionID, `▣ Anthropic Betas\n\nRemoved: ${beta}`);
+        return;
+      }
+
+      await sendCommandMessage(input.sessionID, "▣ Anthropic Betas\n\nUsage: /anthropic betas [add|remove <beta>]");
+      return;
+    }
+
+    // /anthropic files [list|upload|get|delete|download] — Files API management
+    // Supports --account <email|index> to target a specific account.
+    // Without --account, list aggregates from ALL accounts; other actions use the current account.
+    if (primary === "files") {
+      // Parse --account flag from args
+      let targetAccountId = null;
+      const filteredArgs = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--account" && i + 1 < args.length) {
+          targetAccountId = args[i + 1];
+          i++;
+        } else {
+          filteredArgs.push(args[i]);
+        }
+      }
+      const action = (filteredArgs[1] || "").toLowerCase();
+
+      if (!accountManager || accountManager.getAccountCount() === 0) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic Files (error)\n\nNo accounts configured. Use /anthropic login first.",
+        );
+        return;
+      }
+
+      /**
+       * Resolve a single account by email or 1-based index.
+       * If identifier is null, falls back to the current account.
+       * @param {string | null} identifier
+       * @returns {{ account: import('./lib/accounts.mjs').ManagedAccount, label: string } | null}
+       */
+      function resolveTargetAccount(identifier) {
+        const accounts = accountManager.getEnabledAccounts();
+        if (identifier) {
+          // Try by email
+          const byEmail = accounts.find((a) => a.email === identifier);
+          if (byEmail) return { account: byEmail, label: byEmail.email || `Account ${byEmail.index + 1}` };
+          // Try by 1-based index
+          const idx = parseInt(identifier, 10);
+          if (!isNaN(idx) && idx >= 1) {
+            const byIdx = accounts.find((a) => a.index === idx - 1);
+            if (byIdx) return { account: byIdx, label: byIdx.email || `Account ${byIdx.index + 1}` };
+          }
+          return null;
+        }
+        // Default to current
+        const current = accountManager.getCurrentAccount();
+        if (!current) return null;
+        return { account: current, label: current.email || `Account ${current.index + 1}` };
+      }
+
+      /**
+       * Get authenticated headers for a specific account, refreshing token if needed.
+       * @param {import('./lib/accounts.mjs').ManagedAccount} acct
+       */
+      async function getFilesAuth(acct) {
+        let tok = acct.access;
+        if (!tok || !acct.expires || acct.expires < Date.now()) {
+          tok = await refreshAccountTokenSingleFlight(acct);
+        }
+        return {
+          authorization: `Bearer ${tok}`,
+          "anthropic-beta": "oauth-2025-04-20,files-api-2025-04-14",
+        };
+      }
+
+      const apiBase = "https://api.anthropic.com";
+
+      try {
+        // /anthropic files list — list uploaded files
+        if (!action || action === "list") {
+          if (targetAccountId) {
+            // List for a specific account
+            const resolved = resolveTargetAccount(targetAccountId);
+            if (!resolved) {
+              await sendCommandMessage(
+                input.sessionID,
+                `▣ Anthropic Files (error)\n\nAccount not found: ${targetAccountId}`,
+              );
+              return;
+            }
+            const { account, label } = resolved;
+            const headers = await getFilesAuth(account);
+            const res = await fetch(`${apiBase}/v1/files`, { headers });
+            if (!res.ok) {
+              const errBody = await res.text();
+              await sendCommandMessage(
+                input.sessionID,
+                `▣ Anthropic Files (error) [${label}]\n\nHTTP ${res.status}: ${errBody}`,
+              );
+              return;
+            }
+            const data = await res.json();
+            const files = data.data || [];
+            for (const f of files) fileAccountMapSet(f.id, account.index);
+            if (files.length === 0) {
+              await sendCommandMessage(input.sessionID, `▣ Anthropic Files [${label}]\n\nNo files uploaded.`);
+              return;
+            }
+            const lines = [`▣ Anthropic Files [${label}]`, "", `${files.length} file(s):`, ""];
+            for (const f of files) {
+              const sizeKB = ((f.size || 0) / 1024).toFixed(1);
+              lines.push(`  ${f.id}  ${f.filename}  (${sizeKB} KB, ${f.purpose})`);
+            }
+            await sendCommandMessage(input.sessionID, lines.join("\n"));
+            return;
+          }
+
+          // List files from ALL enabled accounts
+          const accounts = accountManager.getEnabledAccounts();
+          const allLines = ["▣ Anthropic Files (all accounts)", ""];
+          let totalFiles = 0;
+          for (const acct of accounts) {
+            const label = acct.email || `Account ${acct.index + 1}`;
+            try {
+              const headers = await getFilesAuth(acct);
+              const res = await fetch(`${apiBase}/v1/files`, { headers });
+              if (!res.ok) {
+                allLines.push(`[${label}] Error: HTTP ${res.status}`);
+                allLines.push("");
+                continue;
+              }
+              const data = await res.json();
+              const files = data.data || [];
+              for (const f of files) fileAccountMapSet(f.id, acct.index);
+              totalFiles += files.length;
+              if (files.length === 0) {
+                allLines.push(`[${label}] No files`);
+              } else {
+                allLines.push(`[${label}] ${files.length} file(s):`);
+                for (const f of files) {
+                  const sizeKB = ((f.size || 0) / 1024).toFixed(1);
+                  allLines.push(`  ${f.id}  ${f.filename}  (${sizeKB} KB, ${f.purpose})`);
+                }
+              }
+              allLines.push("");
+            } catch (err) {
+              allLines.push(`[${label}] Error: ${err.message}`);
+              allLines.push("");
+            }
+          }
+          if (totalFiles === 0 && accounts.length > 0) {
+            allLines.push(`Total: No files across ${accounts.length} account(s).`);
+          } else {
+            allLines.push(`Total: ${totalFiles} file(s) across ${accounts.length} account(s).`);
+          }
+          if (accounts.length > 1) {
+            allLines.push("", "Tip: Use --account <email> to target a specific account.");
+          }
+          await sendCommandMessage(input.sessionID, allLines.join("\n"));
+          return;
+        }
+
+        // For all non-list actions, resolve to a single account
+        const resolved = resolveTargetAccount(targetAccountId);
+        if (!resolved) {
+          const errMsg = targetAccountId ? `Account not found: ${targetAccountId}` : "No accounts available.";
+          await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\n${errMsg}`);
+          return;
+        }
+        const { account, label } = resolved;
+        const authHeaders = await getFilesAuth(account);
+
+        // /anthropic files upload <path> — upload a file
+        if (action === "upload") {
+          const filePath = filteredArgs.slice(2).join(" ").trim();
+          if (!filePath) {
+            await sendCommandMessage(
+              input.sessionID,
+              "▣ Anthropic Files\n\nUsage: /anthropic files upload <path> [--account <email>]",
+            );
+            return;
+          }
+          const resolvedPath = resolve(filePath);
+          if (!existsSync(resolvedPath)) {
+            await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\nFile not found: ${resolvedPath}`);
+            return;
+          }
+          const content = readFileSync(resolvedPath);
+          const filename = basename(resolvedPath);
+          const blob = new Blob([content]);
+          const form = new FormData();
+          form.append("file", blob, filename);
+          form.append("purpose", "assistants");
+
+          const res = await fetch(`${apiBase}/v1/files`, {
+            method: "POST",
+            headers: {
+              authorization: authHeaders.authorization,
+              "anthropic-beta": "oauth-2025-04-20,files-api-2025-04-14",
+            },
+            body: form,
+          });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Files (error) [${label}]\n\nUpload failed (HTTP ${res.status}): ${errBody}`,
+            );
+            return;
+          }
+          const file = await res.json();
+          const sizeKB = ((file.size || 0) / 1024).toFixed(1);
+          // Cache file_id → account mapping for auto-pinning
+          fileAccountMapSet(file.id, account.index);
+          await sendCommandMessage(
+            input.sessionID,
+            `▣ Anthropic Files [${label}]\n\nUploaded: ${file.id}\n  Filename: ${file.filename}\n  Size: ${sizeKB} KB`,
+          );
+          return;
+        }
+
+        // /anthropic files get <file_id> — get file metadata
+        if (action === "get" || action === "info") {
+          const fileId = filteredArgs[2]?.trim();
+          if (!fileId) {
+            await sendCommandMessage(
+              input.sessionID,
+              "▣ Anthropic Files\n\nUsage: /anthropic files get <file_id> [--account <email>]",
+            );
+            return;
+          }
+          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, { headers: authHeaders });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Files (error) [${label}]\n\nHTTP ${res.status}: ${errBody}`,
+            );
+            return;
+          }
+          const file = await res.json();
+          fileAccountMapSet(file.id, account.index);
+          const lines = [
+            `▣ Anthropic Files [${label}]`,
+            "",
+            `  ID:       ${file.id}`,
+            `  Filename: ${file.filename}`,
+            `  Purpose:  ${file.purpose}`,
+            `  Size:     ${((file.size || 0) / 1024).toFixed(1)} KB`,
+            `  Type:     ${file.mime_type || "unknown"}`,
+            `  Created:  ${file.created_at || "unknown"}`,
+          ];
+          await sendCommandMessage(input.sessionID, lines.join("\n"));
+          return;
+        }
+
+        // /anthropic files delete <file_id> — delete a file
+        if (action === "delete" || action === "rm") {
+          const fileId = filteredArgs[2]?.trim();
+          if (!fileId) {
+            await sendCommandMessage(
+              input.sessionID,
+              "▣ Anthropic Files\n\nUsage: /anthropic files delete <file_id> [--account <email>]",
+            );
+            return;
+          }
+          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, {
+            method: "DELETE",
+            headers: authHeaders,
+          });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Files (error) [${label}]\n\nHTTP ${res.status}: ${errBody}`,
+            );
+            return;
+          }
+          fileAccountMap.delete(fileId);
+          await sendCommandMessage(input.sessionID, `▣ Anthropic Files [${label}]\n\nDeleted: ${fileId}`);
+          return;
+        }
+
+        // /anthropic files download <file_id> [output_path] — download file content
+        if (action === "download" || action === "dl") {
+          const fileId = filteredArgs[2]?.trim();
+          if (!fileId) {
+            await sendCommandMessage(
+              input.sessionID,
+              "▣ Anthropic Files\n\nUsage: /anthropic files download <file_id> [output_path] [--account <email>]",
+            );
+            return;
+          }
+          const outputPath = filteredArgs.slice(3).join(" ").trim();
+
+          // Get file metadata first for the filename
+          const metaRes = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, {
+            headers: authHeaders,
+          });
+          if (!metaRes.ok) {
+            const errBody = await metaRes.text();
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Files (error) [${label}]\n\nHTTP ${metaRes.status}: ${errBody}`,
+            );
+            return;
+          }
+          const meta = await metaRes.json();
+          const savePath = outputPath ? resolve(outputPath) : resolve(meta.filename);
+
+          // Download file content
+          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}/content`, {
+            headers: authHeaders,
+          });
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Files (error) [${label}]\n\nDownload failed (HTTP ${res.status}): ${errBody}`,
+            );
+            return;
+          }
+          const buffer = Buffer.from(await res.arrayBuffer());
+          writeFileSync(savePath, buffer);
+          const sizeKB = (buffer.length / 1024).toFixed(1);
+          await sendCommandMessage(
+            input.sessionID,
+            `▣ Anthropic Files [${label}]\n\nDownloaded: ${meta.filename}\n  Saved to: ${savePath}\n  Size: ${sizeKB} KB`,
+          );
+          return;
+        }
+
+        // Unknown action — show help
+        const helpLines = [
+          "▣ Anthropic Files",
+          "",
+          "Usage: /anthropic files <action> [--account <email|index>]",
+          "",
+          "Actions:",
+          "  list                          List uploaded files (all accounts if no --account)",
+          "  upload <path>                 Upload a file (max 350MB)",
+          "  get <file_id>                 Get file metadata",
+          "  delete <file_id>              Delete a file",
+          "  download <file_id> [path]     Download file content",
+          "",
+          "Options:",
+          "  --account <email|index>       Target a specific account (1-based index)",
+          "",
+          "Supported formats: PDF, DOCX, TXT, CSV, Excel, Markdown, images",
+          "Files can be referenced by file_id in Messages API requests.",
+          "",
+          "When using round-robin, file_ids are automatically pinned to the",
+          "account that owns them for Messages API requests.",
+        ];
+        await sendCommandMessage(input.sessionID, helpLines.join("\n"));
+        return;
+      } catch (err) {
+        await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\n${err.message}`);
+        return;
+      }
+    }
+
+    // Interactive CLI command is not compatible with slash flow.
+    if (primary === "manage" || primary === "mg") {
+      await sendCommandMessage(
+        input.sessionID,
+        "▣ Anthropic\n\n`manage` is interactive-only. Use granular slash commands (switch/enable/disable/remove/reset) or run `opencode-anthropic-auth manage` in a terminal.",
+      );
+      return;
+    }
+
+    // Route remaining commands through the CLI command surface.
+    const cliArgs = [...args];
+    if (cliArgs.length === 0) cliArgs.push("list");
+
+    // Avoid readline prompts in slash mode.
+    if (
+      (primary === "remove" || primary === "rm" || primary === "logout" || primary === "lo") &&
+      !cliArgs.includes("--force")
+    ) {
+      cliArgs.push("--force");
+    }
+
+    const result = await runCliCommand(cliArgs);
+    const heading = result.code === 0 ? "▣ Anthropic" : "▣ Anthropic (error)";
+    const body = result.stdout || result.stderr || "No output.";
+    await sendCommandMessage(input.sessionID, [heading, "", body].join("\n"));
+    await reloadAccountManagerFromDisk();
+  }
+
+  /**
+   * Show a toast in the TUI. Silently fails if TUI is not running.
+   * @param {string} message
+   * @param {"info" | "success" | "warning" | "error"} variant
+   * @param {{debounceKey?: string}} [options]
+   */
+  async function toast(message, variant = "info", options = {}) {
+    // Quiet mode suppresses non-error toasts
+    if (config.toasts.quiet && variant !== "error") return;
+
+    // Debounce configured toast categories to reduce chatter.
+    if (variant !== "error" && options.debounceKey) {
+      const minGapMs = Math.max(0, config.toasts.debounce_seconds) * 1000;
+      if (minGapMs > 0) {
+        const now = Date.now();
+        const lastAt = debouncedToastTimestamps.get(options.debounceKey) ?? 0;
+        if (now - lastAt < minGapMs) {
+          return;
+        }
+        debouncedToastTimestamps.set(options.debounceKey, now);
+        // QA fix M2: prune stale entries to prevent unbounded growth
+        if (debouncedToastTimestamps.size > 200) {
+          const cutoff = now - minGapMs * 2;
+          for (const [k, ts] of debouncedToastTimestamps) {
+            if (ts < cutoff) debouncedToastTimestamps.delete(k);
+          }
+        }
+      }
+    }
+
+    try {
+      await client.tui?.showToast({ body: { message, variant } });
+    } catch {
+      // TUI may not be available
+    }
+  }
+
+  /**
+   * Emit debug logs when config.debug is enabled.
+   * @param {...unknown} args
+   */
+  function debugLog(...args) {
+    if (!config.debug) return;
+    console.error("[opencode-anthropic-auth]", ...args);
+  }
+
+  function recordRateLimitForStrategy() {
+    const now = Date.now();
+    strategyState.rateLimitEvents.push(now);
+    strategyState.lastRateLimitTime = now;
+
+    // Prune events outside window
+    const cutoff = now - strategyState.windowMs;
+    strategyState.rateLimitEvents = strategyState.rateLimitEvents.filter((t) => t > cutoff);
+
+    // Check transition to DEGRADED
+    if (strategyState.mode === "CONFIGURED" && !strategyState.manualOverride) {
+      if (strategyState.rateLimitEvents.length >= strategyState.thresholdCount) {
+        strategyState.originalStrategy = config.account_selection_strategy;
+        strategyState.mode = "DEGRADED";
+        debugLog("auto-strategy: transitioning to DEGRADED mode", {
+          rateLimitsInWindow: strategyState.rateLimitEvents.length,
+        });
+        toast("Multiple rate limits detected, temporarily rotating accounts more aggressively", "warning", {
+          debounceKey: "strategy-degraded",
+        }).catch(() => {});
+      }
+    }
+  }
+
+  function checkStrategyRecovery() {
+    if (strategyState.mode !== "DEGRADED" || strategyState.manualOverride) return;
+
+    const now = Date.now();
+    if (now - strategyState.lastRateLimitTime >= strategyState.recoveryMs) {
+      strategyState.mode = "CONFIGURED";
+      strategyState.rateLimitEvents = [];
+      debugLog("auto-strategy: recovered to CONFIGURED mode");
+      toast("Rate limit pressure relieved, restoring normal account selection", "info", {
+        debounceKey: "strategy-recovered",
+      }).catch(() => {});
+    }
+  }
+
+  function getEffectiveStrategy() {
+    if (strategyState.mode === "DEGRADED") return "hybrid";
+    return config.account_selection_strategy;
+  }
+
+  let claudeCliVersion = FALLBACK_CLAUDE_CLI_VERSION;
+  const signatureSessionId = randomUUID();
+  const signatureUserId = getOrCreateDeviceId();
+  if (shouldFetchClaudeCodeVersion) {
+    fetchLatestClaudeCodeVersion()
+      .then((version) => {
+        if (!version) return;
+        claudeCliVersion = version;
+        debugLog("resolved claude-code version from npm", version);
+      })
+      .catch(() => {
+        // Ignore fetch errors and keep fallback version.
+      });
+  }
+
+  /**
+   * Parse refresh error details for retry/disable decisions.
+   * @param {unknown} refreshError
+   * @returns {{
+   *   message: string,
+   *   status: number,
+   *   errorCode: string,
+   *   retryAfterMs: number | null,
+   *   retryAfterSource: string,
+   *   isInvalidGrant: boolean,
+   *   isTerminalStatus: boolean,
+   *   isRateLimitStatus: boolean
+   * }}
+   */
+  function parseRefreshFailure(refreshError) {
+    const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
+    const status =
+      typeof refreshError === "object" && refreshError && "status" in refreshError ? Number(refreshError.status) : NaN;
+    const errorCode =
+      typeof refreshError === "object" && refreshError && ("errorCode" in refreshError || "code" in refreshError)
+        ? String(refreshError.errorCode || refreshError.code || "")
+        : "";
+    const retryAfterMs =
+      typeof refreshError === "object" && refreshError && "retryAfterMs" in refreshError
+        ? Number(refreshError.retryAfterMs)
+        : NaN;
+    const retryAfterSource =
+      typeof refreshError === "object" && refreshError && "retryAfterSource" in refreshError
+        ? String(refreshError.retryAfterSource || "")
+        : "";
+    const msgLower = message.toLowerCase();
+    const isInvalidGrant =
+      errorCode === "invalid_grant" || errorCode === "invalid_request" || msgLower.includes("invalid_grant");
+    const isTerminalStatus = status === 400 || status === 401 || status === 403;
+    const isRateLimitStatus = status === 429;
+    return {
+      message,
+      status,
+      errorCode,
+      retryAfterMs: Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : null,
+      retryAfterSource: retryAfterSource || "unknown",
+      isInvalidGrant,
+      isTerminalStatus,
+      isRateLimitStatus,
+    };
+  }
+
+  /**
+   * Refresh a specific account token with single-flight protection.
+   * Prevents concurrent refresh races from disabling healthy accounts.
+   * @param {import('./lib/accounts.mjs').ManagedAccount} account
+   * @param {"foreground" | "idle"} [source]
+   * @returns {Promise<string>}
+   */
+  async function refreshAccountTokenSingleFlight(account, source = "foreground") {
+    const key = account.id;
+    const existing = refreshInFlight.get(key);
+    if (existing) {
+      // Foreground requests should not directly inherit idle refresh failures.
+      // Wait for idle maintenance to finish, then re-evaluate token state.
+      if (source === "foreground" && existing.source === "idle") {
+        try {
+          await existing.promise;
+        } catch {
+          // Ignore idle failure here; foreground path handles refresh decisions.
+        }
+
+        if (account.access && account.expires && account.expires > Date.now()) {
+          return account.access;
+        }
+      } else {
+        return existing.promise;
+      }
+    }
+
+    /** @type {{ promise: Promise<string>, source: "foreground" | "idle" }} */
+    const entry = { source, promise: Promise.resolve("") };
+    const p = (async () => {
+      try {
+        return await refreshAccountToken(account, client, source, {
+          onTokensUpdated: async () => {
+            try {
+              await accountManager.saveToDisk();
+            } catch {
+              // Synchronous save failed (disk full, permissions, etc.).
+              // Schedule a debounced retry so the rotated token eventually
+              // reaches disk.  Another process may hit invalid_grant in the
+              // interim, but its retry-from-disk logic can recover once this
+              // save lands.
+              accountManager.requestSaveToDisk();
+              throw new Error("save failed, debounced retry scheduled");
+            }
+          },
+        });
+      } finally {
+        if (refreshInFlight.get(key) === entry) {
+          refreshInFlight.delete(key);
+        }
+      }
+    })();
+
+    entry.promise = p;
+    refreshInFlight.set(key, entry);
+    return p;
+  }
+
+  /**
+   * Refresh one idle (non-active) account in the background.
+   * Best-effort only: never disables accounts from background maintenance.
+   * @param {import('./lib/accounts.mjs').ManagedAccount} account
+   * @returns {Promise<void>}
+   */
+  async function refreshIdleAccount(account) {
+    if (!accountManager) return;
+    if (idleRefreshInFlight.has(account.id)) return;
+
+    idleRefreshInFlight.add(account.id);
+    const attemptedRefreshToken = account.refreshToken;
+
+    try {
+      try {
+        await refreshAccountTokenSingleFlight(account, "idle");
+        return;
+      } catch (err) {
+        let details = parseRefreshFailure(err);
+
+        if (!(details.isInvalidGrant || details.isTerminalStatus)) {
+          debugLog("idle refresh skipped after transient failure", {
+            accountIndex: account.index,
+            status: details.status,
+            errorCode: details.errorCode,
+            message: details.message,
+          });
+          return;
+        }
+
+        const diskAuth = await readDiskAccountAuth(account.id);
+        const retryToken = diskAuth?.refreshToken;
+        if (retryToken && retryToken !== attemptedRefreshToken && account.refreshToken === attemptedRefreshToken) {
+          account.refreshToken = retryToken;
+          if (diskAuth?.tokenUpdatedAt) {
+            account.tokenUpdatedAt = diskAuth.tokenUpdatedAt;
+          } else {
+            markTokenStateUpdated(account);
+          }
+        }
+
+        try {
+          await refreshAccountTokenSingleFlight(account, "idle");
+          return;
+        } catch (retryErr) {
+          details = parseRefreshFailure(retryErr);
+          debugLog("idle refresh retry failed", {
+            accountIndex: account.index,
+            status: details.status,
+            errorCode: details.errorCode,
+            message: details.message,
+          });
+          return;
+        }
+      }
+    } finally {
+      idleRefreshInFlight.delete(account.id);
+    }
+  }
+
+  /**
+   * Opportunistically refresh one near-expiry idle account in background.
+   * Runs during normal requests so inactive accounts stay healthy.
+   * @param {import('./lib/accounts.mjs').ManagedAccount} activeAccount
+   */
+  function maybeRefreshIdleAccounts(activeAccount) {
+    if (!IDLE_REFRESH_ENABLED || !accountManager) return;
+
+    const now = Date.now();
+    const excluded = new Set([activeAccount.index]);
+    const candidates = accountManager
+      .getEnabledAccounts(excluded)
+      .filter((acc) => !acc.expires || acc.expires <= now + IDLE_REFRESH_WINDOW_MS)
+      .filter((acc) => {
+        const last = idleRefreshLastAttempt.get(acc.id) ?? 0;
+        return now - last >= IDLE_REFRESH_MIN_INTERVAL_MS;
+      })
+      .sort((a, b) => (a.expires ?? 0) - (b.expires ?? 0));
+
+    const target = candidates[0];
+    if (!target) return;
+
+    idleRefreshLastAttempt.set(target.id, now);
+    // QA fix L5: prune stale entries for accounts that no longer exist
+    const allKnown = accountManager.getAccountsSnapshot();
+    if (idleRefreshLastAttempt.size > allKnown.length + 10) {
+      const validIds = new Set(allKnown.map((a) => a.id));
+      for (const key of idleRefreshLastAttempt.keys()) {
+        if (!validIds.has(key)) idleRefreshLastAttempt.delete(key);
+      }
+    }
+    void refreshIdleAccount(target);
+  }
+
+  return {
+    // A1-A4: System prompt transform (unchanged)
+    "experimental.chat.system.transform": (input, output) => {
+      const prefix = CLAUDE_CODE_IDENTITY_STRING;
+      if (!getSignatureEmulationEnabled() && input.model?.providerID === "anthropic") {
+        output.system.unshift(prefix);
+        // QA fix H7: handle object-format system blocks (e.g. {type:"text", text:"..."})
+        if (output.system[1]) {
+          if (typeof output.system[1] === "string") {
+            output.system[1] = prefix + "\n\n" + output.system[1];
+          } else if (output.system[1] && typeof output.system[1] === "object" && output.system[1].text) {
+            output.system[1] = { ...output.system[1], text: prefix + "\n\n" + output.system[1].text };
+          }
+        }
+      }
+    },
+    config: async (input) => {
+      // OpenCode v1.x: input is a Config object with optional command property
+      if (!input.command) input.command = {};
+      input.command["anthropic"] = {
+        template: "/anthropic",
+        description: "Manage Anthropic auth, config, and betas (usage, login, config, set, betas, switch)",
+      };
+    },
+    "command.execute.before": async (input, output) => {
+      if (input.command !== "anthropic") return;
+
+      try {
+        await handleAnthropicSlashCommand(input);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await sendCommandMessage(input.sessionID, `▣ Anthropic (error)\n\n${message}`);
+      }
+    },
+    auth: {
+      provider: "anthropic",
+      async loader(getAuth, provider) {
+        const auth = await getAuth();
+        if (auth.type === "oauth") {
+          // B1-B2: Zero out cost for max plan and optionally override context limits.
+          for (const model of Object.values(provider.models)) {
+            model.cost = {
+              input: 0,
+              output: 0,
+              cache: { read: 0, write: 0 },
+            };
+
+            // Override context limits for 1M-window models so OpenCode
+            // triggers compaction at the right threshold instead of relying
+            // on potentially stale models.dev data.
+            if (
+              config.override_model_limits.enabled &&
+              !isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT) &&
+              (hasOneMillionContext(model.id) || isOpus46Model(model.id))
+            ) {
+              model.limit = {
+                ...(model.limit ?? {}),
+                context: config.override_model_limits.context,
+                ...(config.override_model_limits.output > 0 ? { output: config.override_model_limits.output } : {}),
+              };
+            }
+          }
+
+          // Initialize AccountManager from disk + OpenCode auth fallback
+          accountManager = await AccountManager.load(config, {
+            refresh: auth.refresh,
+            access: auth.access,
+            expires: auth.expires,
+          });
+
+          // If we bootstrapped from auth.json and have no stored accounts file,
+          // save immediately to create it (debounced save may not fire in time)
+          if (accountManager.getAccountCount() > 0) {
+            await accountManager.saveToDisk();
+          }
+
+          // OPENCODE_ANTHROPIC_INITIAL_ACCOUNT: pin this session to a specific account.
+          // Accepts 1-based index or email. Overrides strategy to sticky and disables
+          // syncActiveIndexFromDisk so other sessions can't override this one.
+          // Use case: terminal 1 with INITIAL_ACCOUNT=1, terminal 2 with =2.
+          const initialAccountEnv = process.env.OPENCODE_ANTHROPIC_INITIAL_ACCOUNT?.trim();
+          if (initialAccountEnv && accountManager.getAccountCount() > 1) {
+            const accounts = accountManager.getEnabledAccounts();
+            let target = null;
+
+            // Try as 1-based index (use logical index, not array position — QA fix H5)
+            const asIndex = parseInt(initialAccountEnv, 10);
+            if (!isNaN(asIndex) && asIndex >= 1) {
+              target = accounts.find((a) => a.index === asIndex - 1) ?? null;
+            }
+
+            // Try as email
+            if (!target) {
+              target = accounts.find((a) => a.email && a.email.toLowerCase() === initialAccountEnv.toLowerCase());
+            }
+
+            if (target && accountManager.forceCurrentIndex(target.index)) {
+              config.account_selection_strategy = "sticky";
+              initialAccountPinned = true;
+              debugLog("OPENCODE_ANTHROPIC_INITIAL_ACCOUNT: pinned to account", {
+                index: target.index + 1,
+                email: target.email,
+                strategy: "sticky (overridden)",
+              });
+            } else {
+              debugLog("OPENCODE_ANTHROPIC_INITIAL_ACCOUNT: could not resolve account", initialAccountEnv);
+            }
+          }
+
+          // Initialize telemetry emitter
+          const telemetryEnabled =
+            config.telemetry?.emulate_minimal || isTruthyEnv(process.env.OPENCODE_ANTHROPIC_TELEMETRY_EMULATE);
+          const firstAccount = accountManager.getEnabledAccounts()[0];
+          telemetryEmitter.init({
+            enabled: telemetryEnabled,
+            deviceId: getOrCreateDeviceId(),
+            cliVersion: claudeCliVersion,
+            accountUuid: getAccountIdentifier(firstAccount),
+            orgUuid: process.env.CLAUDE_CODE_ORGANIZATION_UUID || "",
+            sessionId: signatureSessionId,
+          });
+
+          return {
+            apiKey: "",
+            /**
+             * @param {any} input
+             * @param {any} init
+             */
+            async fetch(input, init) {
+              // Re-read auth for non-oauth fallback
+              const currentAuth = await getAuth();
+              if (currentAuth.type !== "oauth") return fetch(input, init);
+
+              // Transform URL once (shared across retries)
+              const requestInit = init ?? {};
+              const { requestInput, requestUrl } = transformRequestUrl(input);
+              const requestMethod = String(
+                requestInit.method || (requestInput instanceof Request ? requestInput.method : "POST"),
+              ).toUpperCase();
+              let showUsageToast;
+              try {
+                showUsageToast = new URL(requestUrl).pathname === "/v1/messages" && requestMethod === "POST";
+              } catch {
+                showUsageToast = false;
+              }
+
+              let lastError = null;
+              const transientRefreshSkips = new Set();
+
+              // Sync with CLI changes at request start.
+              // Skip when OPENCODE_ANTHROPIC_INITIAL_ACCOUNT pinned this session —
+              // other sessions' CLI changes must not override the pinned account.
+              if (accountManager && !initialAccountPinned) {
+                await accountManager.syncActiveIndexFromDisk();
+              }
+
+              // Try each account at most once. If the error is account-specific,
+              // switch to the next account. If it's service-wide, return immediately.
+              // QA fix M9: use enabled account count, not total (disabled accounts can't serve requests)
+              const maxAttempts = Math.max(1, accountManager.getAccountCount());
+
+              // File-ID account pinning: if the request body references file_ids
+              // that we've mapped to a specific account (via /anthropic files),
+              // pin the first attempt to that account so files are accessible.
+              // Without this, round-robin could route to an account that doesn't
+              // have the referenced files, causing file_not_found errors.
+              let pinnedAccount = null;
+              if (typeof requestInit.body === "string" && fileAccountMap.size > 0) {
+                try {
+                  const bodyObj = JSON.parse(requestInit.body);
+                  const fileIds = extractFileIds(bodyObj);
+                  for (const fid of fileIds) {
+                    const pinnedIndex = fileAccountMap.get(fid);
+                    if (pinnedIndex !== undefined) {
+                      const candidates = accountManager.getEnabledAccounts();
+                      pinnedAccount = candidates.find((a) => a.index === pinnedIndex) ?? null;
+                      if (pinnedAccount) {
+                        debugLog("file-id pinning: routing to account", {
+                          fileId: fid,
+                          accountIndex: pinnedIndex,
+                          email: pinnedAccount.email,
+                        });
+                        break;
+                      }
+                    }
+                  }
+                } catch {
+                  // Non-JSON body or parse error — skip pinning
+                }
+              }
+
+              let serviceWideRetryCount = 0; // Track 529/503 retries (max 2 per RE doc §5.5)
+              let shouldRetryCount = 0; // Track x-should-retry forced retries (cap at 3)
+              for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                // Select account — use pinned account on first attempt if available
+                const account =
+                  attempt === 0 && pinnedAccount && !transientRefreshSkips.has(pinnedAccount.index)
+                    ? pinnedAccount
+                    : accountManager.getCurrentAccount(transientRefreshSkips);
+
+                // Toast account usage on first use and whenever the account changes
+                if (showUsageToast && account && accountManager) {
+                  const currentIndex = accountManager.getCurrentIndex();
+                  if (currentIndex !== lastToastedIndex) {
+                    const name = account.email || `Account ${currentIndex + 1}`;
+                    const total = accountManager.getAccountCount();
+                    const msg = total > 1 ? `Claude: ${name} (${currentIndex + 1}/${total})` : `Claude: ${name}`;
+                    await toast(msg, "info", { debounceKey: "account-usage" });
+                    lastToastedIndex = currentIndex;
+                  }
+                }
+
+                if (!account) {
+                  const enabledCount = accountManager.getAccountCount();
+                  if (enabledCount === 0) {
+                    throw new Error(
+                      "No enabled Anthropic accounts available. Enable one with 'opencode-anthropic-auth enable <N>'.",
+                    );
+                  }
+                  // All accounts excluded (transient refresh failures) — give up
+                  throw new Error("No available Anthropic account for request.");
+                }
+
+                // Determine access token
+                let accessToken;
+                // Per-account token refresh
+                // Refresh 5 minutes before expiry to avoid mid-request token expiration (RE doc §1.10)
+                if (!account.access || !account.expires || account.expires < Date.now() + 300_000) {
+                  const attemptedRefreshToken = account.refreshToken;
+                  try {
+                    accessToken = await refreshAccountTokenSingleFlight(account);
+                    // Tokens are now saved under the refresh lock (inside
+                    // refreshAccountToken) so no debounced save needed here.
+                  } catch (err) {
+                    // Token refresh failed — check if another instance rotated the
+                    // refresh token and persisted it between attempts.
+                    let finalError = err;
+                    let details = parseRefreshFailure(err);
+
+                    // Belt-and-suspenders retry: on terminal/invalid_grant failures,
+                    // always re-read disk token and retry once before disabling.
+                    if (details.isInvalidGrant || details.isTerminalStatus) {
+                      const diskAuth = await readDiskAccountAuth(account.id);
+                      const retryToken = diskAuth?.refreshToken;
+                      if (
+                        retryToken &&
+                        retryToken !== attemptedRefreshToken &&
+                        account.refreshToken === attemptedRefreshToken
+                      ) {
+                        debugLog("refresh token on disk differs from in-memory, retrying with disk token", {
+                          accountIndex: account.index,
+                        });
+                        account.refreshToken = retryToken;
+                        if (diskAuth?.tokenUpdatedAt) {
+                          account.tokenUpdatedAt = diskAuth.tokenUpdatedAt;
+                        } else {
+                          markTokenStateUpdated(account);
+                        }
+                      } else if (retryToken && retryToken !== attemptedRefreshToken) {
+                        debugLog("skipping disk token adoption because in-memory token already changed", {
+                          accountIndex: account.index,
+                        });
+                      }
+
+                      try {
+                        accessToken = await refreshAccountTokenSingleFlight(account);
+                      } catch (retryErr) {
+                        finalError = retryErr;
+                        details = parseRefreshFailure(retryErr);
+                        debugLog("retry refresh failed", {
+                          accountIndex: account.index,
+                          status: details.status,
+                          errorCode: details.errorCode,
+                          message: details.message,
+                        });
+                      }
+                    }
+
+                    if (!accessToken) {
+                      if (details.isRateLimitStatus) {
+                        const backoffMs = accountManager.markRateLimited(
+                          account,
+                          "RATE_LIMIT_EXCEEDED",
+                          details.retryAfterMs,
+                        );
+                        debugLog("oauth refresh rate limited", {
+                          accountIndex: account.index,
+                          retryAfterMs: details.retryAfterMs,
+                          retryAfterSource: details.retryAfterSource,
+                        });
+                        transientRefreshSkips.add(account.index);
+                        const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
+                        await toast(
+                          `${name} OAuth refresh rate-limited; pausing ${Math.ceil(backoffMs / 1000)}s`,
+                          "warning",
+                        );
+                      } else {
+                        accountManager.markFailure(account);
+                      }
+
+                      if (details.isInvalidGrant || details.isTerminalStatus) {
+                        const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
+                        debugLog("disabling account after terminal refresh failure", {
+                          accountIndex: account.index,
+                          status: details.status,
+                          errorCode: details.errorCode,
+                          message: details.message,
+                        });
+                        account.enabled = false;
+                        accountManager.requestSaveToDisk();
+                        const statusLabel = Number.isFinite(details.status)
+                          ? `HTTP ${details.status}`
+                          : "unknown status";
+                        await toast(
+                          `Disabled ${name} (token refresh failed: ${details.errorCode || statusLabel})`,
+                          "error",
+                        );
+                      } else if (!details.isRateLimitStatus) {
+                        // Skip this account for the remainder of this request.
+                        transientRefreshSkips.add(account.index);
+                      }
+                      lastError = finalError;
+                      continue; // Try next account
+                    }
+                  }
+                } else {
+                  accessToken = account.access;
+                }
+
+                // Store live token for exit telemetry
+                if (accessToken) liveTokenRef.token = accessToken;
+
+                // Keep non-active accounts warm without blocking the request.
+                maybeRefreshIdleAccounts(account);
+
+                // Pre-compute the beta header so it can be injected into both the
+                // request body (betas field) and the anthropic-beta header.
+                const { model: _reqModel, hasFileReferences: _reqHasFileRefs } = parseRequestBodyMetadata(
+                  requestInit.body,
+                );
+                const _reqProvider = detectProvider(requestUrl);
+                const computedBetaHeader = buildAnthropicBetaHeader(
+                  "",
+                  getSignatureEmulationEnabled(),
+                  _reqModel,
+                  _reqProvider,
+                  config.custom_betas,
+                  getEffectiveStrategy(),
+                  requestUrl?.pathname,
+                  _reqHasFileRefs,
+                );
+
+                const body = transformRequestBody(
+                  requestInit.body,
+                  {
+                    enabled: getSignatureEmulationEnabled(),
+                    claudeCliVersion,
+                    promptCompactionMode: getPromptCompactionMode(),
+                    provider: _reqProvider,
+                    cachePolicy: config.cache_policy || { ttl: "1h", ttl_supported: true },
+                    fastMode: config.fast_mode || false,
+                  },
+                  {
+                    persistentUserId: signatureUserId,
+                    sessionId: signatureSessionId,
+                    accountId: getAccountIdentifier(account),
+                  },
+                  computedBetaHeader,
+                );
+                logTransformedSystemPrompt(body);
+
+                // Build headers with the selected account's token
+                const requestHeaders = buildRequestHeaders(input, requestInit, accessToken, body, requestUrl, {
+                  enabled: getSignatureEmulationEnabled(),
+                  claudeCliVersion,
+                  customBetas: config.custom_betas,
+                  strategy: getEffectiveStrategy(),
+                });
+                // Execute the request
+                let response;
+                try {
+                  response = await fetch(requestInput, {
+                    ...requestInit,
+                    body,
+                    headers: requestHeaders,
+                  });
+                } catch (err) {
+                  const fetchError = err instanceof Error ? err : new Error(String(err));
+
+                  if (accountManager && account) {
+                    accountManager.markFailure(account);
+                    transientRefreshSkips.add(account.index);
+                    lastError = fetchError;
+                    debugLog("request fetch threw, trying next account", {
+                      accountIndex: account.index,
+                      message: fetchError.message,
+                    });
+                    continue;
+                  }
+
+                  throw fetchError;
+                }
+
+                // Proactive rate limit detection from response headers
+                // Check all rate-limit subtypes: tokens, requests, input-tokens (RE doc §5.6)
+                if (response.ok && account && accountManager) {
+                  const RATE_LIMIT_SUBTYPES = ["tokens", "requests", "input-tokens"];
+                  let maxUtilization = 0;
+                  let maxUtilizationSubtype = "";
+                  let anySurpassed = false;
+                  let surpassedResetAt = null;
+
+                  for (const subtype of RATE_LIMIT_SUBTYPES) {
+                    const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${subtype}-utilization`);
+                    const surpassed = response.headers.get(
+                      `anthropic-ratelimit-unified-${subtype}-surpassed-threshold`,
+                    );
+                    const resetAt = response.headers.get(`anthropic-ratelimit-unified-${subtype}-reset`);
+
+                    if (utilizationStr) {
+                      const utilization = parseFloat(utilizationStr);
+                      if (!isNaN(utilization)) {
+                        // Store per-subtype quota for user display
+                        if (subtype === "tokens") sessionMetrics.lastQuota.tokens = utilization;
+                        else if (subtype === "requests") sessionMetrics.lastQuota.requests = utilization;
+                        else if (subtype === "input-tokens") sessionMetrics.lastQuota.inputTokens = utilization;
+                        sessionMetrics.lastQuota.updatedAt = Date.now();
+
+                        if (utilization > maxUtilization) {
+                          maxUtilization = utilization;
+                          maxUtilizationSubtype = subtype;
+                        }
+                      }
+                    }
+
+                    if (surpassed) {
+                      anySurpassed = true;
+                      surpassedResetAt = surpassedResetAt || resetAt;
+                    }
+                  }
+
+                  if (maxUtilization > 0.8) {
+                    const penalty = Math.round((maxUtilization - 0.8) * 50); // 0-10 points
+                    accountManager.applyUtilizationPenalty(account, penalty);
+                    debugLog("high rate limit utilization", {
+                      accountIndex: account.index,
+                      subtype: maxUtilizationSubtype,
+                      utilization: (maxUtilization * 100).toFixed(1) + "%",
+                      penalty,
+                    });
+                  }
+
+                  if (anySurpassed) {
+                    accountManager.applySurpassedThreshold(account, surpassedResetAt);
+                    debugLog("rate limit threshold surpassed", {
+                      accountIndex: account.index,
+                      resetAt: surpassedResetAt,
+                    });
+                  }
+
+                  // Toast at 90%+ utilization to warn user before rate limit hits
+                  if (maxUtilization >= 0.9 && !config.toasts?.quiet) {
+                    toast(
+                      `Rate limit ${maxUtilizationSubtype}: ${(maxUtilization * 100).toFixed(0)}% utilized`,
+                      "warning",
+                      { debounceKey: "quota-warn" },
+                    ).catch(() => {});
+                  }
+                }
+
+                // On error, check if it's account-specific or service-wide
+                if (!response.ok && accountManager && account) {
+                  let errorBody = null;
+                  try {
+                    errorBody = await response.clone().text();
+                  } catch {
+                    // Ignore read errors in debug logging path.
+                  }
+
+                  // Auto-disable extended cache TTL if the API rejects it with a 400
+                  if (
+                    response.status === 400 &&
+                    errorBody &&
+                    (errorBody.includes("ttl") || errorBody.includes("cache_control"))
+                  ) {
+                    if (config.cache_policy && config.cache_policy.ttl_supported !== false) {
+                      config.cache_policy.ttl_supported = false;
+                      saveConfig({ cache_policy: { ttl_supported: false } });
+                      debugLog("cache TTL not supported by API, auto-disabled");
+                    }
+                  }
+
+                  // Auto-disable fast mode if the API rejects speed parameter
+                  if (response.status === 400 && errorBody && errorBody.includes("speed")) {
+                    if (config.fast_mode) {
+                      config.fast_mode = false;
+                      saveConfig({ fast_mode: false });
+                      debugLog("fast mode not supported by API, auto-disabled");
+                    }
+                  }
+
+                  // Check x-should-retry header first — server override
+                  const shouldRetry = parseShouldRetryHeader(response);
+                  if (shouldRetry === false) {
+                    // Server says DO NOT retry — return error directly
+                    debugLog("x-should-retry: false — not retrying", { status: response.status });
+                    return transformResponse(response);
+                  }
+
+                  const accountSpecific = isAccountSpecificError(response.status, errorBody);
+
+                  // x-should-retry: true forces a retry for service-wide errors (RE doc §5.5)
+                  // Capped at 3 retries to prevent infinite loops (QA fix C1)
+                  if (shouldRetry === true && !accountSpecific && shouldRetryCount < 3) {
+                    shouldRetryCount++;
+                    const retryDelay = parseRetryAfterMsHeader(response) ?? parseRetryAfterHeader(response) ?? 2000;
+                    debugLog("x-should-retry: true on service-wide error, sleeping before retry", {
+                      status: response.status,
+                      retryDelay,
+                      shouldRetryCount,
+                    });
+                    await new Promise((r) => setTimeout(r, retryDelay));
+                    // Decrement attempt so this retry doesn't consume an account slot
+                    attempt--;
+                    continue;
+                  }
+
+                  // Account-specific errors (429/401/billing/permission)
+                  if (accountSpecific) {
+                    const reason = parseRateLimitReason(response.status, errorBody);
+                    const retryAfterMs = parseRetryAfterMsHeader(response) ?? parseRetryAfterHeader(response);
+                    accountManager.markRateLimited(account, reason, retryAfterMs);
+
+                    // On auth failures, clear token so next selection forces refresh
+                    if (reason === "AUTH_FAILED") {
+                      account.access = "";
+                      account.expires = 0;
+                    }
+
+                    // Strategy adaptation: record account-specific throttling signal
+                    recordRateLimitForStrategy();
+
+                    const accountName = account.email || `Account ${account.index + 1}`;
+                    const lowerBody = String(errorBody || "").toLowerCase();
+                    const switchMsg =
+                      response.status === 403 || lowerBody.includes("permission")
+                        ? `permission denied on ${accountName}; switching account`
+                        : reason === "AUTH_FAILED"
+                          ? `authentication failed on ${accountName}; switching account`
+                          : reason === "QUOTA_EXHAUSTED"
+                            ? `quota exhausted on ${accountName}; switching account`
+                            : `Rate limited on ${accountName}; switching account`;
+                    toast(switchMsg, "warning", {
+                      debounceKey: "switch-account",
+                    }).catch(() => {});
+                    continue;
+                  }
+
+                  // 529 (overloaded) and 503 (service unavailable) — brief sleep-and-retry
+                  // per RE doc §5.5 (Stainless SDK retries 500+ codes up to 2 times)
+                  if ((response.status === 529 || response.status === 503) && serviceWideRetryCount < 2) {
+                    serviceWideRetryCount++;
+                    const baseDelay = Math.min(0.5 * Math.pow(2, serviceWideRetryCount), 8);
+                    const jitter = 1 - Math.random() * 0.25;
+                    const sleepMs = Math.round(baseDelay * jitter * 1000);
+                    debugLog("service-wide retryable error, sleeping before retry", {
+                      status: response.status,
+                      attempt: serviceWideRetryCount,
+                      sleepMs,
+                    });
+                    await new Promise((r) => setTimeout(r, sleepMs));
+                    // Decrement attempt so this retry doesn't consume an account slot
+                    attempt--;
+                    continue;
+                  }
+
+                  // Non-retryable service-wide error — return to caller
+                  debugLog("service-wide response error, returning directly", {
+                    status: response.status,
+                  });
+                  return transformResponse(response);
+                }
+
+                // Success
+                if (account && accountManager) {
+                  if (response.ok) {
+                    accountManager.markSuccess(account);
+                    checkStrategyRecovery();
+
+                    // Fire startup telemetry (once per session, after first success)
+                    if (telemetryEmitter.enabled && account?.access) {
+                      telemetryEmitter.sendStartupEvents(account.access).catch(() => {});
+                    }
+                  }
+                }
+
+                // Wire usage tracking and mid-stream error detection for SSE responses only.
+                const shouldInspectStream = response.ok && account && accountManager && isEventStreamResponse(response);
+
+                const usageCallback = shouldInspectStream
+                  ? (/** @type {UsageStats} */ usage) => {
+                      accountManager.recordUsage(account.index, usage);
+                      // Phase 4: session metrics
+                      updateSessionMetrics(usage, _reqModel);
+                      // Cache hit rate warning
+                      if (sessionMetrics.turns >= 3) {
+                        const avgRate = getAverageCacheHitRate();
+                        const threshold = config.cache_policy?.hit_rate_warning_threshold ?? 0.3;
+                        if (avgRate < threshold) {
+                          debugLog("low cache hit rate", {
+                            avgRate: (avgRate * 100).toFixed(1) + "%",
+                            turns: sessionMetrics.turns,
+                          });
+                        }
+                      }
+                      // Budget warning
+                      const maxBudget = parseFloat(process.env.OPENCODE_ANTHROPIC_MAX_BUDGET_USD || "0");
+                      if (maxBudget > 0) {
+                        const pct = sessionMetrics.sessionCostUsd / maxBudget;
+                        if (pct >= 1.0 && !isTruthyEnv(process.env.OPENCODE_ANTHROPIC_IGNORE_BUDGET)) {
+                          toast(
+                            `Session budget exceeded ($${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)})`,
+                            "warning",
+                            { debounceKey: "budget" },
+                          ).catch(() => {});
+                        } else if (pct >= 0.8) {
+                          toast(
+                            `Session at ${(pct * 100).toFixed(0)}% of budget ($${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)})`,
+                            "warning",
+                            { debounceKey: "budget" },
+                          ).catch(() => {});
+                        }
+                      }
+                      // Per-turn usage toast (opt-in via /anthropic set usage-toast on)
+                      if (config.usage_toast) {
+                        const turnCost = calculateCostUsd(usage, _reqModel);
+                        const totalTok =
+                          usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+                        const parts = [`${totalTok.toLocaleString()} tok`];
+                        if (usage.cacheReadTokens > 0) {
+                          const cacheHit =
+                            totalTok > 0
+                              ? (
+                                  (usage.cacheReadTokens /
+                                    (usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens)) *
+                                  100
+                                ).toFixed(0)
+                              : "0";
+                          parts.push(`${cacheHit}% cache`);
+                        }
+                        if (usage.webSearchRequests > 0) parts.push(`${usage.webSearchRequests} search`);
+                        parts.push(`$${turnCost.toFixed(4)}`);
+                        toast(parts.join(" | "), "info", { debounceKey: `usage-turn-${sessionMetrics.turns}` }).catch(
+                          () => {},
+                        );
+                      }
+                    }
+                  : null;
+
+                const accountErrorCallback = shouldInspectStream
+                  ? (details) => {
+                      // details already come from getMidStreamAccountError(), which filters
+                      // service-wide errors and returns only account-specific cases.
+
+                      // Mark the account for the NEXT request
+                      accountManager.markRateLimited(account, details.reason, null);
+
+                      // Mid-stream auth errors must invalidate current token so next turn refreshes.
+                      if (details.invalidateToken) {
+                        account.access = "";
+                        account.expires = 0;
+                      }
+
+                      const name = account.email || `Account ${account.index + 1}`;
+                      const switchMsg =
+                        details.reason === "AUTH_FAILED"
+                          ? `authentication failed on ${name}; switching account`
+                          : details.reason === "QUOTA_EXHAUSTED"
+                            ? `quota exhausted on ${name}; switching account`
+                            : `Rate limited on ${name}; switching account`;
+                      toast(switchMsg, "warning", {
+                        debounceKey: "switch-account",
+                      }).catch(() => {});
+                    }
+                  : null;
+
+                return transformResponse(response, usageCallback, accountErrorCallback);
+              }
+
+              // All accounts tried
+              if (lastError) throw lastError;
+              throw new Error("All accounts exhausted — no account could serve this request");
+            },
+          };
+        }
+
+        return {};
+      },
+      methods: [
+        {
+          // H1: Claude Pro/Max OAuth — now with multi-account support
+          label: "Claude Pro/Max (multi-account)",
+          type: "oauth",
+          authorize: async () => {
+            // Check for existing accounts
+            const stored = await loadAccounts();
+            if (stored && stored.accounts.length > 0 && accountManager) {
+              const action = await promptAccountMenu(accountManager);
+
+              if (action === "cancel") {
+                return {
+                  url: "about:blank",
+                  instructions: "Cancelled.",
+                  method: "code",
+                  callback: async () => ({ type: "failed" }),
+                };
+              }
+
+              if (action === "manage") {
+                await promptManageAccounts(accountManager);
+                await accountManager.saveToDisk();
+                return {
+                  url: "about:blank",
+                  instructions: "Account management complete. Re-run auth to add accounts.",
+                  method: "code",
+                  callback: async () => ({ type: "failed" }),
+                };
+              }
+
+              if (action === "fresh") {
+                await clearAccounts();
+                accountManager.clearAll();
+              }
+
+              // action === "add" or "fresh" — fall through to OAuth flow
+            }
+
+            const { url, verifier } = await oauthAuthorize("max");
+            return {
+              url: url,
+              instructions: "Paste the authorization code here: ",
+              method: "code",
+              callback: async (code) => {
+                const credentials = await oauthExchange(code, verifier);
+                if (credentials.type === "failed") return credentials;
+
+                // Initialize AccountManager if not yet loaded (first login —
+                // loader() hasn't run yet because auth hasn't completed)
+                if (!accountManager) {
+                  accountManager = await AccountManager.load(config, null);
+                }
+
+                // Add to account pool and persist immediately
+                const countBefore = accountManager.getAccountCount();
+                accountManager.addAccount(
+                  credentials.refresh,
+                  credentials.access,
+                  credentials.expires,
+                  credentials.email,
+                );
+                await accountManager.saveToDisk();
+
+                // Toast the result
+                const total = accountManager.getAccountCount();
+                const name = credentials.email || "account";
+                if (countBefore > 0) {
+                  await toast(`Added ${name} — ${total} accounts`, "success");
+                } else {
+                  await toast(`Authenticated (${name})`, "success");
+                }
+
+                return credentials;
+              },
+            };
+          },
+        },
+        {
+          // H2: Create an API Key (unchanged)
+          label: "Create an API Key",
+          type: "oauth",
+          authorize: async () => {
+            const { url, verifier } = await oauthAuthorize("console");
+            return {
+              url: url,
+              instructions: "Paste the authorization code here: ",
+              method: "code",
+              callback: async (code) => {
+                const credentials = await oauthExchange(code, verifier);
+                if (credentials.type === "success") {
+                  const result = await fetch(`https://api.anthropic.com/api/oauth/claude_cli/create_api_key`, {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      authorization: `Bearer ${credentials.access}`,
+                    },
+                  }).then((r) => r.json());
+                  return { type: "success", key: result.raw_key };
+                }
+                return credentials;
+              },
+            };
+          },
+        },
+        {
+          // H3: Manual API Key (unchanged)
+          provider: "anthropic",
+          label: "Manually enter API Key",
+          type: "api",
+        },
+      ],
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Session-level cache & cost tracking (Phase 4)
 // ---------------------------------------------------------------------------
 
-/** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, recentCacheRates: number[], sessionCostUsd: number}} */
+/** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, totalWebSearchRequests: number, recentCacheRates: number[], sessionCostUsd: number, costBreakdown: {input: number, output: number, cacheRead: number, cacheWrite: number}, sessionStartTime: number, lastQuota: {tokens: number, requests: number, inputTokens: number, updatedAt: number}}} */
 const sessionMetrics = {
   turns: 0,
   totalInput: 0,
   totalOutput: 0,
   totalCacheRead: 0,
   totalCacheWrite: 0,
+  totalWebSearchRequests: 0,
   recentCacheRates: [], // rolling window of last 5 turns
   sessionCostUsd: 0,
+  costBreakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  sessionStartTime: Date.now(),
+  lastQuota: { tokens: 0, requests: 0, inputTokens: 0, updatedAt: 0 },
 };
 
 const MODEL_PRICING = {
@@ -150,11 +2471,27 @@ function getModelPricing(model) {
 function calculateCostUsd(usage, model) {
   const p = getModelPricing(model);
   return (
-    (usage.inputTokens / 1_000_000) * p.input +
-    (usage.outputTokens / 1_000_000) * p.output +
-    (usage.cacheReadTokens / 1_000_000) * p.cacheRead +
-    (usage.cacheWriteTokens / 1_000_000) * p.cacheWrite
+    ((usage.inputTokens || 0) / 1_000_000) * p.input +
+    ((usage.outputTokens || 0) / 1_000_000) * p.output +
+    ((usage.cacheReadTokens || 0) / 1_000_000) * p.cacheRead +
+    ((usage.cacheWriteTokens || 0) / 1_000_000) * p.cacheWrite
   );
+}
+
+/**
+ * Calculate cost breakdown by category.
+ * @param {UsageStats} usage
+ * @param {string} model
+ * @returns {{input: number, output: number, cacheRead: number, cacheWrite: number}}
+ */
+function calculateCostBreakdown(usage, model) {
+  const p = getModelPricing(model);
+  return {
+    input: ((usage.inputTokens || 0) / 1_000_000) * p.input,
+    output: ((usage.outputTokens || 0) / 1_000_000) * p.output,
+    cacheRead: ((usage.cacheReadTokens || 0) / 1_000_000) * p.cacheRead,
+    cacheWrite: ((usage.cacheWriteTokens || 0) / 1_000_000) * p.cacheWrite,
+  };
 }
 
 /**
@@ -168,6 +2505,7 @@ function updateSessionMetrics(usage, model) {
   sessionMetrics.totalOutput += usage.outputTokens;
   sessionMetrics.totalCacheRead += usage.cacheReadTokens;
   sessionMetrics.totalCacheWrite += usage.cacheWriteTokens;
+  sessionMetrics.totalWebSearchRequests += usage.webSearchRequests || 0;
 
   // Cache hit rate for this turn
   const totalPrompt = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
@@ -177,7 +2515,14 @@ function updateSessionMetrics(usage, model) {
     sessionMetrics.recentCacheRates.shift();
   }
 
-  // Cost
+  // Cost breakdown
+  const breakdown = calculateCostBreakdown(usage, model);
+  sessionMetrics.costBreakdown.input += breakdown.input;
+  sessionMetrics.costBreakdown.output += breakdown.output;
+  sessionMetrics.costBreakdown.cacheRead += breakdown.cacheRead;
+  sessionMetrics.costBreakdown.cacheWrite += breakdown.cacheWrite;
+
+  // Total cost
   sessionMetrics.sessionCostUsd += calculateCostUsd(usage, model);
 }
 
@@ -365,8 +2710,8 @@ const SESSION_START_TIME = Date.now();
 /** @type {{ token: string }} Mutable ref to latest live access token for exit telemetry */
 const liveTokenRef = { token: "" };
 
-// Best-effort exit telemetry
-process.on("beforeExit", () => {
+// Best-effort exit telemetry (QA fix M10: use 'once' to prevent listener stacking on re-import)
+process.once("beforeExit", () => {
   const duration = Date.now() - SESSION_START_TIME;
   telemetryEmitter.sendExitEvent(liveTokenRef.token, duration).catch(() => {});
 });
@@ -375,15 +2720,16 @@ process.on("beforeExit", () => {
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.80";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.81";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 
-// The @anthropic-ai/sdk version bundled with Claude Code v2.1.80.
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.81.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
 const ANTHROPIC_SDK_VERSION = "0.52.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.81", "0.52.0"],
   ["2.1.80", "0.52.0"],
   ["2.1.79", "0.51.0"],
 ]);
@@ -397,6 +2743,42 @@ const CLI_TO_SDK_VERSION = new Map([
 function getSdkVersion(cliVersion) {
   return CLI_TO_SDK_VERSION.get(cliVersion) ?? ANTHROPIC_SDK_VERSION;
 }
+const BILLING_HASH_SALT = "59cf53e54c78";
+const BILLING_HASH_INDICES = [4, 7, 20];
+
+/**
+ * Compute the billing cache hash (cch) matching Claude Code's NP1() function.
+ * SHA256(salt + chars_at_indices[4,7,20]_from_first_user_msg + version).slice(0,3)
+ * @param {string} firstUserMessage
+ * @param {string} version
+ * @returns {string}
+ */
+function computeBillingCacheHash(firstUserMessage, version) {
+  const chars = BILLING_HASH_INDICES.map((i) => firstUserMessage[i] || "0").join("");
+  const input = `${BILLING_HASH_SALT}${chars}${version}`;
+  return createHashCrypto("sha256").update(input).digest("hex").slice(0, 3);
+}
+
+/**
+ * Extract the text content of the first user message for billing hash computation.
+ * @param {any[] | undefined} messages
+ * @returns {string}
+ */
+function extractFirstUserMessageText(messages) {
+  if (!Array.isArray(messages)) return "";
+  for (const msg of messages) {
+    if (msg.role !== "user") continue;
+    if (typeof msg.content === "string") return msg.content;
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === "text" && typeof block.text === "string") return block.text;
+      }
+    }
+    return "";
+  }
+  return "";
+}
+
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
 const EFFORT_BETA_FLAG = "effort-2025-11-24";
 const ADVANCED_TOOL_USE_BETA_FLAG = "advanced-tool-use-2025-11-20";
@@ -415,6 +2797,7 @@ const BEDROCK_UNSUPPORTED_BETAS = new Set([
   "tool-examples-2025-10-29",
   "code-execution-2025-08-25",
   "files-api-2025-04-14",
+  "fine-grained-tool-streaming-2025-05-14",
 ]);
 const EXPERIMENTAL_BETA_FLAGS = new Set([
   "adaptive-thinking-2026-01-28",
@@ -464,6 +2847,41 @@ const COMPACT_TITLE_GENERATOR_SYSTEM_PROMPT = [
 ].join("\n");
 
 /**
+ * Returns the persistent device ID (64-char hex string).
+ * Migrates legacy UUID-format values to the new 64-hex format automatically.
+ * @returns {string}
+ */
+function getOrCreateDeviceId() {
+  const configDir = getConfigDir();
+  const userIdPath = join(configDir, USER_ID_STORAGE_FILE);
+
+  try {
+    if (existsSync(userIdPath)) {
+      const existing = readFileSync(userIdPath, "utf-8").trim();
+      if (existing && /^[0-9a-f]{64}$/.test(existing)) return existing;
+    }
+  } catch {
+    // fall through and generate a new id
+  }
+
+  const generated = randomBytes(32).toString("hex");
+  try {
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(userIdPath, `${generated}\n`, { encoding: "utf-8", mode: 0o600 });
+  } catch {
+    // Ignore filesystem errors; caller still gets generated ID for this runtime.
+  }
+  return generated;
+}
+
+/**
+ * @returns {boolean}
+ */
+function shouldDebugSystemPrompt() {
+  return isTruthyEnv(process.env[DEBUG_SYSTEM_PROMPT_ENV]);
+}
+
+/**
  * @param {string | undefined} value
  * @returns {boolean}
  */
@@ -500,35 +2918,6 @@ function resolveBetaShortcut(value) {
 function isNonInteractiveMode() {
   if (isTruthyEnv(process.env.CI)) return true;
   return !process.stdout.isTTY;
-}
-
-/**
- * @returns {string}
- */
-function getClaudeEntrypoint() {
-  return process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
-}
-
-/**
- * @param {string} claudeCliVersion
- * @returns {string}
- */
-function buildUserAgent(claudeCliVersion) {
-  const sdkSuffix = process.env.CLAUDE_AGENT_SDK_VERSION ? `, agent-sdk/${process.env.CLAUDE_AGENT_SDK_VERSION}` : "";
-  const appSuffix = process.env.CLAUDE_AGENT_SDK_CLIENT_APP
-    ? `, client-app/${process.env.CLAUDE_AGENT_SDK_CLIENT_APP}`
-    : "";
-  return `claude-cli/${claudeCliVersion} (external, ${getClaudeEntrypoint()}${sdkSuffix}${appSuffix})`;
-}
-
-/**
- * Build the minimal User-Agent for OAuth/token endpoints.
- * Claude Code sends "claude-code/{version}" on token exchange/refresh.
- * @param {string} version
- * @returns {string}
- */
-function buildMinimalUserAgent(version) {
-  return `claude-code/${version}`;
 }
 
 /**
@@ -570,43 +2959,15 @@ function parseAnthropicCustomHeaders() {
 }
 
 /**
- * Returns the persistent device ID (64-char hex string).
- * Migrates legacy UUID-format values to the new 64-hex format automatically.
  * @returns {string}
  */
-function getOrCreateDeviceId() {
-  const configDir = getConfigDir();
-  const userIdPath = join(configDir, USER_ID_STORAGE_FILE);
-
-  try {
-    if (existsSync(userIdPath)) {
-      const existing = readFileSync(userIdPath, "utf-8").trim();
-      // Accept only valid 64-char lowercase hex; UUID (36 chars with dashes) triggers migration.
-      if (existing && /^[0-9a-f]{64}$/.test(existing)) return existing;
-    }
-  } catch {
-    // fall through and generate a new id
-  }
-
-  const generated = randomBytes(32).toString("hex");
-  try {
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(userIdPath, `${generated}\n`, { encoding: "utf-8", mode: 0o600 });
-  } catch {
-    // Ignore filesystem errors; caller still gets generated ID for this runtime.
-  }
-  return generated;
-}
-
-/**
- * @returns {boolean}
- */
-function shouldDebugSystemPrompt() {
-  return isTruthyEnv(process.env[DEBUG_SYSTEM_PROMPT_ENV]);
+function getClaudeEntrypoint() {
+  return process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
 }
 
 /**
  * @param {string | undefined} body
+ * @returns {string | undefined}
  */
 function logTransformedSystemPrompt(body) {
   if (!shouldDebugSystemPrompt()) return;
@@ -626,7 +2987,7 @@ function logTransformedSystemPrompt(body) {
 }
 
 /**
- * @param {string} model
+ * @param {string | undefined} body
  * @returns {boolean}
  */
 function isHaikuModel(model) {
@@ -634,7 +2995,7 @@ function isHaikuModel(model) {
 }
 
 /**
- * @param {string} model
+ * @param {string | undefined} body
  * @returns {boolean}
  */
 function supportsThinking(model) {
@@ -646,7 +3007,7 @@ function supportsThinking(model) {
  * Detects claude-opus-4.6 / claude-opus-4-6 model IDs.
  * These models use adaptive thinking (effort parameter) instead of
  * manual budgetTokens.
- * @param {string} model
+ * @param {string | undefined} body
  * @returns {boolean}
  */
 function isOpus46Model(model) {
@@ -659,7 +3020,7 @@ function isOpus46Model(model) {
 
 /**
  * Detects claude-sonnet-4.6 / claude-sonnet-4-6 model IDs.
- * @param {string} model
+ * @param {string | undefined} body
  * @returns {boolean}
  */
 function isSonnet46Model(model) {
@@ -670,7 +3031,7 @@ function isSonnet46Model(model) {
 /**
  * Detects models that support adaptive thinking ({type: "adaptive"}).
  * Currently: Opus 4.6 and Sonnet 4.6.
- * @param {string} model
+ * @param {string | undefined} body
  * @returns {boolean}
  */
 function isAdaptiveThinkingModel(model) {
@@ -678,7 +3039,7 @@ function isAdaptiveThinkingModel(model) {
 }
 
 /**
- * @param {string} model
+ * @param {string | undefined} body
  * @returns {boolean}
  */
 function hasOneMillionContext(model) {
@@ -687,7 +3048,7 @@ function hasOneMillionContext(model) {
 }
 
 /**
- * @param {string} model
+ * @param {string | undefined} body
  * @returns {boolean}
  */
 function supportsStructuredOutputs(model) {
@@ -696,7 +3057,7 @@ function supportsStructuredOutputs(model) {
 }
 
 /**
- * @param {string} model
+ * @param {string | undefined} body
  * @returns {boolean}
  */
 function supportsWebSearch(model) {
@@ -717,7 +3078,7 @@ function detectProvider(requestUrl) {
 }
 
 /**
- * @param {string | undefined} body
+ * @param {any} body
  * @returns {{model: string, tools: any[], messages: any[], hasFileReferences: boolean}}
  */
 function parseRequestBodyMetadata(body) {
@@ -818,20 +3179,24 @@ function buildRequestMetadata(input) {
 
 /**
  * Build the billing header block for Claude Code system prompt injection.
- * Claude Code v2.1.80: cch=00000 (hardcoded), cc_version includes model ID.
+ * Claude Code v2.1.81: cch computed via NP1() from first user message, cc_version includes model ID.
  *
- * @param {string} version - CLI version (e.g., "2.1.80")
+ * @param {string} version - CLI version (e.g., "2.1.81")
  * @param {string} [modelId] - Model ID to append (e.g., "claude-opus-4-6")
+ * @param {string} [firstUserMessage] - First user message text for cch hash computation
  * @returns {string}
  */
-function buildAnthropicBillingHeader(version, modelId) {
+function buildAnthropicBillingHeader(version, modelId, firstUserMessage) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
   const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "unknown";
   const ccVersion = modelId ? `${version}.${modelId}` : version;
-  let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint}; cch=00000;`;
+  const cch = firstUserMessage ? computeBillingCacheHash(firstUserMessage, version) : "00000";
+  let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint}; cch=${cch};`;
   const workload = process.env.CLAUDE_CODE_WORKLOAD;
   if (workload) {
-    header = header.replace(/;$/, ` cc_workload=${workload};`);
+    // QA fix M5: sanitize workload value to prevent header injection
+    const safeWorkload = workload.replace(/[;\s\r\n]/g, "_");
+    header = header.replace(/;$/, ` cc_workload=${safeWorkload};`);
   }
   return header;
 }
@@ -841,7 +3206,8 @@ function buildAnthropicBillingHeader(version, modelId) {
  * @returns {string}
  */
 function sanitizeSystemText(text) {
-  return text.replace(/OpenCode/g, "Claude Code").replace(/opencode/gi, "Claude");
+  // QA fix M4: use word boundaries to avoid mangling URLs and code identifiers
+  return text.replace(/\bOpenCode\b/g, "Claude Code").replace(/\bopencode\b/gi, "Claude");
 }
 
 /**
@@ -1016,7 +3382,11 @@ function buildSystemPromptBlocks(system, signature) {
   );
 
   const blocks = [];
-  const billingHeader = buildAnthropicBillingHeader(signature.claudeCliVersion, signature.modelId);
+  const billingHeader = buildAnthropicBillingHeader(
+    signature.claudeCliVersion,
+    signature.modelId,
+    signature.firstUserMessage,
+  );
   if (billingHeader) {
     // Billing header: no cache_control (null scope — never cached)
     blocks.push({ type: "text", text: billingHeader });
@@ -1134,7 +3504,7 @@ function buildAnthropicBetaHeader(
   const haiku = isHaikuModel(model);
   const isRoundRobin = strategy === "round-robin";
 
-  // === ALWAYS-ON BETAS (Claude Code v2.1.80 base set) ===
+  // === ALWAYS-ON BETAS (Claude Code v2.1.81 base set) ===
   // These are ALWAYS included regardless of env vars or feature flags.
   if (!haiku) {
     betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"
@@ -1241,14 +3611,8 @@ function budgetTokensToEffort(budgetTokens) {
   return "high";
 }
 
-/**
- * Validate that a given value is a valid ThinkingEffort string.
- * @param {unknown} value
- * @returns {value is ThinkingEffort}
- */
-function isValidEffort(value) {
-  return value === "low" || value === "medium" || value === "high";
-}
+// QA fix L3: budgetTokensToEffort() removed — dead code, never called
+// QA fix L4: isValidEffort() removed — dead code, never called
 
 /**
  * Normalise the `thinking` block in the request body for the target model:
@@ -1265,7 +3629,7 @@ function normalizeThinkingBlock(thinking, model) {
     return thinking;
   }
 
-  // Adaptive thinking models always get {type: "adaptive"}
+  // Adaptive thinking models always get { type: "adaptive" }
   // regardless of what format the incoming thinking block has
   if (isAdaptiveThinkingModel(model)) {
     // Check for env-var override to force budget_tokens fallback
@@ -1274,7 +3638,8 @@ function normalizeThinkingBlock(thinking, model) {
       if (thinking.type === "enabled" && typeof thinking.budget_tokens === "number") {
         return thinking;
       }
-      return { type: "enabled", budget_tokens: parseInt(process.env.MAX_THINKING_TOKENS, 10) || 16000 };
+      const parsedBudget = parseInt(process.env.MAX_THINKING_TOKENS, 10);
+      return { type: "enabled", budget_tokens: Number.isNaN(parsedBudget) ? 16000 : parsedBudget };
     }
     return { type: "adaptive" };
   }
@@ -1409,18 +3774,19 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
     // x-stainless-timeout: sent only for non-streaming requests.
     // Claude Code sends 600 (10 minutes) as the default timeout in seconds.
     // We detect streaming from the request body.
-    const isStreaming = (() => {
+    let xStainlessTimeout = "600";
+    if (requestBody) {
       try {
-        if (!requestBody) return true;
         const parsed = JSON.parse(requestBody);
-        return parsed.stream !== false;
+        const isStreaming = parsed.stream !== false;
+        if (!isStreaming) {
+          xStainlessTimeout = "600";
+        }
       } catch {
-        return true; // assume streaming if body can't be parsed
+        // Non-JSON body or parse error — assume streaming
       }
-    })();
-    if (!isStreaming) {
-      requestHeaders.set("x-stainless-timeout", "600");
     }
+    requestHeaders.set("x-stainless-timeout", xStainlessTimeout);
     const stainlessHelpers = buildStainlessHelperHeader(tools, messages);
     if (stainlessHelpers) {
       requestHeaders.set("x-stainless-helper", stainlessHelpers);
@@ -1498,10 +3864,13 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
       parsed.temperature = 1;
     }
 
-    // Pass the model ID to system prompt builder for billing header
-    signature.modelId = parsed.model || "";
+    // QA fix H2: avoid mutating the signature parameter; capture modelId locally
+    const modelId = parsed.model || "";
+    // Extract first user message text for billing hash computation (cch)
+    const firstUserMessage = extractFirstUserMessageText(parsed.messages);
+    const signatureWithModel = { ...signature, modelId, firstUserMessage };
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
-    parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signature);
+    parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signatureWithModel);
 
     if (signature.enabled) {
       const currentMetadata =
@@ -1592,6 +3961,7 @@ function transformRequestUrl(input) {
  * @property {number} outputTokens
  * @property {number} cacheReadTokens
  * @property {number} cacheWriteTokens
+ * @property {number} [webSearchRequests]
  */
 
 /**
@@ -1607,6 +3977,10 @@ function extractUsageFromSSEEvent(parsed, stats) {
     if (typeof u.output_tokens === "number") stats.outputTokens = u.output_tokens;
     if (typeof u.cache_read_input_tokens === "number") stats.cacheReadTokens = u.cache_read_input_tokens;
     if (typeof u.cache_creation_input_tokens === "number") stats.cacheWriteTokens = u.cache_creation_input_tokens;
+    // Web search requests (server tool usage)
+    if (typeof u.server_tool_use?.web_search_requests === "number") {
+      stats.webSearchRequests = u.server_tool_use.web_search_requests;
+    }
     return;
   }
 
@@ -1636,7 +4010,9 @@ function getSSEDataPayload(eventBlock) {
   const dataLines = [];
   for (const line of eventBlock.split("\n")) {
     if (!line.startsWith("data:")) continue;
-    dataLines.push(line.slice(5).trimStart());
+    // QA fix: SSE spec says strip only a single leading space after "data:", not all whitespace
+    const raw = line.slice(5);
+    dataLines.push(raw.startsWith(" ") ? raw.slice(1) : raw);
   }
 
   if (dataLines.length === 0) return null;
@@ -2067,7 +4443,6 @@ async function refreshAccountToken(account, client, source = "foreground", { onT
 // Plugin entry point
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_COMMAND_HANDLED = "__ANTHROPIC_COMMAND_HANDLED__";
 const PENDING_OAUTH_TTL_MS = 10 * 60 * 1000;
 
 /**
@@ -2125,1977 +4500,4 @@ function extractFileIds(body) {
   return ids;
 }
 
-/**
- * @type {import('@opencode-ai/plugin').Plugin}
- */
-export async function AnthropicAuthPlugin({ client }) {
-  const config = loadConfig();
-  const signatureEmulationEnabled = config.signature_emulation.enabled;
-  const promptCompactionMode = config.signature_emulation.prompt_compaction === "off" ? "off" : "minimal";
-  const shouldFetchClaudeCodeVersion =
-    signatureEmulationEnabled && config.signature_emulation.fetch_claude_code_version_on_startup;
-
-  // Per-instance strategy state (moved from module-level for test isolation)
-  const strategyState = {
-    mode: "CONFIGURED", // "CONFIGURED" | "DEGRADED"
-    rateLimitEvents: [], // timestamps of rate limit events in current window
-    windowMs: 5 * 60 * 1000, // 5-minute sliding window
-    thresholdCount: 3, // rate limits needed to trigger DEGRADED
-    recoveryMs: 5 * 60 * 1000, // 5 minutes clean to recover
-    lastRateLimitTime: 0,
-    manualOverride: false, // user explicitly set strategy — disable auto-adaptation
-    originalStrategy: null, // the user's configured strategy before DEGRADED override
-  };
-
-  /** @type {AccountManager | null} */
-  let accountManager = null;
-
-  /** Track account usage toasts; show once per account change (including first use). */
-  let lastToastedIndex = -1;
-  /** @type {Map<string, number>} */
-  const debouncedToastTimestamps = new Map();
-
-  /** @type {Map<string, { promise: Promise<string>, source: "foreground" | "idle" }>} */
-  const refreshInFlight = new Map();
-
-  /** @type {Map<string, number>} */
-  const idleRefreshLastAttempt = new Map();
-  /** @type {Set<string>} */
-  const idleRefreshInFlight = new Set();
-
-  const IDLE_REFRESH_ENABLED = config.idle_refresh.enabled;
-  const IDLE_REFRESH_WINDOW_MS = config.idle_refresh.window_minutes * 60 * 1000;
-  const IDLE_REFRESH_MIN_INTERVAL_MS = config.idle_refresh.min_interval_minutes * 60 * 1000;
-
-  /**
-   * Whether OPENCODE_ANTHROPIC_INITIAL_ACCOUNT env var pinned this session to a
-   * specific account. When true, syncActiveIndexFromDisk is skipped and strategy
-   * is forced to sticky.
-   */
-  let initialAccountPinned = false;
-
-  /**
-   * Pending slash-command OAuth flows keyed by session ID.
-   * @type {Map<string, { mode: "login" | "reauth", verifier: string, targetIndex?: number, createdAt: number }>}
-   */
-  const pendingSlashOAuth = new Map();
-
-  /**
-   * In-memory mapping of file_id → account index for file-ID account pinning.
-   * Populated by /anthropic files commands, consumed by the fetch interceptor
-   * to route Messages API requests referencing file_ids to the correct account.
-   * @type {Map<string, number>}
-   */
-  const fileAccountMap = new Map();
-
-  /**
-   * Send an informational message into the current session.
-   * @param {string} sessionID
-   * @param {string} text
-   */
-  async function sendCommandMessage(sessionID, text) {
-    await client.session?.prompt({
-      path: { id: sessionID },
-      body: {
-        noReply: true,
-        parts: [{ type: "text", text, ignored: true }],
-      },
-    });
-  }
-
-  /**
-   * Keep in-memory AccountManager in sync with disk mutations made via slash commands.
-   */
-  async function reloadAccountManagerFromDisk() {
-    if (!accountManager) return;
-    accountManager = await AccountManager.load(config, null);
-  }
-
-  /**
-   * Persist OAuth credentials into OpenCode auth storage for immediate compatibility.
-   * @param {string} refresh
-   * @param {string} access
-   * @param {number} expires
-   */
-  async function persistOpenCodeAuth(refresh, access, expires) {
-    await client.auth.set({
-      path: { id: "anthropic" },
-      body: { type: "oauth", refresh, access, expires },
-    });
-  }
-
-  /**
-   * Remove expired pending OAuth flows.
-   */
-  function pruneExpiredPendingOAuth() {
-    const now = Date.now();
-    for (const [sessionID, pending] of pendingSlashOAuth.entries()) {
-      if (now - pending.createdAt > PENDING_OAUTH_TTL_MS) {
-        pendingSlashOAuth.delete(sessionID);
-      }
-    }
-  }
-
-  /**
-   * Execute CLI main(argv) in-process and capture console output.
-   * @param {string[]} argv
-   * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
-   */
-  async function runCliCommand(argv) {
-    const logs = [];
-    const errors = [];
-
-    /** @type {number} */
-    let code = 1;
-    try {
-      const { main: cliMain } = await import("./cli.mjs");
-      code = await cliMain(argv, {
-        io: {
-          log: (...args) => logs.push(args.join(" ")),
-          error: (...args) => errors.push(args.join(" ")),
-        },
-      });
-    } catch (err) {
-      errors.push(err instanceof Error ? err.message : String(err));
-    }
-
-    return {
-      code,
-      stdout: stripAnsi(logs.join("\n")).trim(),
-      stderr: stripAnsi(errors.join("\n")).trim(),
-    };
-  }
-
-  /**
-   * Start a slash-command OAuth flow and store verifier in-memory.
-   * @param {string} sessionID
-   * @param {"login" | "reauth"} mode
-   * @param {number} [targetIndex]
-   */
-  async function startSlashOAuth(sessionID, mode, targetIndex) {
-    pruneExpiredPendingOAuth();
-    const { url, verifier, state } = await authorize("max");
-    pendingSlashOAuth.set(sessionID, {
-      mode,
-      verifier,
-      state,
-      targetIndex,
-      createdAt: Date.now(),
-    });
-
-    const action = mode === "login" ? "login" : `reauth ${targetIndex + 1}`;
-    const followup =
-      mode === "login" ? "/anthropic login complete <code#state>" : "/anthropic reauth complete <code#state>";
-
-    await sendCommandMessage(
-      sessionID,
-      [
-        "▣ Anthropic OAuth",
-        "",
-        `Started ${action} flow.`,
-        "Open this URL in your browser:",
-        url,
-        "",
-        `Then run: ${followup}`,
-        "(Paste the full authorization code, including #state)",
-      ].join("\n"),
-    );
-  }
-
-  /**
-   * Complete a pending slash-command OAuth flow.
-   * @param {string} sessionID
-   * @param {string} code
-   * @returns {Promise<{ ok: boolean, message: string }>}
-   */
-  async function completeSlashOAuth(sessionID, code) {
-    const pending = pendingSlashOAuth.get(sessionID);
-    if (!pending) {
-      pruneExpiredPendingOAuth();
-      return {
-        ok: false,
-        message: "No pending OAuth flow. Start with /anthropic login or /anthropic reauth <N>.",
-      };
-    }
-
-    if (Date.now() - pending.createdAt > PENDING_OAUTH_TTL_MS) {
-      pendingSlashOAuth.delete(sessionID);
-      return {
-        ok: false,
-        message: "Pending OAuth flow expired. Start again with /anthropic login or /anthropic reauth <N>.",
-      };
-    }
-
-    // Validate CSRF state parameter (RFC 6749 §10.12)
-    const codeParts = code.split("#");
-    const returnedState = codeParts[1];
-    if (pending.state && returnedState && returnedState !== pending.state) {
-      pendingSlashOAuth.delete(sessionID);
-      return {
-        ok: false,
-        message: "OAuth state mismatch — possible CSRF attack. Please start a new login flow.",
-      };
-    }
-
-    const credentials = await exchange(code, pending.verifier);
-    if (credentials.type === "failed") {
-      return {
-        ok: false,
-        message: credentials.details
-          ? `Token exchange failed (${credentials.details}).`
-          : "Token exchange failed. The code may be invalid or expired.",
-      };
-    }
-
-    const stored = (await loadAccounts()) || { version: 1, accounts: [], activeIndex: 0 };
-
-    if (pending.mode === "login") {
-      const existingIdx = stored.accounts.findIndex((acc) => acc.refreshToken === credentials.refresh);
-      if (existingIdx >= 0) {
-        const acc = stored.accounts[existingIdx];
-        acc.access = credentials.access;
-        acc.expires = credentials.expires;
-        if (credentials.email) acc.email = credentials.email;
-        acc.enabled = true;
-        acc.consecutiveFailures = 0;
-        acc.lastFailureTime = null;
-        acc.rateLimitResetTimes = {};
-        await saveAccounts(stored);
-        await persistOpenCodeAuth(acc.refreshToken, acc.access, acc.expires);
-        await reloadAccountManagerFromDisk();
-        pendingSlashOAuth.delete(sessionID);
-        const name = acc.email || `Account ${existingIdx + 1}`;
-        return { ok: true, message: `Updated existing account #${existingIdx + 1} (${name}).` };
-      }
-
-      if (stored.accounts.length >= 10) {
-        return { ok: false, message: "Maximum of 10 accounts reached. Remove one first." };
-      }
-
-      const now = Date.now();
-      stored.accounts.push({
-        id: `${now}:${credentials.refresh.slice(0, 12)}`,
-        email: credentials.email,
-        refreshToken: credentials.refresh,
-        access: credentials.access,
-        expires: credentials.expires,
-        token_updated_at: now,
-        addedAt: now,
-        lastUsed: 0,
-        enabled: true,
-        rateLimitResetTimes: {},
-        consecutiveFailures: 0,
-        lastFailureTime: null,
-        stats: createDefaultStats(now),
-      });
-      await saveAccounts(stored);
-      const newAccount = stored.accounts[stored.accounts.length - 1];
-      await persistOpenCodeAuth(newAccount.refreshToken, newAccount.access, newAccount.expires);
-      await reloadAccountManagerFromDisk();
-      pendingSlashOAuth.delete(sessionID);
-      const label = credentials.email || `Account ${stored.accounts.length}`;
-      return { ok: true, message: `Added account #${stored.accounts.length} (${label}).` };
-    }
-
-    // reauth flow
-    const idx = pending.targetIndex ?? -1;
-    if (idx < 0 || idx >= stored.accounts.length) {
-      pendingSlashOAuth.delete(sessionID);
-      return { ok: false, message: "Target account no longer exists. Start reauth again." };
-    }
-
-    const existing = stored.accounts[idx];
-    existing.refreshToken = credentials.refresh;
-    existing.access = credentials.access;
-    existing.expires = credentials.expires;
-    if (credentials.email) existing.email = credentials.email;
-    existing.enabled = true;
-    existing.consecutiveFailures = 0;
-    existing.lastFailureTime = null;
-    existing.rateLimitResetTimes = {};
-
-    await saveAccounts(stored);
-    await persistOpenCodeAuth(existing.refreshToken, existing.access, existing.expires);
-    await reloadAccountManagerFromDisk();
-    pendingSlashOAuth.delete(sessionID);
-    const name = existing.email || `Account ${idx + 1}`;
-    return { ok: true, message: `Re-authenticated account #${idx + 1} (${name}).` };
-  }
-
-  /**
-   * Handle /anthropic slash commands.
-   *
-   * Supported examples:
-   *   /anthropic
-   *   /anthropic usage
-   *   /anthropic switch 2
-   *   /anthropic login
-   *   /anthropic login complete <code#state>
-   *   /anthropic reauth 1
-   *   /anthropic reauth complete <code#state>
-   *
-   * @param {{ command: string, arguments?: string, sessionID: string }} input
-   */
-  async function handleAnthropicSlashCommand(input) {
-    const args = parseCommandArgs(input.arguments || "");
-    const primary = (args[0] || "list").toLowerCase();
-
-    // Friendly alias: /anthropic usage -> list
-    if (primary === "usage") {
-      const result = await runCliCommand(["list"]);
-      const heading = result.code === 0 ? "▣ Anthropic" : "▣ Anthropic (error)";
-      const body = result.stdout || result.stderr || "No output.";
-      await sendCommandMessage(input.sessionID, [heading, "", body].join("\n"));
-      await reloadAccountManagerFromDisk();
-      return;
-    }
-
-    // Two-step login flow for slash commands
-    if (primary === "login") {
-      if ((args[1] || "").toLowerCase() === "complete") {
-        const code = args.slice(2).join(" ").trim();
-        if (!code) {
-          await sendCommandMessage(
-            input.sessionID,
-            "▣ Anthropic OAuth\n\nMissing code. Use: /anthropic login complete <code#state>",
-          );
-          return;
-        }
-        const result = await completeSlashOAuth(input.sessionID, code);
-        const heading = result.ok ? "▣ Anthropic OAuth" : "▣ Anthropic OAuth (error)";
-        await sendCommandMessage(input.sessionID, `${heading}\n\n${result.message}`);
-        return;
-      }
-
-      await startSlashOAuth(input.sessionID, "login");
-      return;
-    }
-
-    // Two-step reauth flow for slash commands
-    if (primary === "reauth") {
-      if ((args[1] || "").toLowerCase() === "complete") {
-        const code = args.slice(2).join(" ").trim();
-        if (!code) {
-          await sendCommandMessage(
-            input.sessionID,
-            "▣ Anthropic OAuth\n\nMissing code. Use: /anthropic reauth complete <code#state>",
-          );
-          return;
-        }
-        const result = await completeSlashOAuth(input.sessionID, code);
-        const heading = result.ok ? "▣ Anthropic OAuth" : "▣ Anthropic OAuth (error)";
-        await sendCommandMessage(input.sessionID, `${heading}\n\n${result.message}`);
-        return;
-      }
-
-      const n = parseInt(args[1], 10);
-      if (Number.isNaN(n) || n < 1) {
-        await sendCommandMessage(
-          input.sessionID,
-          "▣ Anthropic OAuth\n\nProvide an account number. Example: /anthropic reauth 1",
-        );
-        return;
-      }
-      const stored = await loadAccounts();
-      if (!stored || stored.accounts.length === 0) {
-        await sendCommandMessage(input.sessionID, "▣ Anthropic OAuth (error)\n\nNo accounts configured.");
-        return;
-      }
-      const idx = n - 1;
-      if (idx >= stored.accounts.length) {
-        await sendCommandMessage(
-          input.sessionID,
-          `▣ Anthropic OAuth (error)\n\nAccount ${n} does not exist. You have ${stored.accounts.length} account(s).`,
-        );
-        return;
-      }
-
-      await startSlashOAuth(input.sessionID, "reauth", idx);
-      return;
-    }
-
-    // /anthropic config — show effective config
-    if (primary === "config") {
-      const fresh = loadConfigFresh();
-      const lines = [
-        "▣ Anthropic Config",
-        "",
-        `strategy: ${fresh.account_selection_strategy}`,
-        `strategy-state: ${strategyState.mode}${strategyState.manualOverride ? " (manual override)" : ""}`,
-        `emulation: ${fresh.signature_emulation.enabled ? "on" : "off"}`,
-        `compaction: ${fresh.signature_emulation.prompt_compaction}`,
-        `1m-context: ${fresh.override_model_limits.enabled ? "on" : "off"}`,
-        `idle-refresh: ${fresh.idle_refresh.enabled ? "on" : "off"}`,
-        `debug: ${fresh.debug ? "on" : "off"}`,
-        `quiet: ${fresh.toasts.quiet ? "on" : "off"}`,
-        `custom_betas: ${fresh.custom_betas.length ? fresh.custom_betas.join(", ") : "(none)"}`,
-        `cache-boundary: ${fresh.cache_policy?.boundary_marker ? "on" : "off"}`,
-        `cache-ttl: ${fresh.cache_policy?.ttl ?? "1h"}${fresh.cache_policy?.ttl_supported === false ? " (auto-disabled)" : ""}`,
-        `fast-mode: ${fresh.fast_mode ? "on" : "off"}`,
-        `telemetry-emulation: ${fresh.telemetry?.emulate_minimal ? "on (silent observer)" : "off"}`,
-      ];
-      await sendCommandMessage(input.sessionID, lines.join("\n"));
-      return;
-    }
-
-    // /anthropic stats — show session statistics
-    if (primary === "stats") {
-      const avgRate = getAverageCacheHitRate();
-      const totalTokens =
-        sessionMetrics.totalInput +
-        sessionMetrics.totalOutput +
-        sessionMetrics.totalCacheRead +
-        sessionMetrics.totalCacheWrite;
-      const lines = [
-        "▣ Anthropic Session Stats",
-        "",
-        `Turns: ${sessionMetrics.turns}`,
-        `Total tokens: ${totalTokens.toLocaleString()}`,
-        `  Input: ${sessionMetrics.totalInput.toLocaleString()}`,
-        `  Output: ${sessionMetrics.totalOutput.toLocaleString()}`,
-        `  Cache read: ${sessionMetrics.totalCacheRead.toLocaleString()}`,
-        `  Cache write: ${sessionMetrics.totalCacheWrite.toLocaleString()}`,
-        `Cache efficiency: ${(avgRate * 100).toFixed(1)}% (last ${sessionMetrics.recentCacheRates.length} turns)`,
-        `Session cost: $${sessionMetrics.sessionCostUsd.toFixed(4)}`,
-      ];
-      const maxBudget = parseFloat(process.env.OPENCODE_ANTHROPIC_MAX_BUDGET_USD || "0");
-      if (maxBudget > 0) {
-        lines.push(
-          `Budget: $${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)} (${((sessionMetrics.sessionCostUsd / maxBudget) * 100).toFixed(0)}%)`,
-        );
-      }
-      await sendCommandMessage(input.sessionID, lines.join("\n"));
-      return;
-    }
-
-    // /anthropic set <key> <value> — toggle features at runtime
-    if (primary === "set") {
-      const key = (args[1] || "").toLowerCase();
-      const value = (args[2] || "").toLowerCase();
-      /** @type {Record<string, () => void>} */
-      const setters = {
-        emulation: () =>
-          saveConfig({ signature_emulation: { enabled: value === "on" || value === "1" || value === "true" } }),
-        compaction: () =>
-          saveConfig({ signature_emulation: { prompt_compaction: value === "off" ? "off" : "minimal" } }),
-        "1m-context": () =>
-          saveConfig({ override_model_limits: { enabled: value === "on" || value === "1" || value === "true" } }),
-        "idle-refresh": () =>
-          saveConfig({ idle_refresh: { enabled: value === "on" || value === "1" || value === "true" } }),
-        debug: () => saveConfig({ debug: value === "on" || value === "1" || value === "true" }),
-        quiet: () => saveConfig({ toasts: { quiet: value === "on" || value === "1" || value === "true" } }),
-        strategy: () => {
-          const valid = ["sticky", "round-robin", "hybrid"];
-          if (valid.includes(value)) {
-            saveConfig({ account_selection_strategy: value });
-            strategyState.manualOverride = true;
-            strategyState.mode = "CONFIGURED";
-          } else throw new Error(`Invalid strategy. Valid: ${valid.join(", ")}`);
-        },
-        boundary: () =>
-          saveConfig({ cache_policy: { boundary_marker: value === "on" || value === "1" || value === "true" } }),
-        "cache-ttl": () => {
-          const valid = ["1h", "5m", "off"];
-          if (valid.includes(value)) saveConfig({ cache_policy: { ttl: value } });
-          else throw new Error(`Invalid TTL. Valid: ${valid.join(", ")}`);
-        },
-        fast: () => {
-          const enabled = value === "on" || value === "true" || value === "1";
-          saveConfig({ fast_mode: enabled });
-          config.fast_mode = enabled;
-        },
-        "fast-mode": () => {
-          const enabled = value === "on" || value === "true" || value === "1";
-          saveConfig({ fast_mode: enabled });
-          config.fast_mode = enabled;
-        },
-        telemetry: () => {
-          const enabled = value === "on" || value === "true" || value === "1";
-          saveConfig({ telemetry: { emulate_minimal: enabled } });
-          config.telemetry = config.telemetry || {};
-          config.telemetry.emulate_minimal = enabled;
-        },
-        "telemetry-emulation": () => {
-          const enabled = value === "on" || value === "true" || value === "1";
-          saveConfig({ telemetry: { emulate_minimal: enabled } });
-          config.telemetry = config.telemetry || {};
-          config.telemetry.emulate_minimal = enabled;
-        },
-      };
-
-      if (!key || !setters[key]) {
-        const keys = Object.keys(setters).join(", ");
-        await sendCommandMessage(
-          input.sessionID,
-          `▣ Anthropic Set\n\nUsage: /anthropic set <key> <value>\nKeys: ${keys}\nValues: on/off (or specific values for strategy/compaction)`,
-        );
-        return;
-      }
-      if (!value) {
-        await sendCommandMessage(input.sessionID, `▣ Anthropic Set\n\nMissing value for "${key}".`);
-        return;
-      }
-      setters[key]();
-      // Reload config into runtime
-      Object.assign(config, loadConfigFresh());
-      await sendCommandMessage(input.sessionID, `▣ Anthropic Set\n\n${key} = ${value}`);
-      return;
-    }
-
-    // /anthropic betas [add|remove <beta>] — show/manage custom betas
-    if (primary === "betas") {
-      const action = (args[1] || "").toLowerCase();
-
-      if (!action || action === "list") {
-        const fresh = loadConfigFresh();
-        const strategy = fresh.account_selection_strategy || config.account_selection_strategy;
-        const lines = [
-          "▣ Anthropic Betas",
-          "",
-          "Preset betas (auto-computed per model/provider):",
-          "  oauth-2025-04-20, claude-code-20250219,",
-          "  advanced-tool-use-2025-11-20, fast-mode-2026-02-01,",
-          "  interleaved-thinking-2025-05-14 (non-Opus 4.6) OR effort-2025-11-24 (Opus 4.6),",
-          "  files-api-2025-04-14 (only /v1/files and requests with file_id),",
-          "  token-counting-2024-11-01 (only /v1/messages/count_tokens),",
-          `  prompt-caching-scope-2026-01-05 (non-interactive${strategy === "round-robin" ? ", skipped in round-robin" : ""})`,
-          "",
-          `Experimental betas: ${isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS) ? "disabled (CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1)" : "enabled"}`,
-          `Strategy: ${strategy}${initialAccountPinned ? " (pinned via OPENCODE_ANTHROPIC_INITIAL_ACCOUNT)" : ""}`,
-          `Custom betas: ${fresh.custom_betas.length ? fresh.custom_betas.join(", ") : "(none)"}`,
-          "",
-          "Toggleable presets:",
-          "  /anthropic betas add structured-outputs-2025-12-15",
-          "  /anthropic betas add context-management-2025-06-27",
-          "  /anthropic betas add tool-examples-2025-10-29",
-          "  /anthropic betas add web-search-2025-03-05",
-          "  /anthropic betas add compact-2026-01-12",
-          "  /anthropic betas add mcp-servers-2025-12-04",
-          "  /anthropic betas add redact-thinking-2026-02-12",
-          "  /anthropic betas add 1m   (shortcut for context-1m-2025-08-07)",
-          "",
-          "Remove: /anthropic betas remove <beta>",
-        ];
-        await sendCommandMessage(input.sessionID, lines.join("\n"));
-        return;
-      }
-
-      if (action === "add") {
-        const betaInput = args[2]?.trim();
-        if (!betaInput) {
-          await sendCommandMessage(input.sessionID, "▣ Anthropic Betas\n\nUsage: /anthropic betas add <beta-name>");
-          return;
-        }
-        const beta = resolveBetaShortcut(betaInput);
-        const fresh = loadConfigFresh();
-        const current = fresh.custom_betas || [];
-        if (current.includes(beta)) {
-          await sendCommandMessage(input.sessionID, `▣ Anthropic Betas\n\n"${beta}" already added.`);
-          return;
-        }
-        saveConfig({ custom_betas: [...current, beta] });
-        Object.assign(config, loadConfigFresh());
-        const fromShortcut = beta !== betaInput;
-        await sendCommandMessage(
-          input.sessionID,
-          `▣ Anthropic Betas\n\nAdded: ${beta}${fromShortcut ? ` (from shortcut: ${betaInput})` : ""}`,
-        );
-        return;
-      }
-
-      if (action === "remove" || action === "rm") {
-        const betaInput = args[2]?.trim();
-        if (!betaInput) {
-          await sendCommandMessage(input.sessionID, "▣ Anthropic Betas\n\nUsage: /anthropic betas remove <beta-name>");
-          return;
-        }
-        const beta = resolveBetaShortcut(betaInput);
-        const fresh = loadConfigFresh();
-        const current = fresh.custom_betas || [];
-        if (!current.includes(beta)) {
-          await sendCommandMessage(input.sessionID, `▣ Anthropic Betas\n\n"${beta}" not in custom betas.`);
-          return;
-        }
-        saveConfig({ custom_betas: current.filter((b) => b !== beta) });
-        Object.assign(config, loadConfigFresh());
-        await sendCommandMessage(input.sessionID, `▣ Anthropic Betas\n\nRemoved: ${beta}`);
-        return;
-      }
-
-      await sendCommandMessage(input.sessionID, "▣ Anthropic Betas\n\nUsage: /anthropic betas [add|remove <beta>]");
-      return;
-    }
-
-    // /anthropic files [list|upload|get|delete|download] — Files API management
-    // Supports --account <email|index> to target a specific account.
-    // Without --account, list aggregates from ALL accounts; other actions use the current account.
-    if (primary === "files") {
-      // Parse --account flag from args
-      let targetAccountId = null;
-      const filteredArgs = [];
-      for (let i = 0; i < args.length; i++) {
-        if (args[i] === "--account" && i + 1 < args.length) {
-          targetAccountId = args[i + 1];
-          i++;
-        } else {
-          filteredArgs.push(args[i]);
-        }
-      }
-      const action = (filteredArgs[1] || "").toLowerCase();
-
-      if (!accountManager || accountManager.getAccountCount() === 0) {
-        await sendCommandMessage(
-          input.sessionID,
-          "▣ Anthropic Files (error)\n\nNo accounts configured. Use /anthropic login first.",
-        );
-        return;
-      }
-
-      /**
-       * Resolve a single account by email or 1-based index.
-       * If identifier is null, falls back to the current account.
-       * @param {string | null} identifier
-       * @returns {{ account: import('./lib/accounts.mjs').ManagedAccount, label: string } | null}
-       */
-      function resolveTargetAccount(identifier) {
-        const accounts = accountManager.getEnabledAccounts();
-        if (identifier) {
-          // Try by email
-          const byEmail = accounts.find((a) => a.email === identifier);
-          if (byEmail) return { account: byEmail, label: byEmail.email || `Account ${byEmail.index + 1}` };
-          // Try by 1-based index
-          const idx = parseInt(identifier, 10);
-          if (!isNaN(idx) && idx >= 1) {
-            const byIdx = accounts.find((a) => a.index === idx - 1);
-            if (byIdx) return { account: byIdx, label: byIdx.email || `Account ${byIdx.index + 1}` };
-          }
-          return null;
-        }
-        // Default to current
-        const current = accountManager.getCurrentAccount();
-        if (!current) return null;
-        return { account: current, label: current.email || `Account ${current.index + 1}` };
-      }
-
-      /**
-       * Get authenticated headers for a specific account, refreshing token if needed.
-       * @param {import('./lib/accounts.mjs').ManagedAccount} acct
-       */
-      async function getFilesAuth(acct) {
-        let tok = acct.access;
-        if (!tok || !acct.expires || acct.expires < Date.now()) {
-          tok = await refreshAccountTokenSingleFlight(acct);
-        }
-        return {
-          authorization: `Bearer ${tok}`,
-          "anthropic-beta": "oauth-2025-04-20,files-api-2025-04-14",
-        };
-      }
-
-      const apiBase = "https://api.anthropic.com";
-
-      try {
-        // /anthropic files list — list uploaded files
-        if (!action || action === "list") {
-          if (targetAccountId) {
-            // List for a specific account
-            const resolved = resolveTargetAccount(targetAccountId);
-            if (!resolved) {
-              await sendCommandMessage(
-                input.sessionID,
-                `▣ Anthropic Files (error)\n\nAccount not found: ${targetAccountId}`,
-              );
-              return;
-            }
-            const { account, label } = resolved;
-            const headers = await getFilesAuth(account);
-            const res = await fetch(`${apiBase}/v1/files`, { headers });
-            if (!res.ok) {
-              const errBody = await res.text();
-              await sendCommandMessage(
-                input.sessionID,
-                `▣ Anthropic Files (error) [${label}]\n\nHTTP ${res.status}: ${errBody}`,
-              );
-              return;
-            }
-            const data = await res.json();
-            const files = data.data || [];
-            for (const f of files) fileAccountMap.set(f.id, account.index);
-            if (files.length === 0) {
-              await sendCommandMessage(input.sessionID, `▣ Anthropic Files [${label}]\n\nNo files uploaded.`);
-              return;
-            }
-            const lines = [`▣ Anthropic Files [${label}]`, "", `${files.length} file(s):`, ""];
-            for (const f of files) {
-              const sizeKB = (f.size / 1024).toFixed(1);
-              lines.push(`  ${f.id}  ${f.filename}  (${sizeKB} KB, ${f.purpose})`);
-            }
-            await sendCommandMessage(input.sessionID, lines.join("\n"));
-            return;
-          }
-
-          // List files from ALL enabled accounts
-          const accounts = accountManager.getEnabledAccounts();
-          const allLines = ["▣ Anthropic Files (all accounts)", ""];
-          let totalFiles = 0;
-          for (const acct of accounts) {
-            const label = acct.email || `Account ${acct.index + 1}`;
-            try {
-              const headers = await getFilesAuth(acct);
-              const res = await fetch(`${apiBase}/v1/files`, { headers });
-              if (!res.ok) {
-                allLines.push(`[${label}] Error: HTTP ${res.status}`);
-                allLines.push("");
-                continue;
-              }
-              const data = await res.json();
-              const files = data.data || [];
-              for (const f of files) fileAccountMap.set(f.id, acct.index);
-              totalFiles += files.length;
-              if (files.length === 0) {
-                allLines.push(`[${label}] No files`);
-              } else {
-                allLines.push(`[${label}] ${files.length} file(s):`);
-                for (const f of files) {
-                  const sizeKB = (f.size / 1024).toFixed(1);
-                  allLines.push(`  ${f.id}  ${f.filename}  (${sizeKB} KB, ${f.purpose})`);
-                }
-              }
-              allLines.push("");
-            } catch (err) {
-              allLines.push(`[${label}] Error: ${err.message}`);
-              allLines.push("");
-            }
-          }
-          if (totalFiles === 0 && accounts.length > 0) {
-            allLines.push(`Total: No files across ${accounts.length} account(s).`);
-          } else {
-            allLines.push(`Total: ${totalFiles} file(s) across ${accounts.length} account(s).`);
-          }
-          if (accounts.length > 1) {
-            allLines.push("", "Tip: Use --account <email> to target a specific account.");
-          }
-          await sendCommandMessage(input.sessionID, allLines.join("\n"));
-          return;
-        }
-
-        // For all non-list actions, resolve to a single account
-        const resolved = resolveTargetAccount(targetAccountId);
-        if (!resolved) {
-          const errMsg = targetAccountId ? `Account not found: ${targetAccountId}` : "No accounts available.";
-          await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\n${errMsg}`);
-          return;
-        }
-        const { account, label } = resolved;
-        const authHeaders = await getFilesAuth(account);
-
-        // /anthropic files upload <path> — upload a file
-        if (action === "upload") {
-          const filePath = filteredArgs.slice(2).join(" ").trim();
-          if (!filePath) {
-            await sendCommandMessage(
-              input.sessionID,
-              "▣ Anthropic Files\n\nUsage: /anthropic files upload <path> [--account <email>]",
-            );
-            return;
-          }
-          const resolvedPath = resolve(filePath);
-          if (!existsSync(resolvedPath)) {
-            await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\nFile not found: ${resolvedPath}`);
-            return;
-          }
-          const content = readFileSync(resolvedPath);
-          const filename = basename(resolvedPath);
-          const blob = new Blob([content]);
-          const form = new FormData();
-          form.append("file", blob, filename);
-          form.append("purpose", "assistants");
-
-          const res = await fetch(`${apiBase}/v1/files`, {
-            method: "POST",
-            headers: {
-              authorization: authHeaders.authorization,
-              "anthropic-beta": "oauth-2025-04-20,files-api-2025-04-14",
-            },
-            body: form,
-          });
-          if (!res.ok) {
-            const errBody = await res.text();
-            await sendCommandMessage(
-              input.sessionID,
-              `▣ Anthropic Files (error) [${label}]\n\nUpload failed (HTTP ${res.status}): ${errBody}`,
-            );
-            return;
-          }
-          const file = await res.json();
-          const sizeKB = ((file.size || 0) / 1024).toFixed(1);
-          // Cache file_id → account mapping for auto-pinning
-          fileAccountMap.set(file.id, account.index);
-          await sendCommandMessage(
-            input.sessionID,
-            `▣ Anthropic Files [${label}]\n\nUploaded: ${file.id}\n  Filename: ${file.filename}\n  Size: ${sizeKB} KB`,
-          );
-          return;
-        }
-
-        // /anthropic files get <file_id> — get file metadata
-        if (action === "get" || action === "info") {
-          const fileId = filteredArgs[2]?.trim();
-          if (!fileId) {
-            await sendCommandMessage(
-              input.sessionID,
-              "▣ Anthropic Files\n\nUsage: /anthropic files get <file_id> [--account <email>]",
-            );
-            return;
-          }
-          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, { headers: authHeaders });
-          if (!res.ok) {
-            const errBody = await res.text();
-            await sendCommandMessage(
-              input.sessionID,
-              `▣ Anthropic Files (error) [${label}]\n\nHTTP ${res.status}: ${errBody}`,
-            );
-            return;
-          }
-          const file = await res.json();
-          fileAccountMap.set(file.id, account.index);
-          const lines = [
-            `▣ Anthropic Files [${label}]`,
-            "",
-            `  ID:       ${file.id}`,
-            `  Filename: ${file.filename}`,
-            `  Purpose:  ${file.purpose}`,
-            `  Size:     ${((file.size || 0) / 1024).toFixed(1)} KB`,
-            `  Type:     ${file.mime_type || "unknown"}`,
-            `  Created:  ${file.created_at || "unknown"}`,
-          ];
-          await sendCommandMessage(input.sessionID, lines.join("\n"));
-          return;
-        }
-
-        // /anthropic files delete <file_id> — delete a file
-        if (action === "delete" || action === "rm") {
-          const fileId = filteredArgs[2]?.trim();
-          if (!fileId) {
-            await sendCommandMessage(
-              input.sessionID,
-              "▣ Anthropic Files\n\nUsage: /anthropic files delete <file_id> [--account <email>]",
-            );
-            return;
-          }
-          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, {
-            method: "DELETE",
-            headers: authHeaders,
-          });
-          if (!res.ok) {
-            const errBody = await res.text();
-            await sendCommandMessage(
-              input.sessionID,
-              `▣ Anthropic Files (error) [${label}]\n\nHTTP ${res.status}: ${errBody}`,
-            );
-            return;
-          }
-          fileAccountMap.delete(fileId);
-          await sendCommandMessage(input.sessionID, `▣ Anthropic Files [${label}]\n\nDeleted: ${fileId}`);
-          return;
-        }
-
-        // /anthropic files download <file_id> [output_path] — download file content
-        if (action === "download" || action === "dl") {
-          const fileId = filteredArgs[2]?.trim();
-          if (!fileId) {
-            await sendCommandMessage(
-              input.sessionID,
-              "▣ Anthropic Files\n\nUsage: /anthropic files download <file_id> [output_path] [--account <email>]",
-            );
-            return;
-          }
-          const outputPath = filteredArgs.slice(3).join(" ").trim();
-
-          // Get file metadata first for the filename
-          const metaRes = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}`, {
-            headers: authHeaders,
-          });
-          if (!metaRes.ok) {
-            const errBody = await metaRes.text();
-            await sendCommandMessage(
-              input.sessionID,
-              `▣ Anthropic Files (error) [${label}]\n\nHTTP ${metaRes.status}: ${errBody}`,
-            );
-            return;
-          }
-          const meta = await metaRes.json();
-          const savePath = outputPath ? resolve(outputPath) : resolve(meta.filename);
-
-          // Download file content
-          const res = await fetch(`${apiBase}/v1/files/${encodeURIComponent(fileId)}/content`, {
-            headers: authHeaders,
-          });
-          if (!res.ok) {
-            const errBody = await res.text();
-            await sendCommandMessage(
-              input.sessionID,
-              `▣ Anthropic Files (error) [${label}]\n\nDownload failed (HTTP ${res.status}): ${errBody}`,
-            );
-            return;
-          }
-          const buffer = Buffer.from(await res.arrayBuffer());
-          writeFileSync(savePath, buffer);
-          const sizeKB = (buffer.length / 1024).toFixed(1);
-          await sendCommandMessage(
-            input.sessionID,
-            `▣ Anthropic Files [${label}]\n\nDownloaded: ${meta.filename}\n  Saved to: ${savePath}\n  Size: ${sizeKB} KB`,
-          );
-          return;
-        }
-
-        // Unknown action — show help
-        const helpLines = [
-          "▣ Anthropic Files",
-          "",
-          "Usage: /anthropic files <action> [--account <email|index>]",
-          "",
-          "Actions:",
-          "  list                          List uploaded files (all accounts if no --account)",
-          "  upload <path>                 Upload a file (max 350MB)",
-          "  get <file_id>                 Get file metadata",
-          "  delete <file_id>              Delete a file",
-          "  download <file_id> [path]     Download file content",
-          "",
-          "Options:",
-          "  --account <email|index>       Target a specific account (1-based index)",
-          "",
-          "Supported formats: PDF, DOCX, TXT, CSV, Excel, Markdown, images",
-          "Files can be referenced by file_id in Messages API requests.",
-          "",
-          "When using round-robin, file_ids are automatically pinned to the",
-          "account that owns them for Messages API requests.",
-        ];
-        await sendCommandMessage(input.sessionID, helpLines.join("\n"));
-        return;
-      } catch (err) {
-        await sendCommandMessage(input.sessionID, `▣ Anthropic Files (error)\n\n${err.message}`);
-        return;
-      }
-    }
-
-    // Interactive CLI command is not compatible with slash flow.
-    if (primary === "manage" || primary === "mg") {
-      await sendCommandMessage(
-        input.sessionID,
-        "▣ Anthropic\n\n`manage` is interactive-only. Use granular slash commands (switch/enable/disable/remove/reset) or run `opencode-anthropic-auth manage` in a terminal.",
-      );
-      return;
-    }
-
-    // Route remaining commands through the CLI command surface.
-    const cliArgs = [...args];
-    if (cliArgs.length === 0) cliArgs.push("list");
-
-    // Avoid readline prompts in slash mode.
-    if (
-      (primary === "remove" || primary === "rm" || primary === "logout" || primary === "lo") &&
-      !cliArgs.includes("--force")
-    ) {
-      cliArgs.push("--force");
-    }
-
-    const result = await runCliCommand(cliArgs);
-    const heading = result.code === 0 ? "▣ Anthropic" : "▣ Anthropic (error)";
-    const body = result.stdout || result.stderr || "No output.";
-    await sendCommandMessage(input.sessionID, [heading, "", body].join("\n"));
-    await reloadAccountManagerFromDisk();
-  }
-
-  /**
-   * Show a toast in the TUI. Silently fails if TUI is not running.
-   * @param {string} message
-   * @param {"info" | "success" | "warning" | "error"} variant
-   * @param {{debounceKey?: string}} [options]
-   */
-  async function toast(message, variant = "info", options = {}) {
-    // Quiet mode suppresses non-error toasts
-    if (config.toasts.quiet && variant !== "error") return;
-
-    // Debounce configured toast categories to reduce chatter.
-    if (variant !== "error" && options.debounceKey) {
-      const minGapMs = Math.max(0, config.toasts.debounce_seconds) * 1000;
-      if (minGapMs > 0) {
-        const now = Date.now();
-        const lastAt = debouncedToastTimestamps.get(options.debounceKey) ?? 0;
-        if (now - lastAt < minGapMs) {
-          return;
-        }
-        debouncedToastTimestamps.set(options.debounceKey, now);
-      }
-    }
-
-    try {
-      await client.tui?.showToast({ body: { message, variant } });
-    } catch {
-      // TUI may not be available
-    }
-  }
-
-  /**
-   * Emit debug logs when config.debug is enabled.
-   * @param {...unknown} args
-   */
-  function debugLog(...args) {
-    if (!config.debug) return;
-    console.error("[opencode-anthropic-auth]", ...args);
-  }
-
-  function recordRateLimitForStrategy() {
-    const now = Date.now();
-    strategyState.rateLimitEvents.push(now);
-    strategyState.lastRateLimitTime = now;
-
-    // Prune events outside window
-    const cutoff = now - strategyState.windowMs;
-    strategyState.rateLimitEvents = strategyState.rateLimitEvents.filter((t) => t > cutoff);
-
-    // Check transition to DEGRADED
-    if (strategyState.mode === "CONFIGURED" && !strategyState.manualOverride) {
-      if (strategyState.rateLimitEvents.length >= strategyState.thresholdCount) {
-        strategyState.originalStrategy = config.account_selection_strategy;
-        strategyState.mode = "DEGRADED";
-        debugLog("auto-strategy: transitioning to DEGRADED mode", {
-          rateLimitsInWindow: strategyState.rateLimitEvents.length,
-        });
-        toast("Multiple rate limits detected, temporarily rotating accounts more aggressively", "warning", {
-          debounceKey: "strategy-degraded",
-        }).catch(() => {});
-      }
-    }
-  }
-
-  function checkStrategyRecovery() {
-    if (strategyState.mode !== "DEGRADED" || strategyState.manualOverride) return;
-
-    const now = Date.now();
-    if (now - strategyState.lastRateLimitTime >= strategyState.recoveryMs) {
-      strategyState.mode = "CONFIGURED";
-      strategyState.rateLimitEvents = [];
-      debugLog("auto-strategy: recovered to CONFIGURED mode");
-      toast("Rate limit pressure relieved, restoring normal account selection", "info", {
-        debounceKey: "strategy-recovered",
-      }).catch(() => {});
-    }
-  }
-
-  function getEffectiveStrategy() {
-    if (strategyState.mode === "DEGRADED") return "hybrid";
-    return config.account_selection_strategy;
-  }
-
-  let claudeCliVersion = FALLBACK_CLAUDE_CLI_VERSION;
-  const signatureSessionId = randomUUID();
-  const signatureUserId = getOrCreateDeviceId();
-  if (shouldFetchClaudeCodeVersion) {
-    fetchLatestClaudeCodeVersion()
-      .then((version) => {
-        if (!version) return;
-        claudeCliVersion = version;
-        debugLog("resolved claude-code version from npm", version);
-      })
-      .catch(() => {
-        // Ignore fetch errors and keep fallback version.
-      });
-  }
-
-  /**
-   * Parse refresh error details for retry/disable decisions.
-   * @param {unknown} refreshError
-   * @returns {{message: string, status: number, errorCode: string, isInvalidGrant: boolean, isTerminalStatus: boolean}}
-   */
-  function parseRefreshFailure(refreshError) {
-    const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
-    const status =
-      typeof refreshError === "object" && refreshError && "status" in refreshError ? Number(refreshError.status) : NaN;
-    const errorCode =
-      typeof refreshError === "object" && refreshError && ("errorCode" in refreshError || "code" in refreshError)
-        ? String(refreshError.errorCode || refreshError.code || "")
-        : "";
-    const msgLower = message.toLowerCase();
-    const isInvalidGrant =
-      errorCode === "invalid_grant" || errorCode === "invalid_request" || msgLower.includes("invalid_grant");
-    const isTerminalStatus = status === 400 || status === 401 || status === 403;
-    return { message, status, errorCode, isInvalidGrant, isTerminalStatus };
-  }
-
-  /**
-   * Refresh a specific account token with single-flight protection.
-   * Prevents concurrent refresh races from disabling healthy accounts.
-   * @param {import('./lib/accounts.mjs').ManagedAccount} account
-   * @param {"foreground" | "idle"} [source]
-   * @returns {Promise<string>}
-   */
-  async function refreshAccountTokenSingleFlight(account, source = "foreground") {
-    const key = account.id;
-    const existing = refreshInFlight.get(key);
-    if (existing) {
-      // Foreground requests should not directly inherit idle refresh failures.
-      // Wait for idle maintenance to finish, then re-evaluate token state.
-      if (source === "foreground" && existing.source === "idle") {
-        try {
-          await existing.promise;
-        } catch {
-          // Ignore idle failure here; foreground path handles refresh decisions.
-        }
-
-        if (account.access && account.expires && account.expires > Date.now()) {
-          return account.access;
-        }
-      } else {
-        return existing.promise;
-      }
-    }
-
-    /** @type {{ promise: Promise<string>, source: "foreground" | "idle" }} */
-    const entry = { source, promise: Promise.resolve("") };
-    const p = (async () => {
-      try {
-        return await refreshAccountToken(account, client, source, {
-          onTokensUpdated: async () => {
-            try {
-              await accountManager.saveToDisk();
-            } catch {
-              // Synchronous save failed (disk full, permissions, etc.).
-              // Schedule a debounced retry so the rotated token eventually
-              // reaches disk.  Another process may hit invalid_grant in the
-              // interim, but its retry-from-disk logic can recover once this
-              // save lands.
-              accountManager.requestSaveToDisk();
-              throw new Error("save failed, debounced retry scheduled");
-            }
-          },
-        });
-      } finally {
-        if (refreshInFlight.get(key) === entry) {
-          refreshInFlight.delete(key);
-        }
-      }
-    })();
-
-    entry.promise = p;
-    refreshInFlight.set(key, entry);
-    return p;
-  }
-
-  /**
-   * Refresh one idle (non-active) account in the background.
-   * Best-effort only: never disables accounts from background maintenance.
-   * @param {import('./lib/accounts.mjs').ManagedAccount} account
-   * @returns {Promise<void>}
-   */
-  async function refreshIdleAccount(account) {
-    if (!accountManager) return;
-    if (idleRefreshInFlight.has(account.id)) return;
-
-    idleRefreshInFlight.add(account.id);
-    const attemptedRefreshToken = account.refreshToken;
-
-    try {
-      try {
-        await refreshAccountTokenSingleFlight(account, "idle");
-        return;
-      } catch (err) {
-        let details = parseRefreshFailure(err);
-
-        if (!(details.isInvalidGrant || details.isTerminalStatus)) {
-          debugLog("idle refresh skipped after transient failure", {
-            accountIndex: account.index,
-            status: details.status,
-            errorCode: details.errorCode,
-            message: details.message,
-          });
-          return;
-        }
-
-        const diskAuth = await readDiskAccountAuth(account.id);
-        const retryToken = diskAuth?.refreshToken;
-        if (retryToken && retryToken !== attemptedRefreshToken && account.refreshToken === attemptedRefreshToken) {
-          account.refreshToken = retryToken;
-          if (diskAuth?.tokenUpdatedAt) {
-            account.tokenUpdatedAt = diskAuth.tokenUpdatedAt;
-          } else {
-            markTokenStateUpdated(account);
-          }
-        }
-
-        try {
-          await refreshAccountTokenSingleFlight(account, "idle");
-          return;
-        } catch (retryErr) {
-          details = parseRefreshFailure(retryErr);
-          debugLog("idle refresh retry failed", {
-            accountIndex: account.index,
-            status: details.status,
-            errorCode: details.errorCode,
-            message: details.message,
-          });
-          return;
-        }
-      }
-    } finally {
-      idleRefreshInFlight.delete(account.id);
-    }
-  }
-
-  /**
-   * Opportunistically refresh one near-expiry idle account in background.
-   * Runs during normal requests so inactive accounts stay healthy.
-   * @param {import('./lib/accounts.mjs').ManagedAccount} activeAccount
-   */
-  function maybeRefreshIdleAccounts(activeAccount) {
-    if (!IDLE_REFRESH_ENABLED || !accountManager) return;
-
-    const now = Date.now();
-    const excluded = new Set([activeAccount.index]);
-    const candidates = accountManager
-      .getEnabledAccounts(excluded)
-      .filter((acc) => !acc.expires || acc.expires <= now + IDLE_REFRESH_WINDOW_MS)
-      .filter((acc) => {
-        const last = idleRefreshLastAttempt.get(acc.id) ?? 0;
-        return now - last >= IDLE_REFRESH_MIN_INTERVAL_MS;
-      })
-      .sort((a, b) => (a.expires ?? 0) - (b.expires ?? 0));
-
-    const target = candidates[0];
-    if (!target) return;
-
-    idleRefreshLastAttempt.set(target.id, now);
-    void refreshIdleAccount(target);
-  }
-
-  return {
-    // A1-A4: System prompt transform (unchanged)
-    "experimental.chat.system.transform": (input, output) => {
-      const prefix = CLAUDE_CODE_IDENTITY_STRING;
-      if (!signatureEmulationEnabled && input.model?.providerID === "anthropic") {
-        output.system.unshift(prefix);
-        if (output.system[1]) output.system[1] = prefix + "\n\n" + output.system[1];
-      }
-    },
-    config: async (input) => {
-      input.command ??= {};
-      input.command["anthropic"] = {
-        template: "/anthropic",
-        description: "Manage Anthropic auth, config, and betas (usage, login, config, set, betas, switch)",
-      };
-    },
-    "command.execute.before": async (input) => {
-      if (input.command !== "anthropic") return;
-
-      try {
-        await handleAnthropicSlashCommand(input);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        await sendCommandMessage(input.sessionID, `▣ Anthropic (error)\n\n${message}`);
-      }
-
-      throw new Error(ANTHROPIC_COMMAND_HANDLED);
-    },
-    auth: {
-      provider: "anthropic",
-      async loader(getAuth, provider) {
-        const auth = await getAuth();
-        if (auth.type === "oauth") {
-          // B1-B2: Zero out cost for max plan and optionally override context limits.
-          for (const model of Object.values(provider.models)) {
-            model.cost = {
-              input: 0,
-              output: 0,
-              cache: { read: 0, write: 0 },
-            };
-
-            // Override context limits for 1M-window models so OpenCode
-            // triggers compaction at the right threshold instead of relying
-            // on potentially stale models.dev data.
-            if (
-              config.override_model_limits.enabled &&
-              !isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT) &&
-              (hasOneMillionContext(model.id) || isOpus46Model(model.id))
-            ) {
-              model.limit = {
-                ...(model.limit ?? {}),
-                context: config.override_model_limits.context,
-                ...(config.override_model_limits.output > 0 ? { output: config.override_model_limits.output } : {}),
-              };
-            }
-          }
-
-          // Initialize AccountManager from disk + OpenCode auth fallback
-          accountManager = await AccountManager.load(config, {
-            refresh: auth.refresh,
-            access: auth.access,
-            expires: auth.expires,
-          });
-
-          // If we bootstrapped from auth.json and have no stored accounts file,
-          // save immediately to create it (debounced save may not fire in time)
-          if (accountManager.getAccountCount() > 0) {
-            await accountManager.saveToDisk();
-          }
-
-          // OPENCODE_ANTHROPIC_INITIAL_ACCOUNT: pin this session to a specific account.
-          // Accepts 1-based index or email. Overrides strategy to sticky and disables
-          // syncActiveIndexFromDisk so other sessions can't override this one.
-          // Use case: terminal 1 with INITIAL_ACCOUNT=1, terminal 2 with =2.
-          const initialAccountEnv = process.env.OPENCODE_ANTHROPIC_INITIAL_ACCOUNT?.trim();
-          if (initialAccountEnv && accountManager.getAccountCount() > 1) {
-            const accounts = accountManager.getEnabledAccounts();
-            let target = null;
-
-            // Try as 1-based index
-            const asIndex = parseInt(initialAccountEnv, 10);
-            if (!isNaN(asIndex) && asIndex >= 1 && asIndex <= accounts.length) {
-              target = accounts[asIndex - 1];
-            }
-
-            // Try as email
-            if (!target) {
-              target = accounts.find((a) => a.email && a.email.toLowerCase() === initialAccountEnv.toLowerCase());
-            }
-
-            if (target && accountManager.forceCurrentIndex(target.index)) {
-              config.account_selection_strategy = "sticky";
-              initialAccountPinned = true;
-              debugLog("OPENCODE_ANTHROPIC_INITIAL_ACCOUNT: pinned to account", {
-                index: target.index + 1,
-                email: target.email,
-                strategy: "sticky (overridden)",
-              });
-            } else {
-              debugLog("OPENCODE_ANTHROPIC_INITIAL_ACCOUNT: could not resolve account", initialAccountEnv);
-            }
-          }
-
-          // Initialize telemetry emitter
-          const telemetryEnabled =
-            config.telemetry?.emulate_minimal || isTruthyEnv(process.env.OPENCODE_ANTHROPIC_TELEMETRY_EMULATE);
-          const firstAccount = accountManager.getEnabledAccounts()[0];
-          telemetryEmitter.init({
-            enabled: telemetryEnabled,
-            deviceId: getOrCreateDeviceId(),
-            cliVersion: claudeCliVersion,
-            accountUuid: getAccountIdentifier(firstAccount),
-            orgUuid: process.env.CLAUDE_CODE_ORGANIZATION_UUID || "",
-            sessionId: signatureSessionId,
-          });
-
-          return {
-            apiKey: "",
-            /**
-             * @param {any} input
-             * @param {any} init
-             */
-            async fetch(input, init) {
-              // Re-read auth for non-oauth fallback
-              const currentAuth = await getAuth();
-              if (currentAuth.type !== "oauth") return fetch(input, init);
-
-              // Transform URL once (shared across retries)
-              const requestInit = init ?? {};
-              const { requestInput, requestUrl } = transformRequestUrl(input);
-              const requestMethod = String(
-                requestInit.method || (requestInput instanceof Request ? requestInput.method : "POST"),
-              ).toUpperCase();
-              let showUsageToast;
-              try {
-                showUsageToast = new URL(requestUrl).pathname === "/v1/messages" && requestMethod === "POST";
-              } catch {
-                showUsageToast = false;
-              }
-
-              let lastError = null;
-              const transientRefreshSkips = new Set();
-
-              // Sync with CLI changes at request start.
-              // Skip when OPENCODE_ANTHROPIC_INITIAL_ACCOUNT pinned this session —
-              // other sessions' CLI changes must not override the pinned account.
-              if (accountManager && !initialAccountPinned) {
-                await accountManager.syncActiveIndexFromDisk();
-              }
-
-              // Try each account at most once. If the error is account-specific,
-              // switch to the next account. If it's service-wide, return immediately.
-              const maxAttempts = accountManager.getTotalAccountCount();
-
-              // File-ID account pinning: if the request body references file_ids
-              // that we've mapped to a specific account (via /anthropic files),
-              // pin the first attempt to that account so files are accessible.
-              // Without this, round-robin could route to an account that doesn't
-              // have the referenced files, causing file_not_found errors.
-              let pinnedAccount = null;
-              if (typeof requestInit.body === "string" && fileAccountMap.size > 0) {
-                try {
-                  const bodyObj = JSON.parse(requestInit.body);
-                  const fileIds = extractFileIds(bodyObj);
-                  for (const fid of fileIds) {
-                    const pinnedIndex = fileAccountMap.get(fid);
-                    if (pinnedIndex !== undefined) {
-                      const candidates = accountManager.getEnabledAccounts();
-                      pinnedAccount = candidates.find((a) => a.index === pinnedIndex) ?? null;
-                      if (pinnedAccount) {
-                        debugLog("file-id pinning: routing to account", {
-                          fileId: fid,
-                          accountIndex: pinnedIndex,
-                          email: pinnedAccount.email,
-                        });
-                        break;
-                      }
-                    }
-                  }
-                } catch {
-                  // Non-JSON body or parse error — skip pinning
-                }
-              }
-
-              let serviceWideRetryCount = 0; // Track 529/503 retries (max 2 per RE doc §5.5)
-              for (let attempt = 0; attempt < maxAttempts; attempt++) {
-                // Select account — use pinned account on first attempt if available
-                const account =
-                  attempt === 0 && pinnedAccount && !transientRefreshSkips.has(pinnedAccount.index)
-                    ? pinnedAccount
-                    : accountManager.getCurrentAccount(transientRefreshSkips);
-
-                // Toast account usage on first use and whenever the account changes
-                if (showUsageToast && account && accountManager) {
-                  const currentIndex = accountManager.getCurrentIndex();
-                  if (currentIndex !== lastToastedIndex) {
-                    const name = account.email || `Account ${currentIndex + 1}`;
-                    const total = accountManager.getAccountCount();
-                    const msg = total > 1 ? `Claude: ${name} (${currentIndex + 1}/${total})` : `Claude: ${name}`;
-                    await toast(msg, "info", { debounceKey: "account-usage" });
-                    lastToastedIndex = currentIndex;
-                  }
-                }
-
-                if (!account) {
-                  const enabledCount = accountManager.getAccountCount();
-                  if (enabledCount === 0) {
-                    throw new Error(
-                      "No enabled Anthropic accounts available. Enable one with 'opencode-anthropic-auth enable <N>'.",
-                    );
-                  }
-                  // All accounts excluded (transient refresh failures) — give up
-                  throw new Error("No available Anthropic account for request.");
-                }
-
-                // Determine access token
-                let accessToken;
-                // Per-account token refresh
-                // Refresh 5 minutes before expiry to avoid mid-request token expiration (RE doc §1.10)
-                if (!account.access || !account.expires || account.expires < Date.now() + 300_000) {
-                  const attemptedRefreshToken = account.refreshToken;
-                  try {
-                    accessToken = await refreshAccountTokenSingleFlight(account);
-                    // Tokens are now saved under the refresh lock (inside
-                    // refreshAccountToken) so no debounced save needed here.
-                  } catch (err) {
-                    // Token refresh failed — check if another instance rotated the
-                    // refresh token and persisted it between attempts.
-                    let finalError = err;
-                    let details = parseRefreshFailure(err);
-
-                    // Belt-and-suspenders retry: on terminal/invalid_grant failures,
-                    // always re-read disk token and retry once before disabling.
-                    if (details.isInvalidGrant || details.isTerminalStatus) {
-                      const diskAuth = await readDiskAccountAuth(account.id);
-                      const retryToken = diskAuth?.refreshToken;
-                      if (
-                        retryToken &&
-                        retryToken !== attemptedRefreshToken &&
-                        account.refreshToken === attemptedRefreshToken
-                      ) {
-                        debugLog("refresh token on disk differs from in-memory, retrying with disk token", {
-                          accountIndex: account.index,
-                        });
-                        account.refreshToken = retryToken;
-                        if (diskAuth?.tokenUpdatedAt) {
-                          account.tokenUpdatedAt = diskAuth.tokenUpdatedAt;
-                        } else {
-                          markTokenStateUpdated(account);
-                        }
-                      } else if (retryToken && retryToken !== attemptedRefreshToken) {
-                        debugLog("skipping disk token adoption because in-memory token already changed", {
-                          accountIndex: account.index,
-                        });
-                      }
-
-                      try {
-                        accessToken = await refreshAccountTokenSingleFlight(account);
-                      } catch (retryErr) {
-                        finalError = retryErr;
-                        details = parseRefreshFailure(retryErr);
-                        debugLog("retry refresh failed", {
-                          accountIndex: account.index,
-                          status: details.status,
-                          errorCode: details.errorCode,
-                          message: details.message,
-                        });
-                      }
-                    }
-
-                    if (!accessToken) {
-                      accountManager.markFailure(account);
-
-                      if (details.isInvalidGrant || details.isTerminalStatus) {
-                        const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
-                        debugLog("disabling account after terminal refresh failure", {
-                          accountIndex: account.index,
-                          status: details.status,
-                          errorCode: details.errorCode,
-                          message: details.message,
-                        });
-                        account.enabled = false;
-                        accountManager.requestSaveToDisk();
-                        const statusLabel = Number.isFinite(details.status)
-                          ? `HTTP ${details.status}`
-                          : "unknown status";
-                        await toast(
-                          `Disabled ${name} (token refresh failed: ${details.errorCode || statusLabel})`,
-                          "error",
-                        );
-                      } else {
-                        // Skip this account for the remainder of this request.
-                        transientRefreshSkips.add(account.index);
-                      }
-                      lastError = finalError;
-                      continue; // Try next account
-                    }
-                  }
-                } else {
-                  accessToken = account.access;
-                }
-
-                // Store live token for exit telemetry
-                if (accessToken) liveTokenRef.token = accessToken;
-
-                // Keep non-active accounts warm without blocking the request.
-                maybeRefreshIdleAccounts(account);
-
-                // Pre-compute the beta header so it can be injected into both the
-                // request body (betas field) and the anthropic-beta header.
-                const { model: _reqModel, hasFileReferences: _reqHasFileRefs } = parseRequestBodyMetadata(
-                  requestInit.body,
-                );
-                const _reqProvider = detectProvider(requestUrl);
-                const computedBetaHeader = buildAnthropicBetaHeader(
-                  "",
-                  signatureEmulationEnabled,
-                  _reqModel,
-                  _reqProvider,
-                  config.custom_betas,
-                  getEffectiveStrategy(),
-                  requestUrl?.pathname,
-                  _reqHasFileRefs,
-                );
-
-                const body = transformRequestBody(
-                  requestInit.body,
-                  {
-                    enabled: signatureEmulationEnabled,
-                    claudeCliVersion,
-                    promptCompactionMode,
-                    provider: _reqProvider,
-                    cachePolicy: config.cache_policy || { ttl: "1h", ttl_supported: true },
-                    fastMode: config.fast_mode || false,
-                  },
-                  {
-                    persistentUserId: signatureUserId,
-                    sessionId: signatureSessionId,
-                    accountId: getAccountIdentifier(account),
-                  },
-                  computedBetaHeader,
-                );
-                logTransformedSystemPrompt(body);
-
-                // Build headers with the selected account's token
-                const requestHeaders = buildRequestHeaders(input, requestInit, accessToken, body, requestUrl, {
-                  enabled: signatureEmulationEnabled,
-                  claudeCliVersion,
-                  customBetas: config.custom_betas,
-                  strategy: getEffectiveStrategy(),
-                });
-                // Execute the request
-                let response;
-                try {
-                  response = await fetch(requestInput, {
-                    ...requestInit,
-                    body,
-                    headers: requestHeaders,
-                  });
-                } catch (err) {
-                  const fetchError = err instanceof Error ? err : new Error(String(err));
-
-                  if (accountManager && account) {
-                    accountManager.markFailure(account);
-                    transientRefreshSkips.add(account.index);
-                    lastError = fetchError;
-                    debugLog("request fetch threw, trying next account", {
-                      accountIndex: account.index,
-                      message: fetchError.message,
-                    });
-                    continue;
-                  }
-
-                  throw fetchError;
-                }
-
-                // Proactive rate limit detection from response headers
-                // Check all rate-limit subtypes: tokens, requests, input-tokens (RE doc §5.6)
-                if (response.ok && account && accountManager) {
-                  const RATE_LIMIT_SUBTYPES = ["tokens", "requests", "input-tokens"];
-                  let maxUtilization = 0;
-                  let maxUtilizationSubtype = "";
-                  let anySurpassed = false;
-                  let surpassedResetAt = null;
-
-                  for (const subtype of RATE_LIMIT_SUBTYPES) {
-                    const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${subtype}-utilization`);
-                    const surpassed = response.headers.get(
-                      `anthropic-ratelimit-unified-${subtype}-surpassed-threshold`,
-                    );
-                    const resetAt = response.headers.get(`anthropic-ratelimit-unified-${subtype}-reset`);
-
-                    if (utilizationStr) {
-                      const utilization = parseFloat(utilizationStr);
-                      if (!isNaN(utilization) && utilization > maxUtilization) {
-                        maxUtilization = utilization;
-                        maxUtilizationSubtype = subtype;
-                      }
-                    }
-
-                    if (surpassed) {
-                      anySurpassed = true;
-                      surpassedResetAt = surpassedResetAt || resetAt;
-                    }
-                  }
-
-                  if (maxUtilization > 0.8) {
-                    const penalty = Math.round((maxUtilization - 0.8) * 50); // 0-10 points
-                    accountManager.applyUtilizationPenalty(account, penalty);
-                    debugLog("high rate limit utilization", {
-                      accountIndex: account.index,
-                      subtype: maxUtilizationSubtype,
-                      utilization: (maxUtilization * 100).toFixed(1) + "%",
-                      penalty,
-                    });
-                  }
-
-                  if (anySurpassed) {
-                    accountManager.applySurpassedThreshold(account, surpassedResetAt);
-                    debugLog("rate limit threshold surpassed", {
-                      accountIndex: account.index,
-                      resetAt: surpassedResetAt,
-                    });
-                  }
-                }
-
-                // On error, check if it's account-specific or service-wide
-                if (!response.ok && accountManager && account) {
-                  let errorBody = null;
-                  try {
-                    errorBody = await response.clone().text();
-                  } catch {
-                    // Ignore read errors
-                  }
-
-                  // Auto-disable extended cache TTL if the API rejects it with a 400
-                  if (
-                    response.status === 400 &&
-                    errorBody &&
-                    (errorBody.includes("ttl") || errorBody.includes("cache_control"))
-                  ) {
-                    if (config.cache_policy && config.cache_policy.ttl_supported !== false) {
-                      config.cache_policy.ttl_supported = false;
-                      saveConfig({ cache_policy: { ttl_supported: false } });
-                      debugLog("cache TTL not supported by API, auto-disabled");
-                    }
-                  }
-
-                  // Auto-disable fast mode if the API rejects speed parameter
-                  if (response.status === 400 && errorBody && errorBody.includes("speed")) {
-                    if (config.fast_mode) {
-                      config.fast_mode = false;
-                      saveConfig({ fast_mode: false });
-                      debugLog("fast mode not supported by API, auto-disabled");
-                    }
-                  }
-
-                  // Check x-should-retry header first — server override
-                  const shouldRetry = parseShouldRetryHeader(response);
-                  if (shouldRetry === false) {
-                    // Server says DO NOT retry — return error directly
-                    debugLog("x-should-retry: false — not retrying", { status: response.status });
-                    return transformResponse(response);
-                  }
-
-                  if (isAccountSpecificError(response.status, errorBody)) {
-                    // Account-specific: mark this account, try the next one
-                    const reason = parseRateLimitReason(response.status, errorBody);
-                    const retryAfterMs = parseRetryAfterMsHeader(response) || parseRetryAfterHeader(response);
-                    const authOrPermissionIssue = reason === "AUTH_FAILED";
-
-                    // Auth failures should force token refresh on next use.
-                    if (reason === "AUTH_FAILED") {
-                      account.access = undefined;
-                      account.expires = undefined;
-                      markTokenStateUpdated(account);
-                    }
-
-                    debugLog("account-specific error, switching account", {
-                      accountIndex: account.index,
-                      status: response.status,
-                      reason,
-                    });
-
-                    accountManager.markRateLimited(account, reason, authOrPermissionIssue ? null : retryAfterMs);
-
-                    // Track for auto-strategy adaptation
-                    recordRateLimitForStrategy();
-
-                    const name = account.email || `Account ${accountManager.getCurrentIndex() + 1}`;
-                    const total = accountManager.getAccountCount();
-                    if (total > 1) {
-                      const switchReason = formatSwitchReason(response.status, reason);
-                      await toast(`${name} ${switchReason}, switching account`, "warning", {
-                        debounceKey: "account-switch",
-                      });
-                    }
-
-                    continue; // Try next account immediately
-                  }
-
-                  // Service-wide error (529, 503, 500, etc.)
-                  // x-should-retry: true forces a retry even for service-wide errors (RE doc §5.5)
-                  if (shouldRetry === true) {
-                    const retryDelay = parseRetryAfterMsHeader(response) || parseRetryAfterHeader(response) || 2000;
-                    debugLog("x-should-retry: true on service-wide error, sleeping before retry", {
-                      status: response.status,
-                      retryDelay,
-                    });
-                    await new Promise((resolve) => setTimeout(resolve, retryDelay));
-                    // Decrement attempt so this retry doesn't consume an account slot
-                    attempt--;
-                    continue;
-                  }
-
-                  // 529 (overloaded) and 503 (service unavailable) — brief sleep-and-retry
-                  // per RE doc §5.5 (Stainless SDK retries 500+ codes up to 2 times)
-                  if ((response.status === 529 || response.status === 503) && serviceWideRetryCount < 2) {
-                    serviceWideRetryCount++;
-                    const baseDelay = Math.min(0.5 * Math.pow(2, serviceWideRetryCount), 8);
-                    const jitter = 1 - Math.random() * 0.25;
-                    const sleepMs = Math.round(baseDelay * jitter * 1000);
-                    debugLog("service-wide retryable error, sleeping before retry", {
-                      status: response.status,
-                      attempt: serviceWideRetryCount,
-                      sleepMs,
-                    });
-                    await new Promise((resolve) => setTimeout(resolve, sleepMs));
-                    // Decrement attempt so this retry doesn't consume an account slot
-                    attempt--;
-                    continue;
-                  }
-
-                  // Non-retryable service-wide error — return to caller
-                  debugLog("service-wide response error, returning directly", {
-                    status: response.status,
-                  });
-                  return transformResponse(response);
-                }
-
-                // Success
-                if (account && accountManager) {
-                  if (response.ok) {
-                    accountManager.markSuccess(account);
-                    checkStrategyRecovery();
-
-                    // Fire startup telemetry (once per session, after first success)
-                    if (telemetryEmitter.enabled && account?.access) {
-                      telemetryEmitter.sendStartupEvents(account.access).catch(() => {});
-                    }
-                  }
-                }
-
-                // Wire usage tracking and mid-stream error detection for SSE responses only.
-                const shouldInspectStream = response.ok && account && accountManager && isEventStreamResponse(response);
-
-                const usageCallback = shouldInspectStream
-                  ? (/** @type {UsageStats} */ usage) => {
-                      accountManager.recordUsage(account.index, usage);
-                      // Phase 4: session metrics
-                      updateSessionMetrics(usage, _reqModel);
-                      // Cache hit rate warning
-                      if (sessionMetrics.turns >= 3) {
-                        const avgRate = getAverageCacheHitRate();
-                        const threshold = config.cache_policy?.hit_rate_warning_threshold ?? 0.3;
-                        if (avgRate < threshold) {
-                          debugLog("low cache hit rate", {
-                            avgRate: (avgRate * 100).toFixed(1) + "%",
-                            turns: sessionMetrics.turns,
-                          });
-                        }
-                      }
-                      // Budget warning
-                      const maxBudget = parseFloat(process.env.OPENCODE_ANTHROPIC_MAX_BUDGET_USD || "0");
-                      if (maxBudget > 0) {
-                        const pct = sessionMetrics.sessionCostUsd / maxBudget;
-                        if (pct >= 1.0 && !isTruthyEnv(process.env.OPENCODE_ANTHROPIC_IGNORE_BUDGET)) {
-                          toast(
-                            `Session budget exceeded ($${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)})`,
-                            "warning",
-                            { debounceKey: "budget" },
-                          ).catch(() => {});
-                        } else if (pct >= 0.8) {
-                          toast(
-                            `Session at ${(pct * 100).toFixed(0)}% of budget ($${sessionMetrics.sessionCostUsd.toFixed(2)} / $${maxBudget.toFixed(2)})`,
-                            "warning",
-                            { debounceKey: "budget" },
-                          ).catch(() => {});
-                        }
-                      }
-                    }
-                  : null;
-
-                const accountErrorCallback = shouldInspectStream
-                  ? (details) => {
-                      // Mid-stream account error: mark for NEXT request
-                      if (details.invalidateToken) {
-                        account.access = undefined;
-                        account.expires = undefined;
-                        markTokenStateUpdated(account);
-                      }
-                      accountManager.markRateLimited(account, details.reason, null);
-                    }
-                  : null;
-
-                return transformResponse(response, usageCallback, accountErrorCallback);
-              }
-
-              // All accounts tried
-              if (lastError) throw lastError;
-              throw new Error("All accounts exhausted — no account could serve this request");
-            },
-          };
-        }
-
-        return {};
-      },
-      methods: [
-        {
-          // H1: Claude Pro/Max OAuth — now with multi-account support
-          label: "Claude Pro/Max (multi-account)",
-          type: "oauth",
-          authorize: async () => {
-            // Check for existing accounts
-            const stored = await loadAccounts();
-            if (stored && stored.accounts.length > 0 && accountManager) {
-              const action = await promptAccountMenu(accountManager);
-
-              if (action === "cancel") {
-                return {
-                  url: "about:blank",
-                  instructions: "Cancelled.",
-                  method: "code",
-                  callback: async () => ({ type: "failed" }),
-                };
-              }
-
-              if (action === "manage") {
-                await promptManageAccounts(accountManager);
-                await accountManager.saveToDisk();
-                return {
-                  url: "about:blank",
-                  instructions: "Account management complete. Re-run auth to add accounts.",
-                  method: "code",
-                  callback: async () => ({ type: "failed" }),
-                };
-              }
-
-              if (action === "fresh") {
-                await clearAccounts();
-                accountManager.clearAll();
-              }
-
-              // action === "add" or "fresh" — fall through to OAuth flow
-            }
-
-            const { url, verifier } = await authorize("max");
-            return {
-              url: url,
-              instructions: "Paste the authorization code here: ",
-              method: "code",
-              callback: async (code) => {
-                const credentials = await exchange(code, verifier);
-                if (credentials.type === "failed") return credentials;
-
-                // Initialize AccountManager if not yet loaded (first login —
-                // loader() hasn't run yet because auth hasn't completed)
-                if (!accountManager) {
-                  accountManager = await AccountManager.load(config, null);
-                }
-
-                // Add to account pool and persist immediately
-                const countBefore = accountManager.getAccountCount();
-                accountManager.addAccount(
-                  credentials.refresh,
-                  credentials.access,
-                  credentials.expires,
-                  credentials.email,
-                );
-                await accountManager.saveToDisk();
-
-                // Toast the result
-                const total = accountManager.getAccountCount();
-                const name = credentials.email || "account";
-                if (countBefore > 0) {
-                  await toast(`Added ${name} — ${total} accounts`, "success");
-                } else {
-                  await toast(`Authenticated (${name})`, "success");
-                }
-
-                return credentials;
-              },
-            };
-          },
-        },
-        {
-          // H2: Create an API Key (unchanged)
-          label: "Create an API Key",
-          type: "oauth",
-          authorize: async () => {
-            const { url, verifier } = await authorize("console");
-            return {
-              url: url,
-              instructions: "Paste the authorization code here: ",
-              method: "code",
-              callback: async (code) => {
-                const credentials = await exchange(code, verifier);
-                if (credentials.type === "failed") return credentials;
-                const result = await fetch(`https://api.anthropic.com/api/oauth/claude_cli/create_api_key`, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    authorization: `Bearer ${credentials.access}`,
-                  },
-                }).then((r) => r.json());
-                return { type: "success", key: result.raw_key };
-              },
-            };
-          },
-        },
-        {
-          // H3: Manual API Key (unchanged)
-          provider: "anthropic",
-          label: "Manually enter API Key",
-          type: "api",
-        },
-      ],
-    },
-  };
-}
+export default AnthropicAuthPlugin;

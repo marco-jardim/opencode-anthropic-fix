@@ -271,16 +271,15 @@ describe("plugin lifecycle", () => {
 
     // KEY ASSERTION: saveAccounts must have been called — the accounts file is created
     expect(saveAccounts).toHaveBeenCalledTimes(1);
-    expect(saveAccounts).toHaveBeenCalledWith(
-      expect.objectContaining({
-        version: 1,
-        accounts: expect.arrayContaining([
-          expect.objectContaining({
-            refreshToken: "refresh-from-oauth",
-            enabled: true,
-          }),
-        ]),
-      }),
+    const savedArg = saveAccounts.mock.calls[0][0];
+    expect(savedArg.version).toBe(1);
+    expect(savedArg.accounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          refreshToken: "refresh-from-oauth",
+          enabled: true,
+        }),
+      ]),
     );
   });
 
@@ -300,15 +299,14 @@ describe("plugin lifecycle", () => {
 
     // Should have saved the bootstrapped account immediately
     expect(saveAccounts).toHaveBeenCalledTimes(1);
-    expect(saveAccounts).toHaveBeenCalledWith(
-      expect.objectContaining({
-        version: 1,
-        accounts: expect.arrayContaining([
-          expect.objectContaining({
-            refreshToken: "existing-refresh",
-          }),
-        ]),
-      }),
+    const savedArg2 = saveAccounts.mock.calls[0][0];
+    expect(savedArg2.version).toBe(1);
+    expect(savedArg2.accounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          refreshToken: "existing-refresh",
+        }),
+      ]),
     );
 
     // Should return fetch interceptor
@@ -395,13 +393,15 @@ describe("slash commands", () => {
    */
   async function runAnthropic(args) {
     client.session.prompt.mockClear();
-    await expect(
-      plugin["command.execute.before"]({
+    const output = { parts: [] };
+    await plugin["command.execute.before"](
+      {
         command: "anthropic",
         arguments: args,
         sessionID: "session-1",
-      }),
-    ).rejects.toThrow("__ANTHROPIC_COMMAND_HANDLED__");
+      },
+      output,
+    );
 
     const calls = client.session.prompt.mock.calls;
     expect(calls.length).toBeGreaterThan(0);
@@ -541,6 +541,36 @@ describe("slash commands", () => {
     expect(text).toContain("Token exchange failed");
     expect(text).toContain("HTTP 400");
     expect(text).toContain("invalid_grant");
+  });
+
+  it("applies slash OAuth exchange cooldown after 429 failures", async () => {
+    vi.useFakeTimers();
+    try {
+      const loginText = await runAnthropic("login");
+
+      const stateMatch = loginText.match(/[?&]state=([^&\s]+)/);
+      const state = stateMatch ? stateMatch[1] : "test-state";
+
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 429,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ error: { type: "rate_limit_error", message: "Rate limited" } }),
+      });
+
+      const firstPromise = runAnthropic(`login complete bad-code#${state}`);
+      await vi.runAllTimersAsync();
+      const first = await firstPromise;
+      expect(first).toContain("Token exchange failed");
+      expect(first).toContain("Wait about");
+
+      const callsAfterFirst = mockFetch.mock.calls.length;
+      const second = await runAnthropic(`login complete bad-code#${state}`);
+      expect(second).toContain("still rate-limited");
+      expect(mockFetch.mock.calls.length).toBe(callsAfterFirst);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("expires pending slash OAuth flow after TTL", async () => {
@@ -695,7 +725,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.80");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.81");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.has("x-api-key")).toBe(false);
@@ -1175,13 +1205,14 @@ describe("file-id account pinning", () => {
         ),
       );
 
-    await expect(
-      plugin["command.execute.before"]({
+    await plugin["command.execute.before"](
+      {
         command: "anthropic",
         arguments: "files list",
         sessionID: "s1",
-      }),
-    ).rejects.toThrow("__ANTHROPIC_COMMAND_HANDLED__");
+      },
+      { parts: [] },
+    );
 
     // Verify files list fetched from both accounts
     expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -1250,13 +1281,14 @@ describe("file-id account pinning", () => {
       )
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: [] }), { status: 200 }));
 
-    await expect(
-      plugin["command.execute.before"]({
+    await plugin["command.execute.before"](
+      {
         command: "anthropic",
         arguments: "files list",
         sessionID: "s1",
-      }),
-    ).rejects.toThrow("__ANTHROPIC_COMMAND_HANDLED__");
+      },
+      { parts: [] },
+    );
 
     mockFetch.mockReset();
     mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
@@ -1313,25 +1345,27 @@ describe("file-id account pinning", () => {
         ),
       );
 
-    await expect(
-      plugin["command.execute.before"]({
+    await plugin["command.execute.before"](
+      {
         command: "anthropic",
         arguments: "files list",
         sessionID: "s1",
-      }),
-    ).rejects.toThrow("__ANTHROPIC_COMMAND_HANDLED__");
+      },
+      { parts: [] },
+    );
 
     // Delete file-xyz (uses current account = account 1 by sticky)
     mockFetch.mockReset();
     mockFetch.mockResolvedValueOnce(new Response("{}", { status: 200 }));
 
-    await expect(
-      plugin["command.execute.before"]({
+    await plugin["command.execute.before"](
+      {
         command: "anthropic",
         arguments: "files delete file-xyz",
         sessionID: "s1",
-      }),
-    ).rejects.toThrow("__ANTHROPIC_COMMAND_HANDLED__");
+      },
+      { parts: [] },
+    );
 
     // Now request with file-xyz — should NOT pin (mapping deleted)
     mockFetch.mockReset();
@@ -1448,7 +1482,7 @@ describe("fetch interceptor — token refresh", () => {
     const [refreshUrl, refreshInit] = mockFetch.mock.calls[0];
     expect(refreshUrl).toBe("https://platform.claude.com/v1/oauth/token");
     expect(JSON.parse(refreshInit.body).grant_type).toBe("refresh_token");
-    expect(refreshInit.headers["User-Agent"]).toBe("claude-code/2.1.80");
+    expect(refreshInit.headers["User-Agent"]).toBe("axios/1.13.6");
 
     // Second call should use the fresh token
     const [, apiInit] = mockFetch.mock.calls[1];
@@ -2194,12 +2228,14 @@ describe("fetch interceptor — account exhaustion", () => {
     });
     const result = await plugin.auth.loader(getAuth, makeProvider());
 
-    // Refresh fails with transient 500
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      text: async () => "server error",
-    });
+    // Refresh fails with transient 500 (refreshToken retries 2 extra times)
+    for (let i = 0; i < 3; i++) {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: async () => "server error",
+      });
+    }
 
     await expect(
       result.fetch("https://api.anthropic.com/v1/messages", {
@@ -2229,6 +2265,42 @@ describe("fetch interceptor — account exhaustion", () => {
 
     // Only 1 fetch call — no retry (no other accounts)
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies cooldown after refresh endpoint 429 to avoid hammering OAuth token endpoint", async () => {
+    const fetchFn = await setupFetchFn(client, [{ access: "expired", expires: Date.now() - 1000 }], {
+      access: "expired",
+      expires: Date.now() - 1000,
+    });
+
+    // refreshToken now retries 2 times on retryable responses; keep all attempts at 429.
+    for (let i = 0; i < 3; i++) {
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { type: "rate_limit_error", message: "Rate limit exceeded" } }), {
+          status: 429,
+          headers: { "retry-after": "1" },
+        }),
+      );
+    }
+
+    await expect(
+      fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ messages: [] }),
+      }),
+    ).rejects.toThrow(/Token refresh failed|No available Anthropic account|All accounts exhausted/);
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+
+    // Immediate next request should not call token endpoint again while cooldown is active.
+    await expect(
+      fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ messages: [] }),
+      }),
+    ).rejects.toThrow(/No available Anthropic account|All accounts exhausted/);
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
   });
 
   it.each([
@@ -2557,7 +2629,7 @@ describe("OAuth exchange failure", () => {
 
     expect(credentials.type).toBe("failed");
     const [, exchangeInit] = mockFetch.mock.calls[0];
-    expect(exchangeInit.headers["User-Agent"]).toBe("claude-code/2.1.80");
+    expect(exchangeInit.headers["User-Agent"]).toBe("axios/1.13.6");
     // saveAccounts should NOT have been called
     expect(saveAccounts).not.toHaveBeenCalled();
   });
@@ -2795,7 +2867,7 @@ describe("header handling", () => {
     });
 
     const [, init] = mockFetch.mock.calls[0];
-    // Claude Code v2.1.80: context-1m is always-on for eligible models regardless of provider.
+    // Claude Code v2.1.81: context-1m is always-on for eligible models regardless of provider.
     expect(init.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
   });
 
@@ -2813,7 +2885,7 @@ describe("header handling", () => {
     expect(betaHeader).toContain("effort-2025-11-24");
     expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).toContain("fast-mode-2026-02-01");
-    // Claude Code v2.1.80: interleaved-thinking is now always-on (not model-gated)
+    // Claude Code v2.1.81: interleaved-thinking is now always-on (not model-gated)
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
   });
@@ -3141,7 +3213,7 @@ describe("header handling", () => {
     const parsed = JSON.parse(init.body);
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
     expect(parsed.system[0].text).toContain("cc_entrypoint=cli");
-    expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{5}/);
+    expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{3,5}/);
     expect(parsed.system[0].cache_control).toBeUndefined();
     expect(parsed.system[1]).toEqual({
       type: "text",

@@ -43,9 +43,10 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Standalone CLI** &mdash; manage accounts without opening OpenCode
 - **Configurable strategies** &mdash; sticky, round-robin, or hybrid account selection
 - **Claude Code signature emulation** &mdash; full HTTP header, system prompt, beta flag, and metadata mimicry derived from Claude Code's open source code
-- **OAuth endpoint fingerprint parity** &mdash; sends Claude Code-style `User-Agent` on `/v1/oauth/token` and `/v1/oauth/revoke` to match current OAuth validation
+- **OAuth endpoint fingerprint parity** &mdash; matches the real CLI's bundled axios 1.13.6 HTTP client signature (`Accept`, `User-Agent`, `Content-Type`) on all OAuth token endpoint calls, required since 2026-03-21 server-side enforcement
+- **Dynamic billing cache hash** &mdash; computes the `cch` field in the billing header using the real CLI's `NP1()` algorithm (SHA-256 of salt + first user message chars + version), replacing the static `00000` placeholder
 - **Adaptive thinking for Opus/Sonnet 4.6** &mdash; automatically normalizes thinking to `{type: "adaptive"}` for supported models, with `effort-2025-11-24` beta
-- **Upstream-aligned auto betas** &mdash; 13+ always-on betas matching Claude Code 2.1.80 (`redact-thinking-2026-02-12` available as opt-in to preserve thinking block visibility)
+- **Upstream-aligned auto betas** &mdash; 13+ always-on betas matching Claude Code 2.1.81 (`redact-thinking-2026-02-12` available as opt-in to preserve thinking block visibility)
 - **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
 - **Runtime config + custom betas** &mdash; `/anthropic set`, `/anthropic config`, and `/anthropic betas` slash commands for live feature toggling without restarting OpenCode
 - **Files API integration** &mdash; upload, list, download, and manage files via `/anthropic files` with endpoint/content-scoped `files-api-2025-04-14` beta injection
@@ -528,6 +529,33 @@ Account credentials are stored with restrictive file permissions (owner read/wri
 ### "Provider not showing up"
 
 Make sure the plugin is installed in `~/.config/opencode/plugin/`. Restart OpenCode after installing.
+
+### "TypeError: undefined is not an object (evaluating 'hook.config')"
+
+This usually means OpenCode loaded a broken/missing plugin entry (often a stale file in `~/.config/opencode/plugin/`, or a plugin listed in `opencode.json` that is not actually installed).
+
+For OpenCode v1.x, the safest local-dev setup is to link the package directory into OpenCode's `node_modules` and load it by package name:
+
+```powershell
+$link = "$env:USERPROFILE\.config\opencode\node_modules\opencode-anthropic-fix"
+$target = "D:\git\opencode-anthropic-fix"
+
+New-Item -ItemType Directory -Force -Path (Split-Path $link) | Out-Null
+if (Test-Path $link) { Remove-Item $link -Recurse -Force }
+New-Item -ItemType Junction -Path $link -Target $target
+```
+
+Then ensure `~/.config/opencode/opencode.json` contains:
+
+```json
+{
+  "plugin": ["opencode-anthropic-fix"]
+}
+```
+
+If you still see the error, temporarily keep only `"opencode-anthropic-fix"` in the plugin array and add other plugins back one-by-one to find the broken one.
+
+Important: remove stale standalone files like `~/.config/opencode/plugin/opencode-anthropic-auth-plugin.js` if present. They can shadow package loading and trigger `hook.config` crashes.
 
 ### "Auth flow completes but requests fail"
 
