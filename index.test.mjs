@@ -2417,7 +2417,7 @@ describe("fetch interceptor — account exhaustion", () => {
       expect.objectContaining({
         body: expect.objectContaining({
           message: expect.stringContaining("permission denied"),
-          variant: "warning",
+          variant: "info",
         }),
       }),
     );
@@ -2591,7 +2591,7 @@ describe("fetch interceptor — account exhaustion", () => {
     expect(response.status).toBe(200);
 
     const switchToasts = client.tui.showToast.mock.calls.filter(
-      (call) => call[0]?.body?.variant === "warning" && call[0]?.body?.message?.includes("switching account"),
+      (call) => call[0]?.body?.variant === "info" && call[0]?.body?.message?.includes("switching account"),
     );
 
     // Debounce should suppress immediate duplicate switch warnings.

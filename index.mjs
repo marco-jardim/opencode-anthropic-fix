@@ -1314,6 +1314,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
     // Quiet mode suppresses non-error toasts
     if (config.toasts.quiet && variant !== "error") return;
 
+    // Normalize variant to values OpenCode TUI supports (success, error, info).
+    // "warning" is not a supported variant and causes silent failures.
+    const normalizedVariant = variant === "warning" ? "info" : variant;
+
     // Debounce configured toast categories to reduce chatter.
     if (variant !== "error" && options.debounceKey) {
       const minGapMs = Math.max(0, config.toasts.debounce_seconds) * 1000;
@@ -1335,7 +1339,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
     }
 
     try {
-      await client.tui?.showToast({ body: { message, variant } });
+      await client.tui?.showToast({ body: { message, variant: normalizedVariant } });
     } catch {
       // TUI may not be available
     }
@@ -1801,6 +1805,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 
               let serviceWideRetryCount = 0; // Track 529/503 retries (max 2 per RE doc §5.5)
               let shouldRetryCount = 0; // Track x-should-retry forced retries (cap at 3)
+              let consecutive529Count = 0;
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account — use pinned account on first attempt if available
                 const account =
@@ -1960,7 +1965,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   _reqHasFileRefs,
                 );
 
-                const body = transformRequestBody(
+                let body = transformRequestBody(
                   requestInit.body,
                   {
                     enabled: getSignatureEmulationEnabled(),
@@ -1969,6 +1974,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     provider: _reqProvider,
                     cachePolicy: config.cache_policy || { ttl: "1h", ttl_supported: true },
                     fastMode: config.fast_mode || false,
+                    strategy: getEffectiveStrategy(),
                   },
                   {
                     persistentUserId: signatureUserId,
@@ -2076,6 +2082,47 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       { debounceKey: "quota-warn" },
                     ).catch(() => {});
                   }
+
+                  // Predictive rate limit avoidance: switch account BEFORE hitting 429
+                  // Parse reset timestamps to compute time-weighted risk
+                  if (maxUtilization > 0.6 && accountManager.getAccountCount() > 1) {
+                    let highestRisk = 0;
+                    for (const subtype of RATE_LIMIT_SUBTYPES) {
+                      const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${subtype}-utilization`);
+                      const resetAtStr = response.headers.get(`anthropic-ratelimit-unified-${subtype}-reset`);
+                      if (!utilizationStr || !resetAtStr) continue;
+
+                      const utilization = parseFloat(utilizationStr);
+                      const resetAt = new Date(resetAtStr).getTime();
+                      if (isNaN(utilization) || isNaN(resetAt)) continue;
+
+                      // Estimate window duration from reset time
+                      // 5h window = 18000s, 7d window = 604800s
+                      const timeUntilReset = Math.max(0, resetAt - Date.now());
+                      // Risk formula: how fast we're burning through the quota
+                      // Higher utilization + less time remaining = higher risk
+                      const timeRemainingFraction = Math.max(0.01, timeUntilReset / (5 * 3600 * 1000)); // assume 5h window
+                      const risk = utilization / timeRemainingFraction;
+                      if (risk > highestRisk) highestRisk = risk;
+                    }
+
+                    // Preemptive switch threshold
+                    if (highestRisk > 0.85 && accountManager.getAccountCount() > 1) {
+                      const currentName = account.email || `Account ${account.index + 1}`;
+                      const nextAccount = accountManager.peekNextAccount?.();
+                      const nextName = nextAccount?.email || "next account";
+                      accountManager.markRateLimited(account, "RATE_LIMIT_EXCEEDED", null);
+                      toast(
+                        `Predictive switch: ${currentName} at high burn rate, switching to ${nextName}`,
+                        "warning",
+                        { debounceKey: "predictive-switch" },
+                      ).catch(() => {});
+                      debugLog("predictive rate limit switch", {
+                        accountIndex: account.index,
+                        risk: highestRisk.toFixed(2),
+                      });
+                    }
+                  }
                 }
 
                 // On error, check if it's account-specific or service-wide
@@ -2085,6 +2132,46 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     errorBody = await response.clone().text();
                   } catch {
                     // Ignore read errors in debug logging path.
+                  }
+
+                  // Reactive compaction: on "prompt too long" error, trim oldest messages and retry once
+                  if (
+                    response.status === 400 &&
+                    errorBody &&
+                    (errorBody.includes("prompt is too long") || errorBody.includes("prompt_too_long")) &&
+                    !requestInit._reactiveCompactAttempted
+                  ) {
+                    debugLog("prompt too long — attempting reactive message trimming");
+                    try {
+                      const parsedBody = JSON.parse(body);
+                      if (Array.isArray(parsedBody.messages) && parsedBody.messages.length > 4) {
+                        // Keep first 2 messages (initial context) and last 2 messages (recent work)
+                        const trimmed = [
+                          ...parsedBody.messages.slice(0, 2),
+                          {
+                            role: "user",
+                            content: [
+                              {
+                                type: "text",
+                                text: "[Earlier conversation was trimmed due to context limits. Continue from the most recent context.]",
+                              },
+                            ],
+                          },
+                          ...parsedBody.messages.slice(-2),
+                        ];
+                        parsedBody.messages = trimmed;
+                        requestInit.body = JSON.stringify(parsedBody);
+                        requestInit._reactiveCompactAttempted = true;
+                        // Retry with trimmed messages (decrement attempt to not consume account slot)
+                        attempt--;
+                        toast("Context trimmed — retrying with shortened history", "warning", {
+                          debounceKey: "compact-retry",
+                        }).catch(() => {});
+                        continue;
+                      }
+                    } catch {
+                      // If body parse fails, fall through to normal error handling
+                    }
                   }
 
                   // Auto-disable extended cache TTL if the API rejects it with a 400
@@ -2150,6 +2237,15 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     // Strategy adaptation: record account-specific throttling signal
                     recordRateLimitForStrategy();
 
+                    // Graceful degradation: disable fast mode on rate limits
+                    if (config.fast_mode && (response.status === 429 || response.status === 529)) {
+                      config.fast_mode = false;
+                      toast("Fast mode disabled due to rate limiting", "warning", {
+                        debounceKey: "fast-mode-off",
+                      }).catch(() => {});
+                      debugLog("auto-disabled fast mode after rate limit");
+                    }
+
                     const accountName = account.email || `Account ${account.index + 1}`;
                     const lowerBody = String(errorBody || "").toLowerCase();
                     const switchMsg =
@@ -2170,6 +2266,43 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   // per RE doc §5.5 (Stainless SDK retries 500+ codes up to 2 times)
                   if ((response.status === 529 || response.status === 503) && serviceWideRetryCount < 2) {
                     serviceWideRetryCount++;
+
+                    // Track consecutive 529s for model fallback
+                    if (response.status === 529) {
+                      consecutive529Count++;
+                      if (consecutive529Count >= 3 && body) {
+                        try {
+                          const parsedForFallback = JSON.parse(body);
+                          const currentModel = parsedForFallback.model || "";
+                          let fallbackModel = null;
+                          if (/opus-4-6|opus-4/i.test(currentModel))
+                            fallbackModel = currentModel.replace(/opus/i, "sonnet");
+                          else if (/sonnet-4-6|sonnet-4/i.test(currentModel))
+                            fallbackModel = currentModel.replace(/sonnet/i, "haiku");
+
+                          if (fallbackModel) {
+                            parsedForFallback.model = fallbackModel;
+                            requestInit.body = JSON.stringify(parsedForFallback);
+                            body = requestInit.body;
+                            toast(
+                              `Model fallback: ${currentModel} → ${fallbackModel} after ${consecutive529Count} overloads`,
+                              "warning",
+                              { debounceKey: "model-fallback" },
+                            ).catch(() => {});
+                            debugLog("model fallback on consecutive 529", {
+                              from: currentModel,
+                              to: fallbackModel,
+                              count: consecutive529Count,
+                            });
+                          }
+                        } catch {
+                          /* ignore parse errors */
+                        }
+                      }
+                    } else {
+                      consecutive529Count = 0;
+                    }
+
                     const baseDelay = Math.min(0.5 * Math.pow(2, serviceWideRetryCount), 8);
                     const jitter = 1 - Math.random() * 0.25;
                     const sleepMs = Math.round(baseDelay * jitter * 1000);
@@ -2418,6 +2551,28 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           type: "api",
         },
       ],
+    },
+    "experimental.session.compacting": async (input, output) => {
+      // Inject Anthropic-specific context into compaction
+      if (!accountManager) return;
+      const account = accountManager.getCurrentAccount();
+      const name = account?.email || "unknown";
+      const q = sessionMetrics.lastQuota;
+      const contextParts = [];
+
+      contextParts.push(`## Anthropic Account State
+- Active account: ${name}
+- Session cost: $${sessionMetrics.sessionCostUsd.toFixed(4)}
+- Turns: ${sessionMetrics.turns}
+- Cache hit rate: ${(getAverageCacheHitRate() * 100).toFixed(0)}%`);
+
+      if (q.updatedAt > 0) {
+        contextParts.push(
+          `- Rate limit utilization: tokens=${(q.tokens * 100).toFixed(0)}%, requests=${(q.requests * 100).toFixed(0)}%`,
+        );
+      }
+
+      output.context.push(contextParts.join("\n"));
     },
   };
 }
@@ -3885,6 +4040,25 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
           sessionId: runtime.sessionId,
         }),
       };
+    }
+
+    // Cache breakpoint optimization: add cache_control to the last content block
+    // of each user/assistant message for maximum prefix caching.
+    // Skip for round-robin strategy (cache defeated by account rotation).
+    if (signature.enabled && signature.cachePolicy?.ttl !== "off" && signature.cachePolicy?.ttl_supported !== false) {
+      const strategy = signature.strategy || "sticky";
+      if (strategy !== "round-robin" && Array.isArray(parsed.messages)) {
+        const cacheControl = { type: "ephemeral", ttl: signature.cachePolicy?.ttl || "1h" };
+        for (const msg of parsed.messages) {
+          if (!msg.content || !Array.isArray(msg.content) || msg.content.length === 0) continue;
+          // Only cache user and assistant messages (not tool results which change frequently)
+          if (msg.role !== "user" && msg.role !== "assistant") continue;
+          const lastBlock = msg.content[msg.content.length - 1];
+          if (lastBlock && typeof lastBlock === "object") {
+            lastBlock.cache_control = cacheControl;
+          }
+        }
+      }
     }
 
     // Add prefix to tools definitions
