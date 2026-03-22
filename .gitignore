@@ -1,5 +1,7 @@
 node_modules/
 _analysis/
+_tmp_*/
 *.tgz
 .env
 .env.*
+nul
