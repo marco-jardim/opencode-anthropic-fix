@@ -2875,18 +2875,19 @@ process.once("beforeExit", () => {
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.81";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.83";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 
-// The @anthropic-ai/sdk version bundled with Claude Code v2.1.81.
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.83.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-const ANTHROPIC_SDK_VERSION = "0.52.0";
+// Verified by extracting VERSION="0.208.0" from the bundled cli.js of v2.1.80/2.1.81/2.1.83.
+const ANTHROPIC_SDK_VERSION = "0.208.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
-  ["2.1.81", "0.52.0"],
-  ["2.1.80", "0.52.0"],
-  ["2.1.79", "0.51.0"],
+  ["2.1.83", "0.208.0"],
+  ["2.1.81", "0.208.0"],
+  ["2.1.80", "0.208.0"],
 ]);
 
 /**
@@ -3334,9 +3335,9 @@ function buildRequestMetadata(input) {
 
 /**
  * Build the billing header block for Claude Code system prompt injection.
- * Claude Code v2.1.81: cch computed via NP1() from first user message, cc_version includes model ID.
+ * Claude Code v2.1.81+: cch computed via NP1() from first user message, cc_version includes model ID.
  *
- * @param {string} version - CLI version (e.g., "2.1.81")
+ * @param {string} version - CLI version (e.g., "2.1.83")
  * @param {string} [modelId] - Model ID to append (e.g., "claude-opus-4-6")
  * @param {string} [firstUserMessage] - First user message text for cch hash computation
  * @returns {string}
@@ -3659,7 +3660,7 @@ function buildAnthropicBetaHeader(
   const haiku = isHaikuModel(model);
   const isRoundRobin = strategy === "round-robin";
 
-  // === ALWAYS-ON BETAS (Claude Code v2.1.81 base set) ===
+  // === ALWAYS-ON BETAS (Claude Code v2.1.83 base set) ===
   // These are ALWAYS included regardless of env vars or feature flags.
   if (!haiku) {
     betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"

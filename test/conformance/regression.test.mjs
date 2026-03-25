@@ -726,7 +726,7 @@ describe("E2E: Full header set on a standard request", () => {
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.get("x-stainless-runtime")).toBe("node");
     expect(headers.get("x-stainless-runtime-version")).toBe(process.version);
-    expect(headers.get("x-stainless-package-version")).toBe("0.52.0");
+    expect(headers.get("x-stainless-package-version")).toBe("0.208.0");
     expect(headers.get("x-stainless-retry-count")).toBe("0");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("authorization")).toBe("Bearer access-1");
@@ -904,7 +904,7 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
-describe("E2E: Version is 2.1.81", () => {
+describe("E2E: Version is 2.1.83", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -913,17 +913,17 @@ describe("E2E: Version is 2.1.81", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.81", async () => {
+  it("User-Agent contains 2.1.83", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.81");
+    expect(headers.get("user-agent")).toContain("2.1.83");
   });
 
-  it("billing header contains 2.1.81", async () => {
+  it("billing header contains 2.1.83", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.81");
+    expect(body.system[0].text).toContain("2.1.83");
   });
 });
 

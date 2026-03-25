@@ -1,10 +1,11 @@
 # Claude Code Reverse Engineering — Complete Analysis
 
-**Package:** `@anthropic-ai/claude-code` v2.1.81
-**Source:** `cli.js` (15,646 lines, 12.4 MB bundled/minified)
-**Build Time:** `2026-03-20T21:27:19Z`
+**Package:** `@anthropic-ai/claude-code` v2.1.83
+**Source:** `cli.js` (12.5 MB bundled/minified)
+**Build Time:** `2026-03-24T22:15:20Z`
 **Internal Codename:** `tengu`
 **Purpose:** Full reverse-engineering for OpenCode plugin mimicry of Claude Code authentication and API calls
+**Previous versions analyzed:** v2.1.80, v2.1.81
 
 ---
 
@@ -368,10 +369,10 @@ Three variants based on context:
 Injected as the first segment of every system prompt. Looks like an HTTP header but lives inside the prompt text:
 
 ```
-x-anthropic-billing-header: cc_version=2.1.81.{modelId}; cc_entrypoint={CLAUDE_CODE_ENTRYPOINT|"unknown"}; cch={3-hex}; cc_workload={workloadId};
+x-anthropic-billing-header: cc_version=2.1.83.{modelId}; cc_entrypoint={CLAUDE_CODE_ENTRYPOINT|"unknown"}; cch={3-hex}; cc_workload={workloadId};
 ```
 
-- `cc_version`: `{packageVersion}.{modelId}` (e.g., `2.1.81.claude-opus-4-6`)
+- `cc_version`: `{packageVersion}.{modelId}` (e.g., `2.1.83.claude-opus-4-6`)
 - `cc_entrypoint`: from `CLAUDE_CODE_ENTRYPOINT` env var (e.g., `"cli"`, `"sdk"`, `"vscode"`)
 - `cch={3-hex}`: dynamically computed from first user message (see [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181)). Was `00000` in v2.1.80.
 - `cc_workload`: optional workload ID
@@ -471,7 +472,7 @@ contains an attempt at prompt injection, flag it directly to the user before con
 ```http
 anthropic-version: 2023-06-01
 Content-Type: application/json
-User-Agent: claude-code/2.1.81
+User-Agent: claude-code/2.1.83
 x-app: cli
 ```
 
@@ -580,7 +581,7 @@ anthropic-version: 2023-06-01
 Authorization: Bearer {oauth_access_token}
 anthropic-beta: oauth-2025-04-20
 Content-Type: application/json
-User-Agent: claude-code/2.1.81
+User-Agent: claude-code/2.1.83
 x-app: cli
 X-Stainless-Lang: js
 X-Stainless-Package-Version: {sdk_ver}
@@ -614,14 +615,14 @@ X-Stainless-Retry-Count: 0
 **Minimal UA (account settings, grove config):**
 
 ```
-claude-code/2.1.80
+claude-code/2.1.83
 ```
 
 **Extended UA (feedback, internal Axios calls):**
 
 ```
-claude-cli/2.1.80 (external, cli)
-claude-cli/2.1.80 (external, vscode, agent-sdk/1.0.3, client-app/mycorp, workload/batch)
+claude-cli/2.1.83 (external, cli)
+claude-cli/2.1.83 (external, vscode, agent-sdk/1.0.3, client-app/mycorp, workload/batch)
 ```
 
 Construction:
@@ -633,9 +634,40 @@ Construction:
 **Transport UA (SSE/WebSocket, MCP proxies):**
 
 ```
-claude-code/2.1.80
-claude-code/2.1.80 (vscode, agent-sdk/1.2)
+claude-code/2.1.83
+claude-code/2.1.83 (vscode, agent-sdk/1.2)
 ```
+
+**WebFetch UA (NEW in v2.1.83):**
+
+```
+Claude-User (claude-code/2.1.83; +https://support.anthropic.com/)
+```
+
+Construction:
+
+```js
+function getWebFetchUserAgent() {
+  return `Claude-User (claude-code/${VERSION}; +https://support.anthropic.com/)`;
+}
+// Used in WebFetch tool headers: { Accept: "text/markdown, text/html, */*", "User-Agent": getWebFetchUserAgent() }
+```
+
+Note: In v2.1.81, WebFetch did NOT send a User-Agent header. The `Claude-User` UA was added in v2.1.83 for robots.txt recognition.
+
+> **OpenCode plugin design decision:** We intentionally do NOT use the `Claude-User` UA for
+> web fetching. Instead we send a standard Chrome browser User-Agent string. Rationale:
+>
+> 1. `Claude-User` self-identifies as an AI scraper, causing many sites to block or serve
+>    degraded content (robots.txt, Cloudflare AI-bot rules, WAF deny-lists).
+> 2. A Chrome UA gets past virtually all such restrictions, producing higher-quality results
+>    for the end user.
+> 3. The WebFetch UA is NOT sent on Anthropic API calls — it only applies to third-party web
+>    requests, so it has zero impact on API-level mimicry/fingerprinting.
+> 4. Anthropic cannot observe which UA the client uses for web scraping (it happens
+>    client-side, not proxied through their servers).
+>
+> Current plugin WebFetch UA: latest stable Chrome on Windows 10 x64.
 
 **Plugin Manager UA:**
 
@@ -1407,7 +1439,7 @@ const headers = {
   Authorization: `Bearer ${accessToken}`,
   "anthropic-beta": "oauth-2025-04-20",
   "Content-Type": "application/json",
-  "User-Agent": `claude-code/${VERSION}`,
+  "User-Agent": `claude-code/2.1.83`,
   "x-app": "cli",
   "X-Stainless-Lang": "js",
   "X-Stainless-Package-Version": SDK_VERSION,
@@ -1457,8 +1489,8 @@ const body = {
 
 ```js
 // cch is dynamically computed from first user message (v2.1.81+, see §1.16)
-const cch = computeCCH(firstUserMessage, VERSION); // 3-char hex
-const billingHeader = `x-anthropic-billing-header: cc_version=${VERSION}.${modelId}; cc_entrypoint=cli; cch=${cch};`;
+const cch = computeCCH(firstUserMessage, "2.1.83"); // 3-char hex
+const billingHeader = `x-anthropic-billing-header: cc_version=2.1.83.${modelId}; cc_entrypoint=cli; cch=${cch};`;
 
 const system = [
   { type: "text", text: billingHeader }, // Block 1: never cached
@@ -1517,29 +1549,30 @@ const system = [
 
 ### 14.4 Environment Variables Reference
 
-| Variable                                   | Purpose                                   |
-| ------------------------------------------ | ----------------------------------------- |
-| `ANTHROPIC_API_KEY`                        | API key (alternative to OAuth)            |
-| `ANTHROPIC_BASE_URL`                       | Override base URL                         |
-| `ANTHROPIC_LOG`                            | Log level (debug/info/warn/error/off)     |
-| `ANTHROPIC_CUSTOM_HEADERS`                 | Inject custom headers (newline-separated) |
-| `CLAUDE_CODE_OAUTH_TOKEN`                  | Static access token override              |
-| `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`          | Bootstrap via refresh token               |
-| `CLAUDE_CODE_OAUTH_SCOPES`                 | Scopes for refresh token bootstrap        |
-| `CLAUDE_CODE_OAUTH_CLIENT_ID`              | Override client ID                        |
-| `CLAUDE_CODE_EXTRA_METADATA`               | Additional JSON for metadata.user_id      |
-| `CLAUDE_CODE_ENTRYPOINT`                   | Entrypoint identifier (cli/sdk/vscode)    |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Reduce phoning home                       |
-| `CLAUDE_CODE_DISABLE_THINKING`             | Disable extended thinking                 |
-| `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`    | Force fixed budget thinking               |
-| `CLAUDE_CODE_SIMPLE`                       | Minimal 3-line system prompt              |
-| `CLAUDE_CODE_FORCE_GLOBAL_CACHE`           | Force system prompt global cache          |
-| `CLAUDE_CODE_ATTRIBUTION_HEADER`           | Toggle billing header                     |
-| `CLAUDE_CODE_DEBUG_LOG_LEVEL`              | Debug log level                           |
-| `CLAUDE_AGENT_SDK_VERSION`                 | Agent SDK version in UA                   |
-| `CLAUDE_AGENT_SDK_CLIENT_APP`              | Client app name in UA                     |
-| `MAX_THINKING_TOKENS`                      | Override thinking budget                  |
-| `BASH_MAX_OUTPUT_LENGTH`                   | Override bash output limit                |
+| Variable                                    | Purpose                                                |
+| ------------------------------------------- | ------------------------------------------------------ |
+| `ANTHROPIC_API_KEY`                         | API key (alternative to OAuth)                         |
+| `ANTHROPIC_BASE_URL`                        | Override base URL                                      |
+| `ANTHROPIC_LOG`                             | Log level (debug/info/warn/error/off)                  |
+| `ANTHROPIC_CUSTOM_HEADERS`                  | Inject custom headers (newline-separated)              |
+| `CLAUDE_CODE_OAUTH_TOKEN`                   | Static access token override                           |
+| `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`           | Bootstrap via refresh token                            |
+| `CLAUDE_CODE_OAUTH_SCOPES`                  | Scopes for refresh token bootstrap                     |
+| `CLAUDE_CODE_OAUTH_CLIENT_ID`               | Override client ID                                     |
+| `CLAUDE_CODE_EXTRA_METADATA`                | Additional JSON for metadata.user_id                   |
+| `CLAUDE_CODE_ENTRYPOINT`                    | Entrypoint identifier (cli/sdk/vscode)                 |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`  | Reduce phoning home                                    |
+| `CLAUDE_CODE_DISABLE_THINKING`              | Disable extended thinking                              |
+| `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`     | Force fixed budget thinking                            |
+| `CLAUDE_CODE_SIMPLE`                        | Minimal 3-line system prompt                           |
+| `CLAUDE_CODE_FORCE_GLOBAL_CACHE`            | Force system prompt global cache                       |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER`            | Toggle billing header                                  |
+| `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` | Disable streaming→non-streaming fallback (NEW v2.1.83) |
+| `CLAUDE_CODE_DEBUG_LOG_LEVEL`               | Debug log level                                        |
+| `CLAUDE_AGENT_SDK_VERSION`                  | Agent SDK version in UA                                |
+| `CLAUDE_AGENT_SDK_CLIENT_APP`               | Client app name in UA                                  |
+| `MAX_THINKING_TOKENS`                       | Override thinking budget                               |
+| `BASH_MAX_OUTPUT_LENGTH`                    | Override bash output limit                             |
 
 ---
 
@@ -1598,16 +1631,17 @@ user:profile user:inference user:sessions:claude_code user:mcp_servers user:file
 
 - OAuth token endpoint calls now send `User-Agent: axios/1.13.6` (matching the real CLI's bundled axios HTTP client)
 - OAuth calls also now include `Accept: application/json, text/plain, */*` (axios default)
-- API calls correctly send `User-Agent: claude-cli/2.1.81 (external, cli)` (extended UA format)
+- API calls correctly send `User-Agent: claude-cli/2.1.83 (external, cli)` (extended UA format)
 
 **Claude Code actual — User-Agent by context:**
 
-| Context                            | User-Agent                                          |
-| ---------------------------------- | --------------------------------------------------- |
-| **OAuth token exchange/refresh**   | `axios/1.13.6` (via bundled axios, NOT per-request) |
-| **API calls** (`/v1/messages`)     | `claude-cli/2.1.81 (external, cli)`                 |
-| **Account settings, grove config** | `claude-code/2.1.81`                                |
-| **SSE/WebSocket/MCP proxy**        | `claude-code/2.1.81`                                |
+| Context                            | User-Agent                                                          |
+| ---------------------------------- | ------------------------------------------------------------------- |
+| **OAuth token exchange/refresh**   | `axios/1.13.6` (via bundled axios, NOT per-request)                 |
+| **API calls** (`/v1/messages`)     | `claude-cli/2.1.83 (external, cli)`                                 |
+| **Account settings, grove config** | `claude-code/2.1.83`                                                |
+| **SSE/WebSocket/MCP proxy**        | `claude-code/2.1.83`                                                |
+| **WebFetch tool** (NEW v2.1.83)    | `Claude-User (claude-code/2.1.83; +https://support.anthropic.com/)` |
 
 ### 15.5 metadata.user_id — WRONG Format
 
@@ -1757,37 +1791,41 @@ redact-thinking-2026-02-12
 
 **Impact:** LOW.
 
-### 15.19 Version Staleness — ~~STALE~~ FIXED
+### 15.19 Version Staleness — TRACKING
 
-**Status:** FIXED (2026-03-21) — updated to `2.1.81` across all version constants.
+**Status:** Requires periodic updates. Latest analyzed: `2.1.83`.
 
-**Previous issue:** Hardcoded to `2.1.79` in `lib/oauth.mjs`.
+**History:**
 
-**Claude Code actual:** `2.1.81` (updates regularly; startup version fetch available via `fetch_claude_code_version_on_startup`).
+- v0.0.26: Updated from `2.1.79` to `2.1.80`
+- v0.0.27: Updated to `2.1.81`
+- Current target: `2.1.83` (v2.1.82 was not published)
+
+**Claude Code actual:** `2.1.83` (updates regularly; startup version fetch available via `fetch_claude_code_version_on_startup`).
 
 ### 15.20 Summary: Priority Fixes
 
-| Priority     | Issue                                               | Fix Effort | Status             |
-| ------------ | --------------------------------------------------- | ---------- | ------------------ |
-| **CRITICAL** | `metadata.user_id` format (wrong structure)         | Medium     | ✅ Fixed (v0.0.26) |
-| **CRITICAL** | OAuth HTTP client fingerprint (fetch vs axios)      | Easy       | ✅ Fixed (v0.0.27) |
-| **HIGH**     | `anthropic-dangerous-direct-browser-access` (extra) | Trivial    | ✅ Fixed (v0.0.26) |
-| **HIGH**     | OAuth scopes (missing 3 scopes)                     | Trivial    | ✅ Fixed (v0.0.26) |
-| **HIGH**     | Beta composition (many missing, env-gated)          | Medium     | ✅ Fixed (v0.0.26) |
-| **MEDIUM**   | Thinking type (effort vs adaptive)                  | Easy       | ✅ Fixed (v0.0.26) |
-| **MEDIUM**   | User-Agent prefix (`claude-cli` vs `claude-code`)   | Easy       | ✅ Fixed (v0.0.27) |
-| **MEDIUM**   | `x-stainless-package-version` (CLI vs SDK version)  | Easy       | ✅ Fixed (v0.0.26) |
-| **MEDIUM**   | Refresh token missing scope parameter               | Trivial    | ✅ Fixed (v0.0.26) |
-| **MEDIUM**   | `context-1m` beta incorrectly excluded              | Trivial    | ✅ Fixed (v0.0.26) |
-| **MEDIUM**   | Sonnet 4.6 adaptive thinking missing                | Easy       | ✅ Fixed (v0.0.26) |
-| **MEDIUM**   | Version staleness (`2.1.79` → `2.1.81`)             | Trivial    | ✅ Fixed (v0.0.27) |
-| **MEDIUM**   | Billing `cch` dynamic hash (static → computed)      | Easy       | ✅ Fixed (v0.0.27) |
-| **LOW**      | `x-stainless-os` case (`MacOS` → `macOS`)           | Trivial    | ✅ Fixed (v0.0.26) |
-| **LOW**      | Billing header missing modelId in cc_version        | Easy       | ✅ Fixed (v0.0.26) |
-| **LOW**      | State parameter (same as verifier vs independent)   | Easy       | ✅ Fixed (v0.0.26) |
-| **LOW**      | `x-stainless-helper-method` (extra, wrong name)     | Trivial    | ✅ Fixed (v0.0.26) |
-| **LOW**      | `x-stainless-timeout` missing for non-streaming     | Easy       | ✅ Fixed (v0.0.26) |
-| **LOW**      | System prompt identity cache scope                  | Easy       | ✅ Fixed (v0.0.26) |
+| Priority     | Issue                                               | Fix Effort | Status              |
+| ------------ | --------------------------------------------------- | ---------- | ------------------- |
+| **CRITICAL** | `metadata.user_id` format (wrong structure)         | Medium     | ✅ Fixed (v0.0.26)  |
+| **CRITICAL** | OAuth HTTP client fingerprint (fetch vs axios)      | Easy       | ✅ Fixed (v0.0.27)  |
+| **HIGH**     | `anthropic-dangerous-direct-browser-access` (extra) | Trivial    | ✅ Fixed (v0.0.26)  |
+| **HIGH**     | OAuth scopes (missing 3 scopes)                     | Trivial    | ✅ Fixed (v0.0.26)  |
+| **HIGH**     | Beta composition (many missing, env-gated)          | Medium     | ✅ Fixed (v0.0.26)  |
+| **MEDIUM**   | Thinking type (effort vs adaptive)                  | Easy       | ✅ Fixed (v0.0.26)  |
+| **MEDIUM**   | User-Agent prefix (`claude-cli` vs `claude-code`)   | Easy       | ✅ Fixed (v0.0.27)  |
+| **MEDIUM**   | `x-stainless-package-version` (CLI vs SDK version)  | Easy       | ✅ Fixed (v0.0.26)  |
+| **MEDIUM**   | Refresh token missing scope parameter               | Trivial    | ✅ Fixed (v0.0.26)  |
+| **MEDIUM**   | `context-1m` beta incorrectly excluded              | Trivial    | ✅ Fixed (v0.0.26)  |
+| **MEDIUM**   | Sonnet 4.6 adaptive thinking missing                | Easy       | ✅ Fixed (v0.0.26)  |
+| **MEDIUM**   | Version staleness (→ `2.1.83`)                      | Trivial    | ✅ Fixed (v0.0.27+) |
+| **MEDIUM**   | Billing `cch` dynamic hash (static → computed)      | Easy       | ✅ Fixed (v0.0.27)  |
+| **LOW**      | `x-stainless-os` case (`MacOS` → `macOS`)           | Trivial    | ✅ Fixed (v0.0.26)  |
+| **LOW**      | Billing header missing modelId in cc_version        | Easy       | ✅ Fixed (v0.0.26)  |
+| **LOW**      | State parameter (same as verifier vs independent)   | Easy       | ✅ Fixed (v0.0.26)  |
+| **LOW**      | `x-stainless-helper-method` (extra, wrong name)     | Trivial    | ✅ Fixed (v0.0.26)  |
+| **LOW**      | `x-stainless-timeout` missing for non-streaming     | Easy       | ✅ Fixed (v0.0.26)  |
+| **LOW**      | System prompt identity cache scope                  | Easy       | ✅ Fixed (v0.0.26)  |
 
 ---
 
@@ -1830,6 +1868,32 @@ requests are either rate-limited more aggressively or rejected outright with 429
 - 2026-03-20: v2.1.81 published (minimal changes, OAuth code identical)
 - 2026-03-21: OAuth token endpoint begins returning 429 for non-axios requests
 
+### 2026-03-24 — v2.1.83 Changes (No Breaking Auth Changes)
+
+**Type:** Client-side changes only. No OAuth/auth or beta header changes.
+
+**Key changes in v2.1.83 (from v2.1.81; v2.1.82 was not published):**
+
+| Change                                    | Detail                                                                                                                                                                                            | Mimicry Impact                                 |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **WebFetch User-Agent**                   | NEW `Claude-User (claude-code/{version}; +https://support.anthropic.com/)` header added to WebFetch tool requests. **Plugin diverges: uses Chrome UA instead for better scraping compatibility.** | LOW — not sent on API calls, only web scraping |
+| **Non-streaming fallback env var**        | NEW `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` gates the streaming→non-streaming fallback path                                                                                                   | LOW — env var, not a wire-format change        |
+| **Non-streaming fallback caps**           | Token cap 21k→64k, timeout 120s→300s (may be server-side/flag-gated)                                                                                                                              | LOW — affects fallback behavior only           |
+| **Bridge ID regex tightened**             | `bridge-[A-Za-z0-9_-]+` → `bridge-[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*`                                                                                                                                 | NONE — session validation only                 |
+| **New hook events**                       | `CwdChanged` (10 refs), `FileChanged` (12 refs)                                                                                                                                                   | NONE — internal hook system                    |
+| **`sandbox.failIfUnavailable`**           | New setting (5 refs)                                                                                                                                                                              | NONE — sandbox config only                     |
+| **`disableDeepLinkRegistration`**         | New setting (2 refs)                                                                                                                                                                              | NONE — UI config only                          |
+| **`managed-settings.d/`**                 | New drop-in directory for settings                                                                                                                                                                | NONE — local config only                       |
+| **`isTransientNetworkError`**             | New sessions API export                                                                                                                                                                           | LOW — error classification                     |
+| **`TaskOutput` deprecated**               | References reduced 4→2, replaced by Read tool                                                                                                                                                     | NONE — tool deprecation                        |
+| **`BashOutput.tokenSaverOutput` removed** | SDK typing change                                                                                                                                                                                 | NONE — typing only                             |
+| **Expanded embedded API docs**            | `cache_control` 21→39, `ephemeral` 19→32, `prompt.caching` 3→18 matches — all documentation string expansion in claude-api skill                                                                  | NONE — static docs, not runtime                |
+
+**OAuth/Auth:** STABLE — all 10 tested keyword anchors identical between versions.
+**Beta headers:** UNCHANGED — `files-api-2025-04-14,oauth-2025-04-20` composition identical.
+**API request shape:** STABLE — `metadata:{user_id:...}` composition, timeouts, endpoint paths all identical.
+**Telemetry:** STABLE — Sentry (3), Statsig, telemetry (3) all unchanged.
+
 ### 2026-03-20 — Billing Cache Hash Dynamic Computation (v2.1.81)
 
 **Affected component:** System prompt billing header (`cch` field)
@@ -1847,5 +1911,6 @@ This change makes static `cch=00000` values detectable as non-genuine in v2.1.81
 
 ---
 
-_Generated by reverse-engineering `@anthropic-ai/claude-code@2.1.81` cli.js bundle._
-_Analysis date: 2026-03-21_
+_Generated by reverse-engineering `@anthropic-ai/claude-code` cli.js bundle._
+_Versions analyzed: v2.1.80, v2.1.81, v2.1.83_
+_Last updated: 2026-03-25_

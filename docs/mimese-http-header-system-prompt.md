@@ -123,15 +123,13 @@ sequenceDiagram
 With `signature.enabled=true`, it adds:
 
 - `anthropic-version: 2023-06-01`
-- `anthropic-dangerous-direct-browser-access: true`
 - `x-app: cli`
 - `x-stainless-arch: <x64|arm64|...>`
 - `x-stainless-lang: js`
-- `x-stainless-os: <MacOS|Windows|Linux|...>`
-- `x-stainless-package-version: <claudeCliVersion>`
+- `x-stainless-os: <macOS|Windows|Linux|...>`
+- `x-stainless-package-version: <sdkVersion>` (Anthropic SDK version, e.g. `0.208.0`)
 - `x-stainless-runtime: node`
 - `x-stainless-runtime-version: <process.version>`
-- `x-stainless-helper-method: stream`
 - `x-stainless-retry-count`
   - preserves incoming value when present and not explicitly falsy
   - otherwise sets `0`
@@ -151,16 +149,30 @@ It also injects optional env-driven headers:
 
 ### 4.3 OAuth token-layer user-agent mimicry
 
-OAuth token calls now include Claude Code-style user-agent fingerprinting on:
+OAuth token calls use axios-fingerprint headers matching the real CLI's bundled HTTP client:
 
-- `POST /v1/oauth/token`
-- `POST /v1/oauth/revoke`
+- `POST /v1/oauth/token` (exchange and refresh)
 
-Header sent:
+Headers sent:
 
-- `User-Agent: claude-cli/2.1.79 (external, cli)`
+- `User-Agent: axios/1.13.6`
+- `Accept: application/json, text/plain, */*`
+- `Content-Type: application/json`
 
-Without this header, current Anthropic OAuth token endpoints may reject requests.
+Without these headers, Anthropic's OAuth token endpoints return HTTP 429.
+
+### 4.4 WebFetch user-agent (intentional divergence)
+
+**Design decision:** The plugin intentionally does NOT use Claude Code's `Claude-User` UA for web scraping.
+
+Claude Code v2.1.83 sends: `Claude-User (claude-code/{version}; +https://support.anthropic.com/)`
+
+The plugin instead sends a standard Chrome browser User-Agent. Rationale:
+
+1. `Claude-User` self-identifies as an AI bot, causing many sites to block or degrade responses
+2. A Chrome UA gets past virtually all bot-detection (robots.txt, Cloudflare AI rules, WAFs)
+3. The WebFetch UA is client-side only — Anthropic cannot observe it on their API endpoints
+4. This produces materially better web scraping results for end users
 
 ## 5) Beta header catalog (Claude Code reference vs current plugin)
 
