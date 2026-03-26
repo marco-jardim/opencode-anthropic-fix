@@ -821,7 +821,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
         },
         "adaptive-context": () => {
           const enabled = value === "on" || value === "true" || value === "1";
-          saveConfig({ adaptive_context: { enabled } });
+          saveConfig({ adaptive_context: { ...config.adaptive_context, enabled } });
           if (!config.adaptive_context)
             config.adaptive_context = {
               enabled: false,
@@ -833,6 +833,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           if (!enabled) {
             adaptiveContextState.active = false;
             adaptiveContextState.escalatedByError = false;
+            adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
           }
         },
       };
@@ -1825,6 +1826,8 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
               let serviceWideRetryCount = 0; // Track 529/503 retries (max 2 per RE doc §5.5)
               let shouldRetryCount = 0; // Track x-should-retry forced retries (cap at 3)
               let consecutive529Count = 0;
+              let _adaptiveDecisionMade = false; // Ensure adaptive context decision is made only once per logical request
+              let _adaptiveOverrideForRequest; // Cached adaptive override for all retry attempts
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account — use pinned account on first attempt if available
                 const account =
@@ -1974,30 +1977,34 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 );
                 const _reqProvider = detectProvider(requestUrl);
 
-                // --- Adaptive 1M context decision ---
-                const _prevAdaptiveState = adaptiveContextState.active;
-                const _use1MContext = resolveAdaptiveContext(
-                  requestInit.body,
-                  _reqModel,
-                  config.adaptive_context || {
-                    enabled: false,
-                    escalation_threshold: 150_000,
-                    deescalation_threshold: 100_000,
-                  },
-                );
-                // Emit visual cue on state transitions (only when adaptive mode is on)
-                if (config.adaptive_context?.enabled && _prevAdaptiveState !== adaptiveContextState.active) {
-                  const label = adaptiveContextState.active ? "1M context ON" : "1M context OFF";
-                  const variant = adaptiveContextState.active ? "info" : "success";
-                  const est = estimatePromptTokens(requestInit.body);
-                  toast(`⬡ ${label} (est. ${Math.round(est / 1000)}K tokens)`, variant, {
-                    debounceKey: "adaptive-ctx",
-                  }).catch(() => {});
+                // --- Adaptive 1M context decision (once per logical request, not per retry) ---
+                if (!_adaptiveDecisionMade) {
+                  _adaptiveDecisionMade = true;
+                  const _prevAdaptiveState = adaptiveContextState.active;
+                  const _use1MContext = resolveAdaptiveContext(
+                    requestInit.body,
+                    _reqModel,
+                    config.adaptive_context || {
+                      enabled: true,
+                      escalation_threshold: 150_000,
+                      deescalation_threshold: 100_000,
+                    },
+                  );
+                  // Emit visual cue on state transitions (only when adaptive mode is on)
+                  if (config.adaptive_context?.enabled && _prevAdaptiveState !== adaptiveContextState.active) {
+                    const label = adaptiveContextState.active ? "1M context ON" : "1M context OFF";
+                    const variant = adaptiveContextState.active ? "info" : "success";
+                    const est = estimatePromptTokens(requestInit.body);
+                    toast(`⬡ ${label} (est. ${Math.round(est / 1000)}K tokens)`, variant, {
+                      debounceKey: "adaptive-ctx",
+                    }).catch(() => {});
+                  }
+                  _adaptiveOverrideForRequest = config.adaptive_context?.enabled
+                    ? { use1MContext: _use1MContext }
+                    : undefined;
                 }
 
-                const _adaptiveOverride = config.adaptive_context?.enabled
-                  ? { use1MContext: _use1MContext }
-                  : undefined;
+                const _adaptiveOverride = _adaptiveOverrideForRequest;
 
                 const computedBetaHeader = buildAnthropicBetaHeader(
                   "",
@@ -2207,26 +2214,34 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     try {
                       const parsedBody = JSON.parse(body);
                       if (Array.isArray(parsedBody.messages) && parsedBody.messages.length > 4) {
-                        // Keep first 2 messages (initial context) and last N messages (recent work).
+                        // Keep first 2 messages (initial context) and last 2 messages (recent work).
                         // Ensure the trimmed array never ends with an assistant message (prefill),
                         // which would cause "does not support assistant message prefill" errors.
-                        let tailCount = 2;
                         const msgs = parsedBody.messages;
-                        // Expand tail if it would end with an assistant message
-                        while (
-                          tailCount < msgs.length - 2 &&
-                          msgs[msgs.length - tailCount]?.role !== "user" &&
-                          msgs.length - tailCount > 0
-                        ) {
-                          tailCount++;
-                        }
-                        const tail = msgs.slice(-tailCount);
-                        // If tail still starts/ends badly, force a user wrapper
+                        const tail = msgs.slice(-2);
+                        // If tail ends with assistant, append a user message to fix the prefill issue.
+                        // Check if the assistant's last content block is tool_use — if so, synthesize
+                        // a tool_result instead of bare "Continue." to respect the tool protocol.
                         if (tail.length > 0 && tail[tail.length - 1]?.role === "assistant") {
-                          tail.push({
-                            role: "user",
-                            content: [{ type: "text", text: "Continue." }],
-                          });
+                          const lastAssistant = tail[tail.length - 1];
+                          const lastContent = Array.isArray(lastAssistant.content) ? lastAssistant.content : [];
+                          const toolUseBlocks = lastContent.filter((b) => b.type === "tool_use");
+                          if (toolUseBlocks.length > 0) {
+                            // Synthesize tool_result for each pending tool_use
+                            tail.push({
+                              role: "user",
+                              content: toolUseBlocks.map((tu) => ({
+                                type: "tool_result",
+                                tool_use_id: tu.id,
+                                content: "[Context trimmed — previous result unavailable]",
+                              })),
+                            });
+                          } else {
+                            tail.push({
+                              role: "user",
+                              content: [{ type: "text", text: "Continue." }],
+                            });
+                          }
                         }
                         const trimmed = [
                           ...msgs.slice(0, 2),
@@ -2635,6 +2650,12 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       ],
     },
     "experimental.session.compacting": async (input, output) => {
+      // Reset adaptive context state on session compaction (new conversation boundary).
+      // This prevents sticky escalation from leaking across conversations.
+      adaptiveContextState.active = false;
+      adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
+      adaptiveContextState.escalatedByError = false;
+
       // Inject Anthropic-specific context into compaction
       if (!accountManager) return;
       const account = accountManager.getCurrentAccount();
@@ -2706,9 +2727,50 @@ const adaptiveContextState = {
  */
 function estimatePromptTokens(bodyString) {
   if (!bodyString || typeof bodyString !== "string") return 0;
-  // The body includes tools, system prompt, and messages.
-  // 4 chars/token is a reasonable heuristic for JSON-encoded conversation.
-  return Math.ceil(bodyString.length / 4);
+  try {
+    const parsed = JSON.parse(bodyString);
+    let charCount = 0;
+
+    // Count system prompt text
+    if (Array.isArray(parsed.system)) {
+      for (const block of parsed.system) {
+        if (block.type === "text" && typeof block.text === "string") {
+          charCount += block.text.length;
+        }
+      }
+    } else if (typeof parsed.system === "string") {
+      charCount += parsed.system.length;
+    }
+
+    // Count messages content (text blocks, tool results) — skip tool definitions
+    if (Array.isArray(parsed.messages)) {
+      for (const msg of parsed.messages) {
+        if (typeof msg.content === "string") {
+          charCount += msg.content.length;
+        } else if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.type === "text" && typeof block.text === "string") {
+              charCount += block.text.length;
+            } else if (block.type === "tool_result" && typeof block.content === "string") {
+              charCount += block.content.length;
+            } else if (block.type === "tool_use") {
+              // Count serialized input as tokens
+              charCount += JSON.stringify(block.input || {}).length;
+            } else if (block.type === "image" || block.type === "image_url") {
+              // Images: ~2000 tokens per image (Anthropic tile-based counting)
+              charCount += 8000; // 2000 tokens * 4 chars/token
+            }
+          }
+        }
+      }
+    }
+
+    // 4 chars/token heuristic for text content (reasonable for English + code + JSON)
+    return Math.ceil(charCount / 4);
+  } catch {
+    // Fallback: raw body length / 4 if JSON parsing fails
+    return Math.ceil(bodyString.length / 4);
+  }
 }
 
 /**
@@ -2733,6 +2795,11 @@ function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
   // Non-adaptive: use static check
   if (!adaptiveConfig.enabled) {
     return hasOneMillionContext(model);
+  }
+
+  // If experimental betas are disabled, context-1m will be stripped anyway — skip adaptive logic
+  if (isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)) {
+    return false;
   }
 
   // Model must be eligible for 1M context at all
@@ -2762,6 +2829,10 @@ function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
     return true;
   } else {
     // Currently inactive — consider escalation
+    // Symmetric hysteresis: require at least 2 turns before re-escalation too
+    if (turnsSinceTransition < 2 && adaptiveContextState.lastTransitionTurn > 0) {
+      return false;
+    }
     if (estimatedTokens > adaptiveConfig.escalation_threshold) {
       // Escalate
       adaptiveContextState.active = true;
@@ -4293,10 +4364,26 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
     if (Array.isArray(parsed.messages) && parsed.messages.length > 0) {
       const lastMsg = parsed.messages[parsed.messages.length - 1];
       if (lastMsg && lastMsg.role === "assistant") {
-        parsed.messages.push({
-          role: "user",
-          content: [{ type: "text", text: "Continue." }],
-        });
+        // Check if the assistant message contains tool_use blocks — if so,
+        // synthesize tool_result responses instead of bare "Continue." to
+        // respect the Anthropic tool protocol.
+        const lastContent = Array.isArray(lastMsg.content) ? lastMsg.content : [];
+        const toolUseBlocks = lastContent.filter((b) => b.type === "tool_use");
+        if (toolUseBlocks.length > 0) {
+          parsed.messages.push({
+            role: "user",
+            content: toolUseBlocks.map((tu) => ({
+              type: "tool_result",
+              tool_use_id: tu.id,
+              content: "[Result unavailable — conversation was restructured]",
+            })),
+          });
+        } else {
+          parsed.messages.push({
+            role: "user",
+            content: [{ type: "text", text: "Continue." }],
+          });
+        }
       }
     }
 
@@ -4751,9 +4838,12 @@ async function refreshAccountToken(account, client, source = "foreground", { onT
     const { readCCCredentials } = await import("./lib/cc-credentials.mjs");
     const ccCreds = readCCCredentials();
     const match = ccCreds.find((c) => c.refreshToken === account.refreshToken);
-    if (match && match.expiresAt > Date.now()) {
+    // Accept CC credential if:
+    //   - expiresAt is in the future (normal case), OR
+    //   - expiresAt is 0/missing (CC didn't provide expiry — trust the token, let API 401 if stale)
+    if (match && (match.expiresAt === 0 || match.expiresAt > Date.now())) {
       account.access = match.accessToken;
-      account.expires = match.expiresAt;
+      account.expires = match.expiresAt || Date.now() + 3600_000; // default 1h if unknown
       markTokenStateUpdated(account);
       if (onTokensUpdated) {
         try {

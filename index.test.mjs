@@ -54,6 +54,7 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
     })),
     loadConfigFresh: vi.fn(() => ({
       ...original.DEFAULT_CONFIG,
@@ -67,6 +68,7 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
     })),
     saveConfig: vi.fn(),
   };
