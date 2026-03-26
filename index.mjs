@@ -1527,6 +1527,8 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
   async function refreshIdleAccount(account) {
     if (!accountManager) return;
     if (idleRefreshInFlight.has(account.id)) return;
+    // CC-sourced accounts don't use OAuth idle refresh
+    if (account.source === "cc-keychain" || account.source === "cc-file") return;
 
     idleRefreshInFlight.add(account.id);
     const attemptedRefreshToken = account.refreshToken;
@@ -4568,6 +4570,31 @@ function applyDiskAuthIfFresher(account, diskAuth, options = {}) {
  * @throws {Error} If refresh fails
  */
 async function refreshAccountToken(account, client, source = "foreground", { onTokensUpdated } = {}) {
+  // CC-sourced accounts must NEVER enter the OAuth HTTP refresh flow.
+  // Instead, re-read credentials from the CC source.  If they're still
+  // expired, let the caller handle it (the account will be skipped).
+  if (account.source === "cc-keychain" || account.source === "cc-file") {
+    const { readCCCredentials } = await import("./lib/cc-credentials.mjs");
+    const ccCreds = readCCCredentials();
+    const match = ccCreds.find((c) => c.refreshToken === account.refreshToken);
+    if (match && match.expiresAt > Date.now()) {
+      account.access = match.accessToken;
+      account.expires = match.expiresAt;
+      markTokenStateUpdated(account);
+      if (onTokensUpdated) {
+        try {
+          await onTokensUpdated();
+        } catch {
+          // best-effort
+        }
+      }
+      return account.access;
+    }
+    // Could not refresh from CC source – token may be stale.
+    // Throw so the caller falls through to the next account.
+    throw new Error(`CC credential expired (source: ${account.source})`);
+  }
+
   const lockResult = await acquireRefreshLock(account.id, {
     timeoutMs: 2_000,
     backoffMs: 60,
