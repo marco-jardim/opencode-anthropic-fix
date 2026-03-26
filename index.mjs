@@ -2145,9 +2145,29 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     try {
                       const parsedBody = JSON.parse(body);
                       if (Array.isArray(parsedBody.messages) && parsedBody.messages.length > 4) {
-                        // Keep first 2 messages (initial context) and last 2 messages (recent work)
+                        // Keep first 2 messages (initial context) and last N messages (recent work).
+                        // Ensure the trimmed array never ends with an assistant message (prefill),
+                        // which would cause "does not support assistant message prefill" errors.
+                        let tailCount = 2;
+                        const msgs = parsedBody.messages;
+                        // Expand tail if it would end with an assistant message
+                        while (
+                          tailCount < msgs.length - 2 &&
+                          msgs[msgs.length - tailCount]?.role !== "user" &&
+                          msgs.length - tailCount > 0
+                        ) {
+                          tailCount++;
+                        }
+                        const tail = msgs.slice(-tailCount);
+                        // If tail still starts/ends badly, force a user wrapper
+                        if (tail.length > 0 && tail[tail.length - 1]?.role === "assistant") {
+                          tail.push({
+                            role: "user",
+                            content: [{ type: "text", text: "Continue." }],
+                          });
+                        }
                         const trimmed = [
-                          ...parsedBody.messages.slice(0, 2),
+                          ...msgs.slice(0, 2),
                           {
                             role: "user",
                             content: [
@@ -2157,7 +2177,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                               },
                             ],
                           },
-                          ...parsedBody.messages.slice(-2),
+                          ...tail,
                         ];
                         parsedBody.messages = trimmed;
                         requestInit.body = JSON.stringify(parsedBody);
@@ -4091,6 +4111,19 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
     if (fastModeEnabled && parsed.model && (isOpus46Model(parsed.model) || isSonnet46Model(parsed.model))) {
       parsed.speed = "fast";
     }
+
+    // Guard: ensure messages array never ends with an assistant message.
+    // The API rejects this as "assistant message prefill" when extended thinking is active.
+    if (Array.isArray(parsed.messages) && parsed.messages.length > 0) {
+      const lastMsg = parsed.messages[parsed.messages.length - 1];
+      if (lastMsg && lastMsg.role === "assistant") {
+        parsed.messages.push({
+          role: "user",
+          content: [{ type: "text", text: "Continue." }],
+        });
+      }
+    }
+
     return JSON.stringify(parsed);
   } catch {
     // ignore parse errors
