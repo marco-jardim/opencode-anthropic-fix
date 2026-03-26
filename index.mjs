@@ -3023,7 +3023,7 @@ class TelemetryEmitter {
           node_version: process.version,
           terminal: process.env.TERM_PROGRAM || process.env.TERM || "",
           version: this.#cliVersion,
-          build_time: "", // omit — we don't know the real build time
+          build_time: CLAUDE_CODE_BUILD_TIME,
           is_ci: false,
         },
         ...extras,
@@ -3133,16 +3133,18 @@ process.once("beforeExit", () => {
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.83";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.84";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
+const CLAUDE_CODE_BUILD_TIME = "2026-03-25T23:48:41Z";
 
-// The @anthropic-ai/sdk version bundled with Claude Code v2.1.83.
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.84.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-// Verified by extracting VERSION="0.208.0" from the bundled cli.js of v2.1.80/2.1.81/2.1.83.
+// Verified by extracting VERSION="0.208.0" from the bundled cli.js of v2.1.84.
 const ANTHROPIC_SDK_VERSION = "0.208.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.84", "0.208.0"],
   ["2.1.83", "0.208.0"],
   ["2.1.81", "0.208.0"],
   ["2.1.80", "0.208.0"],
@@ -3593,9 +3595,9 @@ function buildRequestMetadata(input) {
 
 /**
  * Build the billing header block for Claude Code system prompt injection.
- * Claude Code v2.1.81+: cch computed via NP1() from first user message, cc_version includes model ID.
+ * Claude Code v2.1.84: cch computed via NP1() from first user message, cc_version includes model ID.
  *
- * @param {string} version - CLI version (e.g., "2.1.83")
+ * @param {string} version - CLI version (e.g., "2.1.84")
  * @param {string} [modelId] - Model ID to append (e.g., "claude-opus-4-6")
  * @param {string} [firstUserMessage] - First user message text for cch hash computation
  * @returns {string}
@@ -3920,7 +3922,7 @@ function buildAnthropicBetaHeader(
   const haiku = isHaikuModel(model);
   const isRoundRobin = strategy === "round-robin";
 
-  // === ALWAYS-ON BETAS (Claude Code v2.1.83 base set) ===
+  // === ALWAYS-ON BETAS (Claude Code v2.1.84 base set) ===
   // These are ALWAYS included regardless of env vars or feature flags.
   if (!haiku) {
     betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"
@@ -4230,6 +4232,9 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
     if (isTruthyEnv(process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION)) {
       requestHeaders.set("x-anthropic-additional-protection", "true");
     }
+
+    // Claude Code v2.1.84: x-client-request-id — unique UUID per request for debugging timeouts.
+    requestHeaders.set("x-client-request-id", randomUUID());
   }
   requestHeaders.delete("x-api-key");
 
@@ -4282,6 +4287,15 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
     if (thinkingActive) {
       // Anthropic API rejects temperature when thinking is enabled
       delete parsed.temperature;
+
+      // Claude Code v2.1.84: inject context_management body field when thinking
+      // is active and context-management beta is in use. This tells the API how
+      // to handle thinking blocks during context management operations.
+      if (!parsed.context_management) {
+        parsed.context_management = {
+          edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+        };
+      }
     } else {
       // Claude Code always uses temperature: 1 for non-thinking requests (RE doc §5.2, never 0)
       parsed.temperature = 1;
