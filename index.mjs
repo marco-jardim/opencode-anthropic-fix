@@ -590,6 +590,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
         `fast-mode: ${fresh.fast_mode ? "on" : "off"}`,
         `telemetry-emulation: ${fresh.telemetry?.emulate_minimal ? "on (silent observer)" : "off"}`,
         `usage-toast: ${fresh.usage_toast ? "on" : "off"}`,
+        `adaptive-context: ${fresh.adaptive_context?.enabled ? `on (↑${Math.round((fresh.adaptive_context.escalation_threshold || 150000) / 1000)}K ↓${Math.round((fresh.adaptive_context.deescalation_threshold || 100000) / 1000)}K)${adaptiveContextState.active ? " [ACTIVE]" : ""}` : "off"}`,
       ];
       await sendCommandMessage(input.sessionID, lines.join("\n"));
       return;
@@ -817,6 +818,22 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           const enabled = value === "on" || value === "true" || value === "1";
           saveConfig({ usage_toast: enabled });
           config.usage_toast = enabled;
+        },
+        "adaptive-context": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ adaptive_context: { enabled } });
+          if (!config.adaptive_context)
+            config.adaptive_context = {
+              enabled: false,
+              escalation_threshold: 150_000,
+              deescalation_threshold: 100_000,
+            };
+          config.adaptive_context.enabled = enabled;
+          // Reset state when toggled off
+          if (!enabled) {
+            adaptiveContextState.active = false;
+            adaptiveContextState.escalatedByError = false;
+          }
         },
       };
 
@@ -1956,6 +1973,32 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   requestInit.body,
                 );
                 const _reqProvider = detectProvider(requestUrl);
+
+                // --- Adaptive 1M context decision ---
+                const _prevAdaptiveState = adaptiveContextState.active;
+                const _use1MContext = resolveAdaptiveContext(
+                  requestInit.body,
+                  _reqModel,
+                  config.adaptive_context || {
+                    enabled: false,
+                    escalation_threshold: 150_000,
+                    deescalation_threshold: 100_000,
+                  },
+                );
+                // Emit visual cue on state transitions (only when adaptive mode is on)
+                if (config.adaptive_context?.enabled && _prevAdaptiveState !== adaptiveContextState.active) {
+                  const label = adaptiveContextState.active ? "1M context ON" : "1M context OFF";
+                  const variant = adaptiveContextState.active ? "info" : "success";
+                  const est = estimatePromptTokens(requestInit.body);
+                  toast(`⬡ ${label} (est. ${Math.round(est / 1000)}K tokens)`, variant, {
+                    debounceKey: "adaptive-ctx",
+                  }).catch(() => {});
+                }
+
+                const _adaptiveOverride = config.adaptive_context?.enabled
+                  ? { use1MContext: _use1MContext }
+                  : undefined;
+
                 const computedBetaHeader = buildAnthropicBetaHeader(
                   "",
                   getSignatureEmulationEnabled(),
@@ -1965,6 +2008,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   getEffectiveStrategy(),
                   requestUrl?.pathname,
                   _reqHasFileRefs,
+                  _adaptiveOverride,
                 );
 
                 let body = transformRequestBody(
@@ -1988,12 +2032,20 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 logTransformedSystemPrompt(body);
 
                 // Build headers with the selected account's token
-                const requestHeaders = buildRequestHeaders(input, requestInit, accessToken, body, requestUrl, {
-                  enabled: getSignatureEmulationEnabled(),
-                  claudeCliVersion,
-                  customBetas: config.custom_betas,
-                  strategy: getEffectiveStrategy(),
-                });
+                const requestHeaders = buildRequestHeaders(
+                  input,
+                  requestInit,
+                  accessToken,
+                  body,
+                  requestUrl,
+                  {
+                    enabled: getSignatureEmulationEnabled(),
+                    claudeCliVersion,
+                    customBetas: config.custom_betas,
+                    strategy: getEffectiveStrategy(),
+                  },
+                  _adaptiveOverride,
+                );
                 // Execute the request
                 let response;
                 try {
@@ -2144,6 +2196,14 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     !requestInit._reactiveCompactAttempted
                   ) {
                     debugLog("prompt too long — attempting reactive message trimming");
+                    // Auto-escalate adaptive context on prompt_too_long so the retry
+                    // includes the 1M beta header (if model supports it).
+                    if (config.adaptive_context?.enabled) {
+                      forceEscalateAdaptiveContext();
+                      toast("⬡ 1M context force-activated (prompt too long)", "warning", {
+                        debounceKey: "adaptive-ctx",
+                      }).catch(() => {});
+                    }
                     try {
                       const parsedBody = JSON.parse(body);
                       if (Array.isArray(parsedBody.messages) && parsedBody.messages.length > 4) {
@@ -2617,6 +2677,111 @@ const sessionMetrics = {
   sessionStartTime: Date.now(),
   lastQuota: { tokens: 0, requests: 0, inputTokens: 0, updatedAt: 0 },
 };
+
+// ---------------------------------------------------------------------------
+// Adaptive 1M context state
+// ---------------------------------------------------------------------------
+
+/**
+ * Tracks whether the 1M context beta is currently active for adaptive mode.
+ * When adaptive_context.enabled is true, the context-1m-2025-08-07 beta is
+ * toggled per-request based on estimated prompt size.
+ *
+ * @type {{ active: boolean, lastTransitionTurn: number, escalatedByError: boolean }}
+ */
+const adaptiveContextState = {
+  /** Whether 1M context beta is currently being sent. */
+  active: false,
+  /** Turn number of the last transition (to avoid flapping). */
+  lastTransitionTurn: 0,
+  /** Set when escalation was triggered by a prompt_too_long error. */
+  escalatedByError: false,
+};
+
+/**
+ * Estimate prompt token count from the raw request body string.
+ * Uses a 4-character-per-token heuristic (conservative for English + code).
+ * @param {string} bodyString - JSON string of the request body
+ * @returns {number} Estimated token count
+ */
+function estimatePromptTokens(bodyString) {
+  if (!bodyString || typeof bodyString !== "string") return 0;
+  // The body includes tools, system prompt, and messages.
+  // 4 chars/token is a reasonable heuristic for JSON-encoded conversation.
+  return Math.ceil(bodyString.length / 4);
+}
+
+/**
+ * Decide whether to include the context-1m beta for this request.
+ * Returns true if 1M context should be activated.
+ *
+ * Decision logic:
+ *   - If adaptive_context is disabled, defer to hasOneMillionContext(model) as before.
+ *   - If model does not support 1M context, always false.
+ *   - Escalate when estimated prompt tokens exceed escalation_threshold.
+ *   - De-escalate when estimated prompt tokens drop below deescalation_threshold.
+ *   - Never de-escalate if escalation was triggered by a prompt_too_long error
+ *     (sticky until session compacts or drops far below threshold).
+ *   - Hysteresis: require at least 2 turns between transitions to avoid flapping.
+ *
+ * @param {string} bodyString - JSON request body
+ * @param {string} model - Model ID
+ * @param {import('./lib/config.mjs').AdaptiveContextConfig} adaptiveConfig
+ * @returns {boolean}
+ */
+function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
+  // Non-adaptive: use static check
+  if (!adaptiveConfig.enabled) {
+    return hasOneMillionContext(model);
+  }
+
+  // Model must be eligible for 1M context at all
+  if (!hasOneMillionContext(model)) {
+    return false;
+  }
+
+  const estimatedTokens = estimatePromptTokens(bodyString);
+  const turnsSinceTransition = sessionMetrics.turns - adaptiveContextState.lastTransitionTurn;
+
+  if (adaptiveContextState.active) {
+    // Currently active — consider de-escalation
+    // Don't de-escalate if error-escalated (sticky)
+    if (adaptiveContextState.escalatedByError) {
+      return true;
+    }
+    // Hysteresis: require at least 2 turns before considering de-escalation
+    if (turnsSinceTransition < 2) {
+      return true;
+    }
+    if (estimatedTokens < adaptiveConfig.deescalation_threshold) {
+      // De-escalate
+      adaptiveContextState.active = false;
+      adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
+      return false;
+    }
+    return true;
+  } else {
+    // Currently inactive — consider escalation
+    if (estimatedTokens > adaptiveConfig.escalation_threshold) {
+      // Escalate
+      adaptiveContextState.active = true;
+      adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
+      return true;
+    }
+    return false;
+  }
+}
+
+/**
+ * Force-escalate adaptive context (e.g. after prompt_too_long error).
+ */
+function forceEscalateAdaptiveContext() {
+  if (!adaptiveContextState.active) {
+    adaptiveContextState.active = true;
+    adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
+  }
+  adaptiveContextState.escalatedByError = true;
+}
 
 const MODEL_PRICING = {
   "claude-opus-4-6": { input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75 },
@@ -3644,6 +3809,7 @@ function buildSystemPromptBlocks(system, signature) {
  * @param {import('./lib/config.mjs').AccountSelectionStrategy} [strategy]
  * @param {string} [requestPath]
  * @param {boolean} [hasFileReferences]
+ * @param {{ use1MContext?: boolean }} [adaptiveOverride] - When set, overrides the static hasOneMillionContext() check.
  * @returns {string}
  */
 function buildAnthropicBetaHeader(
@@ -3655,6 +3821,7 @@ function buildAnthropicBetaHeader(
   strategy,
   requestPath,
   hasFileReferences,
+  adaptiveOverride,
 ) {
   const incomingBetasList = incomingBeta
     .split(",")
@@ -3696,9 +3863,15 @@ function buildAnthropicBetaHeader(
     betas.push("interleaved-thinking-2025-05-14");
   }
 
-  // Context 1M — always-on for eligible models (Claude Code includes this for OAuth too)
-  if (hasOneMillionContext(model)) {
-    betas.push("context-1m-2025-08-07");
+  // Context 1M — when adaptive override is provided, use it; otherwise fall back to static check.
+  {
+    const use1M =
+      adaptiveOverride && typeof adaptiveOverride.use1MContext === "boolean"
+        ? adaptiveOverride.use1MContext
+        : hasOneMillionContext(model);
+    if (use1M) {
+      betas.push("context-1m-2025-08-07");
+    }
   }
 
   // Prompt caching scope — always-on EXCEPT in round-robin (per-workspace state conflicts)
@@ -3887,7 +4060,7 @@ async function fetchLatestClaudeCodeVersion(timeoutMs = 1200) {
  * @param {{enabled: boolean, claudeCliVersion: string, strategy?: import('./lib/config.mjs').AccountSelectionStrategy, customBetas?: string[]}} signature
  * @returns {Headers}
  */
-function buildRequestHeaders(input, requestInit, accessToken, requestBody, requestUrl, signature) {
+function buildRequestHeaders(input, requestInit, accessToken, requestBody, requestUrl, signature, adaptiveOverride) {
   const requestHeaders = new Headers();
   if (input instanceof Request) {
     input.headers.forEach((value, key) => {
@@ -3927,6 +4100,7 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
     signature.strategy,
     requestUrl?.pathname,
     hasFileReferences,
+    adaptiveOverride,
   );
 
   const authTokenOverride = process.env.ANTHROPIC_AUTH_TOKEN?.trim();
