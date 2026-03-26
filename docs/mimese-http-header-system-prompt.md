@@ -146,6 +146,7 @@ It also injects optional env-driven headers:
 - `CLAUDE_CODE_REMOTE_SESSION_ID` => `x-claude-remote-session-id`
 - `CLAUDE_AGENT_SDK_CLIENT_APP` => `x-client-app`
 - `CLAUDE_CODE_ADDITIONAL_PROTECTION=1/true/yes` => `x-anthropic-additional-protection: true`
+- `x-client-request-id: <uuid>` (v2.1.84+, unique per request for debugging stream timeouts)
 
 ### 4.3 OAuth token-layer user-agent mimicry
 
@@ -165,7 +166,7 @@ Without these headers, Anthropic's OAuth token endpoints return HTTP 429.
 
 **Design decision:** The plugin intentionally does NOT use Claude Code's `Claude-User` UA for web scraping.
 
-Claude Code v2.1.83 sends: `Claude-User (claude-code/{version}; +https://support.anthropic.com/)`
+Claude Code v2.1.84 sends: `Claude-User (claude-code/{version}; +https://support.anthropic.com/)`
 
 The plugin instead sends a standard Chrome browser User-Agent. Rationale:
 
@@ -268,6 +269,8 @@ No dedicated automatic composition yet for:
 - `redact-thinking-2026-02-12` (intentionally opt-in — OpenCode users benefit from seeing thinking blocks)
 - `afk-mode-2026-01-31`
 - `tool-search-tool-2025-10-19`
+- `task-budgets-2026-03-13` (v2.1.84+ — conditional on taskBudget presence; proxy repasses body as-is)
+- `advisor-tool-2026-03-01` (v2.1.84+ — feature-flagged, niche)
 
 These can still be injected manually through `ANTHROPIC_BETAS` or `/anthropic betas add` when operationally required.
 
@@ -343,6 +346,32 @@ Where:
 - `accountId`: `account.accountUuid` when present; fallback to `account.id`
 
 The plugin does not inject a `betas` field into request body. Beta flags are sent via `anthropic-beta` header only.
+
+### 7.2 `context_management` body field (v2.1.84+)
+
+When extended thinking is active (`thinking.type` is `"adaptive"` or `"enabled"`), the plugin injects:
+
+```json
+{
+  "context_management": {
+    "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }]
+  }
+}
+```
+
+This tells the API how to handle thinking blocks during context management operations. Only injected when the field is not already present in the request body.
+
+### 7.3 `speed` body field (fast mode)
+
+When `fast_mode` config is enabled and the model is Opus 4.6 or Sonnet 4.6:
+
+```json
+{
+  "speed": "fast"
+}
+```
+
+This enables server-side fast-mode processing. Can be disabled via `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE=1`.
 
 ## 8) Related URL shaping
 

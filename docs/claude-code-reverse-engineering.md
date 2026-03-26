@@ -1,11 +1,11 @@
 # Claude Code Reverse Engineering — Complete Analysis
 
-**Package:** `@anthropic-ai/claude-code` v2.1.83
-**Source:** `cli.js` (12.5 MB bundled/minified)
-**Build Time:** `2026-03-24T22:15:20Z`
+**Package:** `@anthropic-ai/claude-code` v2.1.84
+**Source:** `cli.js` (12.7 MB bundled/minified)
+**Build Time:** `2026-03-25T23:48:41Z`
 **Internal Codename:** `tengu`
 **Purpose:** Full reverse-engineering for OpenCode plugin mimicry of Claude Code authentication and API calls
-**Previous versions analyzed:** v2.1.80, v2.1.81
+**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83
 
 ---
 
@@ -1868,6 +1868,38 @@ requests are either rate-limited more aggressively or rejected outright with 429
 - 2026-03-20: v2.1.81 published (minimal changes, OAuth code identical)
 - 2026-03-21: OAuth token endpoint begins returning 429 for non-axios requests
 
+### 2026-03-26 — v2.1.84 Changes (New Betas, Body Fields, Request Header)
+
+**Type:** Client-side changes. No OAuth/auth breaking changes.
+
+**Key changes in v2.1.84 (from v2.1.83):**
+
+| Change                              | Detail                                                                                                                                                                                                                  | Mimicry Impact                              |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| **`task-budgets-2026-03-13` beta**  | NEW — conditionally added when `taskBudget` is present. Body gets `task_budget: {type:"tokens", total:N, remaining:N}`. Used for background subagent budget limits.                                                     | LOW — proxy repasses body as-is             |
+| **`advisor-tool-2026-03-01` beta**  | NEW — conditionally added for Opus 4.6/Sonnet 4.6 when `tengu_surreal_advisor` feature flag + `advisorModel` setting present. Server-side tool for model-to-model consultation.                                         | LOW — feature-flagged, niche                |
+| **`context_management` body field** | NEW — injected when thinking is active + `context-management-2025-06-27` beta present: `{edits: [{type: "clear_thinking_20251015", keep: "all"}]}`. Controls how thinking blocks are handled during context management. | **MEDIUM** — wire-format addition           |
+| **`speed: "fast"` body parameter**  | Already present in v2.1.83 for fast-mode requests. Verified unchanged in v2.1.84.                                                                                                                                       | NONE — already implemented                  |
+| **`x-client-request-id` header**    | NEW — UUID per request for debugging stream timeouts.                                                                                                                                                                   | **MEDIUM** — new header                     |
+| **PowerShell tool**                 | NEW opt-in tool for Windows (replaces bash in some contexts).                                                                                                                                                           | NONE — tool definition, not API wire format |
+| **`CLAUDE_STREAM_IDLE_TIMEOUT_MS`** | NEW env var (default 90s) for stream idle timeout detection.                                                                                                                                                            | LOW — client-side behavior                  |
+| **MCP tool description cap**        | Tool descriptions capped at 2KB.                                                                                                                                                                                        | LOW — client-side preprocessing             |
+| **`TaskCreated` hook**              | NEW hook event.                                                                                                                                                                                                         | NONE — internal hook system                 |
+| **Idle-return prompt**              | Prompts user after 75+ min idle.                                                                                                                                                                                        | NONE — UI behavior only                     |
+| **Global system-prompt caching**    | System prompt now cached globally with ToolSearch integration.                                                                                                                                                          | LOW — caching optimization                  |
+| **Token display**                   | Counts ≥1M display as "1.5m" format.                                                                                                                                                                                    | NONE — UI display only                      |
+
+**Fixes implemented in plugin v0.0.34:**
+
+- Updated `FALLBACK_CLAUDE_CLI_VERSION` to `"2.1.84"` and `CLAUDE_CODE_BUILD_TIME` to `"2026-03-25T23:48:41Z"`
+- Added `context_management` body field injection when thinking is active
+- Added `x-client-request-id` header (UUID per request)
+- SDK version unchanged at `0.208.0`
+
+**OAuth/Auth:** STABLE — no changes.
+**Beta headers:** Two new conditional betas (`task-budgets`, `advisor-tool`). Base set unchanged.
+**API request shape:** New `context_management` body field, new `x-client-request-id` header.
+
 ### 2026-03-24 — v2.1.83 Changes (No Breaking Auth Changes)
 
 **Type:** Client-side changes only. No OAuth/auth or beta header changes.
@@ -1912,5 +1944,5 @@ This change makes static `cch=00000` values detectable as non-genuine in v2.1.81
 ---
 
 _Generated by reverse-engineering `@anthropic-ai/claude-code` cli.js bundle._
-_Versions analyzed: v2.1.80, v2.1.81, v2.1.83_
-_Last updated: 2026-03-25_
+_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84_
+_Last updated: 2026-03-26_
