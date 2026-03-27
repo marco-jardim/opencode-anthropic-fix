@@ -1,10 +1,11 @@
 {
   "name": "opencode-anthropic-fix",
-  "version": "0.0.34",
+  "version": "0.0.35",
   "license": "GPL-3.0-or-later",
   "main": "./index.mjs",
   "files": [
     "index.mjs",
+    "cli.mjs",
     "lib/**/*.mjs",
     "README.md",
     "LICENSE"
