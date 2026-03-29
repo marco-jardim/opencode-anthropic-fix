@@ -882,7 +882,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           "Toggleable presets:",
           "  /anthropic betas add structured-outputs-2025-12-15",
           "  /anthropic betas add context-management-2025-06-27",
-          "  /anthropic betas add tool-examples-2025-10-29",
+          "  /anthropic betas add task-budgets-2026-03-13",
           "  /anthropic betas add web-search-2025-03-05",
           "  /anthropic betas add compact-2026-01-12",
           "  /anthropic betas add mcp-servers-2025-12-04",
@@ -3133,17 +3133,20 @@ process.once("beforeExit", () => {
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.84";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.87";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-03-25T23:48:41Z";
+const CLAUDE_CODE_BUILD_TIME = "2026-03-29T02:16:58Z";
 
-// The @anthropic-ai/sdk version bundled with Claude Code v2.1.84.
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.87.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-// Verified by extracting VERSION="0.208.0" from the bundled cli.js of v2.1.84.
+// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .83-.87.
 const ANTHROPIC_SDK_VERSION = "0.208.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.87", "0.208.0"],
+  ["2.1.86", "0.208.0"],
+  ["2.1.85", "0.208.0"],
   ["2.1.84", "0.208.0"],
   ["2.1.83", "0.208.0"],
   ["2.1.81", "0.208.0"],
@@ -3961,9 +3964,6 @@ function buildAnthropicBetaHeader(
   if (supportsStructuredOutputs(model)) {
     betas.push("structured-outputs-2025-12-15");
   }
-
-  // Tool examples — always-on in Claude Code
-  betas.push("tool-examples-2025-10-29");
 
   // Web search — for models that support it
   if (supportsWebSearch(model)) {

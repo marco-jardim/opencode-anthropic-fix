@@ -1,11 +1,11 @@
 # Claude Code Reverse Engineering — Complete Analysis
 
-**Package:** `@anthropic-ai/claude-code` v2.1.84
-**Source:** `cli.js` (12.7 MB bundled/minified)
-**Build Time:** `2026-03-25T23:48:41Z`
+**Package:** `@anthropic-ai/claude-code` v2.1.87
+**Source:** `cli.js` (13.0 MB bundled/minified)
+**Build Time:** `2026-03-29T02:16:58Z`
 **Internal Codename:** `tengu`
 **Purpose:** Full reverse-engineering for OpenCode plugin mimicry of Claude Code authentication and API calls
-**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83
+**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86
 
 ---
 

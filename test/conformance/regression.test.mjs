@@ -808,11 +808,11 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all 11+ required always-on betas for non-Haiku model", async () => {
+  it("contains all required always-on betas for non-Haiku model (v2.1.87 set)", async () => {
     const { headers } = await sendRequest(fetchFn);
     const beta = headers.get("anthropic-beta");
 
-    // RE doc §15.16 always-on set
+    // RE doc §15.16 always-on set — synced to v2.1.87
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
     expect(beta).toContain("advanced-tool-use-2025-11-20");
@@ -821,9 +821,10 @@ describe("E2E: Beta composition is complete and correct", () => {
     expect(beta).toContain("interleaved-thinking-2025-05-14");
     expect(beta).toContain("prompt-caching-scope-2026-01-05");
     expect(beta).toContain("context-management-2025-06-27");
-    expect(beta).toContain("tool-examples-2025-10-29");
     expect(beta).toContain("tool-search-tool-2025-10-19");
 
+    // Removed in v2.1.84 — must NOT be sent
+    expect(beta).not.toContain("tool-examples-2025-10-29");
     // Should NOT contain non-existent betas from bad checklist
     expect(beta).not.toContain("code-execution-2025-01-24");
     expect(beta).not.toContain("prompt-caching-2024-07-31");
@@ -904,7 +905,7 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
-describe("E2E: Version is 2.1.84", () => {
+describe("E2E: Version is 2.1.87", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -913,17 +914,17 @@ describe("E2E: Version is 2.1.84", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.84", async () => {
+  it("User-Agent contains 2.1.87", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.84");
+    expect(headers.get("user-agent")).toContain("2.1.87");
   });
 
-  it("billing header contains 2.1.84", async () => {
+  it("billing header contains 2.1.87", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.84");
+    expect(body.system[0].text).toContain("2.1.87");
   });
 });
 
