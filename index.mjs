@@ -1304,6 +1304,363 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       }
     }
 
+    // /anthropic review [pr <number>|branch <name>|status] — Claude Code Review (Bughunter) results
+    if (primary === "review") {
+      const action = (args[1] || "").toLowerCase();
+
+      /**
+       * Execute a shell command and return { stdout, stderr, code }.
+       * @param {string} cmd
+       * @param {string[]} cmdArgs
+       * @returns {Promise<{ stdout: string, stderr: string, code: number }>}
+       */
+      async function execShell(cmd, cmdArgs) {
+        const { execFile } = await import("node:child_process");
+        return new Promise((resolve) => {
+          execFile(cmd, cmdArgs, { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
+            resolve({
+              stdout: (stdout || "").trim(),
+              stderr: (stderr || "").trim(),
+              code: err ? err.code || 1 : 0,
+            });
+          });
+        });
+      }
+
+      /**
+       * Parse bughunter severity from check run output text.
+       * @param {string} text
+       * @returns {{ normal: number, nit: number, pre_existing: number } | null}
+       */
+      function parseBughunterSeverity(text) {
+        const m = text.match(/bughunter-severity:\s*(\{[^}]+\})/);
+        if (!m) return null;
+        try {
+          return JSON.parse(m[1]);
+        } catch {
+          return null;
+        }
+      }
+
+      /**
+       * Format a severity object into a human-readable string.
+       * @param {{ normal: number, nit: number, pre_existing: number }} sev
+       */
+      function formatSeverity(sev) {
+        const parts = [];
+        if (sev.normal > 0) parts.push(`🔴 Important: ${sev.normal}`);
+        if (sev.nit > 0) parts.push(`🟡 Nit: ${sev.nit}`);
+        if (sev.pre_existing > 0) parts.push(`🟣 Pre-existing: ${sev.pre_existing}`);
+        if (parts.length === 0) parts.push("No issues found");
+        return parts.join("  |  ");
+      }
+
+      // Check gh CLI availability
+      const ghCheck = await execShell("gh", ["--version"]);
+      if (ghCheck.code !== 0) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic Review (error)\n\nGitHub CLI (gh) not found. Install it from https://cli.github.com/",
+        );
+        return;
+      }
+
+      // Detect current repo
+      const repoResult = await execShell("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]);
+      if (repoResult.code !== 0 || !repoResult.stdout) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic Review (error)\n\nCould not detect GitHub repository. Ensure you are in a git repo with a GitHub remote.",
+        );
+        return;
+      }
+      const repo = repoResult.stdout.trim();
+
+      try {
+        // /anthropic review status — check if code review is set up for this repo
+        if (action === "status") {
+          // Check for recent check runs named "Claude Code Review"
+          const checkResult = await execShell("gh", [
+            "api",
+            `repos/${repo}/commits/HEAD/check-runs`,
+            "--jq",
+            '.check_runs[] | select(.name | test("claude|bughunter"; "i")) | .name + " — " + .status + " (" + .conclusion + ")"',
+          ]);
+          const lines = ["▣ Anthropic Review — Status", "", `Repository: ${repo}`, ""];
+          if (checkResult.stdout) {
+            lines.push("Recent Claude check runs:", checkResult.stdout);
+          } else {
+            lines.push(
+              "No Claude Code Review check runs found on HEAD.",
+              "",
+              "Code Review must be enabled by an admin at claude.ai/admin-settings.",
+              "It requires a Teams or Enterprise subscription.",
+            );
+          }
+          await sendCommandMessage(input.sessionID, lines.join("\n"));
+          return;
+        }
+
+        // /anthropic review pr [<number>] — get review results for a PR
+        if (!action || action === "pr") {
+          const prNumber = args[2] ? parseInt(args[2], 10) : null;
+
+          // If no PR number, find the current branch's PR
+          let prRef;
+          if (prNumber) {
+            prRef = String(prNumber);
+          } else {
+            const branchResult = await execShell("git", ["branch", "--show-current"]);
+            const currentBranch = branchResult.stdout.trim();
+            if (!currentBranch) {
+              await sendCommandMessage(
+                input.sessionID,
+                "▣ Anthropic Review (error)\n\nDetached HEAD — specify a PR number: /anthropic review pr <number>",
+              );
+              return;
+            }
+            // Find PR for current branch
+            const prLookup = await execShell("gh", [
+              "pr",
+              "list",
+              "--head",
+              currentBranch,
+              "--json",
+              "number,title,state",
+              "--limit",
+              "1",
+            ]);
+            if (prLookup.code !== 0 || !prLookup.stdout || prLookup.stdout === "[]") {
+              await sendCommandMessage(
+                input.sessionID,
+                `▣ Anthropic Review (error)\n\nNo PR found for branch "${currentBranch}".\nUse: /anthropic review pr <number>`,
+              );
+              return;
+            }
+            const prs = JSON.parse(prLookup.stdout);
+            if (!prs.length) {
+              await sendCommandMessage(
+                input.sessionID,
+                `▣ Anthropic Review (error)\n\nNo PR found for branch "${currentBranch}".`,
+              );
+              return;
+            }
+            prRef = String(prs[0].number);
+          }
+
+          // Get check runs for the PR's head SHA
+          const prData = await execShell("gh", ["pr", "view", prRef, "--json", "number,title,headRefOid,state,url"]);
+          if (prData.code !== 0) {
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Review (error)\n\nCould not fetch PR #${prRef}: ${prData.stderr}`,
+            );
+            return;
+          }
+          const pr = JSON.parse(prData.stdout);
+          const sha = pr.headRefOid;
+
+          // Fetch check runs for this SHA
+          const checksResult = await execShell("gh", [
+            "api",
+            `repos/${repo}/commits/${sha}/check-runs`,
+            "--jq",
+            '.check_runs[] | select(.name | test("claude|bughunter"; "i"))',
+          ]);
+
+          const lines = [
+            "▣ Anthropic Review",
+            "",
+            `PR #${pr.number}: ${pr.title}`,
+            `State: ${pr.state}  |  Commit: ${sha.slice(0, 8)}`,
+            `URL: ${pr.url}`,
+            "",
+          ];
+
+          if (!checksResult.stdout) {
+            lines.push(
+              "No Claude Code Review check runs found for this PR.",
+              "",
+              "Possible reasons:",
+              "  • Code Review not enabled for this repository",
+              "  • Review still in progress (avg ~20 min)",
+              "  • PR is a draft (drafts are not auto-reviewed)",
+            );
+            await sendCommandMessage(input.sessionID, lines.join("\n"));
+            return;
+          }
+
+          // Parse all check runs (could be multiple)
+          const checkRunsRaw = `[${checksResult.stdout.split("\n}\n").join("},\n")}]`
+            .replace(/,\s*]$/, "]")
+            .replace(/}\s*{/g, "},{");
+          let checkRuns;
+          try {
+            checkRuns = JSON.parse(checkRunsRaw);
+            if (!Array.isArray(checkRuns)) checkRuns = [checkRuns];
+          } catch {
+            // Single object
+            try {
+              checkRuns = [JSON.parse(checksResult.stdout)];
+            } catch {
+              lines.push(
+                "Found check run(s) but could not parse output.",
+                "",
+                "Raw:",
+                checksResult.stdout.slice(0, 500),
+              );
+              await sendCommandMessage(input.sessionID, lines.join("\n"));
+              return;
+            }
+          }
+
+          for (const run of checkRuns) {
+            lines.push(`Check: ${run.name}`);
+            lines.push(`  Status: ${run.status}  |  Conclusion: ${run.conclusion || "pending"}`);
+            if (run.html_url) lines.push(`  Details: ${run.html_url}`);
+
+            // Parse bughunter severity
+            const outputText = run.output?.text || "";
+            const severity = parseBughunterSeverity(outputText);
+            if (severity) {
+              lines.push(`  Findings: ${formatSeverity(severity)}`);
+              const total = severity.normal + severity.nit + severity.pre_existing;
+              lines.push(`  Total: ${total} issue${total !== 1 ? "s" : ""}`);
+            } else if (run.status === "completed") {
+              lines.push("  Findings: No bughunter-severity data in output");
+            } else {
+              lines.push("  Review is still in progress...");
+            }
+            lines.push("");
+          }
+
+          await sendCommandMessage(input.sessionID, lines.join("\n"));
+          return;
+        }
+
+        // /anthropic review branch [<name>] — find PR for branch and show review
+        if (action === "branch") {
+          const branchName = args[2] || (await execShell("git", ["branch", "--show-current"])).stdout.trim();
+          if (!branchName) {
+            await sendCommandMessage(
+              input.sessionID,
+              "▣ Anthropic Review (error)\n\nNo branch specified and HEAD is detached.",
+            );
+            return;
+          }
+
+          const prLookup = await execShell("gh", [
+            "pr",
+            "list",
+            "--head",
+            branchName,
+            "--json",
+            "number,title,state,headRefOid,url",
+            "--limit",
+            "5",
+          ]);
+          if (prLookup.code !== 0 || !prLookup.stdout || prLookup.stdout === "[]") {
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Review (error)\n\nNo PRs found for branch "${branchName}".`,
+            );
+            return;
+          }
+          const prs = JSON.parse(prLookup.stdout);
+          if (!prs.length) {
+            await sendCommandMessage(
+              input.sessionID,
+              `▣ Anthropic Review (error)\n\nNo PRs found for branch "${branchName}".`,
+            );
+            return;
+          }
+
+          const lines = ["▣ Anthropic Review — Branch", "", `Branch: ${branchName}`, ""];
+
+          for (const pr of prs) {
+            lines.push(`PR #${pr.number}: ${pr.title} (${pr.state})`);
+
+            // Fetch check runs
+            const checksResult = await execShell("gh", [
+              "api",
+              `repos/${repo}/commits/${pr.headRefOid}/check-runs`,
+              "--jq",
+              '.check_runs[] | select(.name | test("claude|bughunter"; "i"))',
+            ]);
+
+            if (!checksResult.stdout) {
+              lines.push("  No Claude Code Review check runs found.", "");
+              continue;
+            }
+
+            // Try to parse individual run
+            let checkRuns;
+            try {
+              const raw = `[${checksResult.stdout.split("\n}\n").join("},\n")}]`
+                .replace(/,\s*]$/, "]")
+                .replace(/}\s*{/g, "},{");
+              checkRuns = JSON.parse(raw);
+              if (!Array.isArray(checkRuns)) checkRuns = [checkRuns];
+            } catch {
+              try {
+                checkRuns = [JSON.parse(checksResult.stdout)];
+              } catch {
+                lines.push("  Could not parse check run output.", "");
+                continue;
+              }
+            }
+
+            for (const run of checkRuns) {
+              lines.push(`  Check: ${run.name} — ${run.status} (${run.conclusion || "pending"})`);
+              const outputText = run.output?.text || "";
+              const severity = parseBughunterSeverity(outputText);
+              if (severity) {
+                lines.push(`  ${formatSeverity(severity)}`);
+              }
+            }
+            lines.push("");
+          }
+
+          await sendCommandMessage(input.sessionID, lines.join("\n"));
+          return;
+        }
+
+        // /anthropic review help
+        const helpLines = [
+          "▣ Anthropic Review (Claude Code Review / Bughunter)",
+          "",
+          "Fetch and display code review results from Claude's automated PR reviewer.",
+          "",
+          "Usage:",
+          "  /anthropic review                    Review for current branch's PR",
+          "  /anthropic review pr <number>        Review for a specific PR",
+          "  /anthropic review branch [<name>]    Review for PRs on a branch",
+          "  /anthropic review status             Check if review is configured",
+          "",
+          "Severity levels:",
+          "  🔴 Important — bugs that should be fixed before merge",
+          "  🟡 Nit — minor issues, worth fixing but not blocking",
+          "  🟣 Pre-existing — bugs in codebase not introduced by this PR",
+          "",
+          "Requirements:",
+          "  • GitHub CLI (gh) must be installed and authenticated",
+          "  • Code Review must be enabled at claude.ai/admin-settings",
+          "  • Requires Teams or Enterprise subscription",
+          "",
+          "Machine-readable severity from check runs:",
+          '  gh api repos/OWNER/REPO/check-runs/ID --jq \'.output.text | split("bughunter-severity: ")[1] | split(" -->")[0] | fromjson\'',
+        ];
+        await sendCommandMessage(input.sessionID, helpLines.join("\n"));
+        return;
+      } catch (err) {
+        await sendCommandMessage(
+          input.sessionID,
+          `▣ Anthropic Review (error)\n\n${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+    }
+
     // Interactive CLI command is not compatible with slash flow.
     if (primary === "manage" || primary === "mg") {
       await sendCommandMessage(
@@ -1663,7 +2020,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       if (!input.command) input.command = {};
       input.command["anthropic"] = {
         template: "/anthropic",
-        description: "Manage Anthropic auth, config, and betas (usage, login, config, set, betas, switch)",
+        description: "Manage Anthropic auth, config, betas, review (usage, login, config, set, betas, review, switch)",
       };
     },
     "command.execute.before": async (input, output) => {
