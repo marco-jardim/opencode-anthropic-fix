@@ -148,6 +148,16 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
   const IDLE_REFRESH_WINDOW_MS = config.idle_refresh.window_minutes * 60 * 1000;
   const IDLE_REFRESH_MIN_INTERVAL_MS = config.idle_refresh.min_interval_minutes * 60 * 1000;
 
+  // Willow Mode: detect inactivity and suggest context reset.
+  // Named after the willow tree — when idle, the session "droops" and a gentle
+  // nudge suggests starting fresh rather than accumulating stale context.
+  const WILLOW_ENABLED = config.willow_mode?.enabled ?? true;
+  const WILLOW_IDLE_THRESHOLD_MS = (config.willow_mode?.idle_threshold_minutes ?? 30) * 60 * 1000;
+  const WILLOW_COOLDOWN_MS = (config.willow_mode?.cooldown_minutes ?? 60) * 60 * 1000;
+  const WILLOW_MIN_TURNS = config.willow_mode?.min_turns_before_suggest ?? 3;
+  let willowLastRequestTime = Date.now();
+  let willowLastSuggestionTime = 0;
+
   /**
    * Whether OPENCODE_ANTHROPIC_INITIAL_ACCOUNT env var pinned this session to a
    * specific account. When true, syncActiveIndexFromDisk is skipped and strategy
@@ -1788,6 +1798,26 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 await accountManager.syncActiveIndexFromDisk();
               }
 
+              // Willow Mode: if the session has been idle for longer than the
+              // configured threshold and has enough turns, show a gentle toast
+              // suggesting the user consider starting a fresh context.
+              if (WILLOW_ENABLED && showUsageToast) {
+                const now = Date.now();
+                const idleMs = now - willowLastRequestTime;
+                const cooldownOk = now - willowLastSuggestionTime >= WILLOW_COOLDOWN_MS;
+                if (idleMs >= WILLOW_IDLE_THRESHOLD_MS && cooldownOk && sessionMetrics.turns >= WILLOW_MIN_TURNS) {
+                  const idleMin = Math.round(idleMs / 60_000);
+                  willowLastSuggestionTime = now;
+                  toast(
+                    `🌿 Idle for ${idleMin}m with ${sessionMetrics.turns} turns of context. Consider /clear for a fresh start.`,
+                    "info",
+                    { debounceKey: "willow-idle" },
+                  ).catch(() => {});
+                  debugLog("willow mode: idle return detected", { idleMin, turns: sessionMetrics.turns });
+                }
+                willowLastRequestTime = now;
+              }
+
               // Try each account at most once. If the error is account-specific,
               // switch to the next account. If it's service-wide, return immediately.
               // QA fix M9: use enabled account count, not total (disabled accounts can't serve requests)
@@ -2060,9 +2090,41 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     ...requestInit,
                     body,
                     headers: requestHeaders,
+                    // Disable keepalive when a previous ECONNRESET/EPIPE was detected
+                    // to force a fresh TCP connection and avoid stale socket reuse.
+                    ...(requestInit._disableKeepalive ? { keepalive: false, agent: false } : {}),
                   });
                 } catch (err) {
                   const fetchError = err instanceof Error ? err : new Error(String(err));
+                  const errMsg = fetchError.message || "";
+                  const errCode = /** @type {any} */ (fetchError).code || "";
+
+                  // ECONNRESET/EPIPE recovery: these indicate a stale TCP connection
+                  // (server closed it while we were writing/reading). Disable keepalive
+                  // on the next attempt to force a fresh connection.
+                  const isConnectionReset =
+                    errCode === "ECONNRESET" ||
+                    errCode === "EPIPE" ||
+                    errCode === "ECONNABORTED" ||
+                    errMsg.includes("ECONNRESET") ||
+                    errMsg.includes("EPIPE") ||
+                    errMsg.includes("socket hang up") ||
+                    errMsg.includes("network socket disconnected");
+
+                  if (isConnectionReset) {
+                    requestInit._disableKeepalive = true;
+                    debugLog("connection reset detected, disabling keepalive for retry", {
+                      code: errCode,
+                      message: errMsg,
+                    });
+                    // Don't mark the account as failed — this is a transport issue, not auth.
+                    // Retry the same account with keepalive disabled.
+                    if (accountManager && account) {
+                      lastError = fetchError;
+                      attempt--; // Don't consume an account slot
+                      continue;
+                    }
+                  }
 
                   if (accountManager && account) {
                     accountManager.markFailure(account);
@@ -3243,6 +3305,8 @@ const BETA_SHORTCUTS = new Map([
   ["fast", "fast-mode-2026-02-01"],
   ["fast-mode", "fast-mode-2026-02-01"],
   ["opus-fast", "fast-mode-2026-02-01"],
+  ["task-budgets", "task-budgets-2026-03-13"],
+  ["budgets", "task-budgets-2026-03-13"],
 ]);
 const STAINLESS_HELPER_KEYS = [
   "x_stainless_helper",
@@ -4367,6 +4431,17 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
         return msg;
       });
     }
+    // Task budgets: when the task-budgets beta is active, preserve or inject output_config.
+    // The beta unlocks output_config.max_output_tokens for per-task budget control.
+    // Model-router compatibility: the beta header + output_config body are forwarded as-is.
+    if (betaHeader && betaHeader.includes("task-budgets-2026-03-13")) {
+      if (!parsed.output_config) {
+        // Default: set a reasonable per-task output budget for long-running agentic tasks.
+        // Claude Code tasks typically need generous output budgets.
+        parsed.output_config = { max_output_tokens: 16384 };
+      }
+    }
+
     // Fast mode: inject speed parameter for supported models
     const fastModeEnabled = signature.fastMode && !isFalsyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_FAST_MODE);
     if (fastModeEnabled && parsed.model && (isOpus46Model(parsed.model) || isSonnet46Model(parsed.model))) {
