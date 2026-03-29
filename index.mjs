@@ -2026,6 +2026,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
     "command.execute.before": async (input, output) => {
       if (input.command !== "anthropic") return;
 
+      // Signal that this command is fully handled by the plugin —
+      // do NOT forward it to the agent for further processing.
+      output.noReply = true;
+
       try {
         await handleAnthropicSlashCommand(input);
       } catch (err) {

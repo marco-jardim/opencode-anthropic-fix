@@ -405,6 +405,9 @@ describe("slash commands", () => {
       output,
     );
 
+    // Verify the hook signals "handled — don't forward to agent"
+    expect(output.noReply).toBe(true);
+
     const calls = client.session.prompt.mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     return calls[calls.length - 1][0].body.parts[0].text;
