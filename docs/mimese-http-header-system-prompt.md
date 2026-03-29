@@ -200,7 +200,6 @@ When `signatureEnabled=true`, current implementation may add dynamically:
 - `context-1m-2025-08-07` (if model indicates 1M context)
 - `context-management-2025-06-27` (non-interactive mode + flags)
 - `structured-outputs-2025-12-15` (model supports it + `TENGU_TOOL_PEAR`)
-- `tool-examples-2025-10-29` (non-interactive mode + `TENGU_SCARF_COFFEE`)
 - `web-search-2025-03-05` (provider `vertex`/`foundry` + supported model)
 - `prompt-caching-scope-2026-01-05` (non-interactive mode; **skipped in round-robin** — cache is per-workspace)
 - `token-counting-2024-11-01` (for `/v1/messages/count_tokens`)
@@ -233,12 +232,12 @@ Automatically enabled by Claude Code (functional reference):
 - `context-1m-2025-08-07`
 - `context-management-2025-06-27`
 - `structured-outputs-2025-12-15`
-- `tool-examples-2025-10-29`
 - `prompt-caching-scope-2026-01-05`
 - `effort-2025-11-24`
 - `fast-mode-2026-02-01`
 - `oauth-2025-04-20`
 - `token-counting-2024-11-01` (preflight `/v1/messages/count_tokens`)
+- `task-budgets-2026-03-13` (conditional on task budget presence)
 
 Now auto-included by the plugin:
 
@@ -269,10 +268,13 @@ No dedicated automatic composition yet for:
 - `redact-thinking-2026-02-12` (intentionally opt-in — OpenCode users benefit from seeing thinking blocks)
 - `afk-mode-2026-01-31`
 - `tool-search-tool-2025-10-19`
-- `task-budgets-2026-03-13` (v2.1.84+ — conditional on taskBudget presence; proxy repasses body as-is)
 - `advisor-tool-2026-03-01` (v2.1.84+ — feature-flagged, niche)
 
-These can still be injected manually through `ANTHROPIC_BETAS` or `/anthropic betas add` when operationally required.
+`task-budgets-2026-03-13` is now available as a BETA_SHORTCUTS shortcut (`task-budgets` / `budgets`) and propagates `output_config` body injection when active.
+
+Remaining gaps can be injected manually through `ANTHROPIC_BETAS` or `/anthropic betas add` when operationally required.
+
+**Removed in v2.1.87:** `tool-examples-2025-10-29` is no longer in the always-on beta list. It was present from v2.1.79 through v2.1.86.
 
 ### 5.4 Important note on fine-grained tool streaming
 
@@ -385,7 +387,86 @@ This enables server-side fast-mode processing. Can be disabled via `OPENCODE_ANT
 - IO failures while persisting `persistentUserId` do not break requests (runtime UUID remains usable)
 - NPM version fetch failure does not break startup (fallback version is used)
 
-## 10) Quick verification checklist
+### 7.4 `output_config` body field (task budgets)
+
+When the `task-budgets-2026-03-13` beta is active in the `anthropic-beta` header, the plugin injects:
+
+```json
+{
+  "output_config": {
+    "max_output_tokens": 16384
+  }
+}
+```
+
+This limits output tokens per task when using subagent budget control. Only injected when the field is not already present in the request body. The task-budgets beta can be added via `/anthropic betas add task-budgets` or `ANTHROPIC_BETAS=task-budgets-2026-03-13`.
+
+## 8) ECONNRESET / Connection Reset Recovery
+
+When a fetch attempt fails with `ECONNRESET`, `EPIPE`, `ECONNABORTED`, `socket hang up`, or `network socket disconnected`, the plugin:
+
+1. Sets an internal `_disableKeepalive` flag on the request
+2. Does NOT consume an account attempt slot (decrements the attempt counter)
+3. Retries the same account with `{ keepalive: false, agent: false }` spread into the fetch call
+4. This forces a fresh TCP connection, avoiding stale socket reuse
+
+This recovery happens transparently within the fetch interceptor's retry loop. Only one keepalive-disable retry per connection-reset error is attempted; subsequent failures fall through to normal account-switching logic.
+
+## 9) Willow Mode (Idle Return Detection)
+
+Named after the willow tree — when idle, the session "droops" and a gentle nudge suggests starting fresh rather than accumulating stale context.
+
+### 9.1 Configuration
+
+In `anthropic-auth.json`:
+
+```jsonc
+{
+  "willow_mode": {
+    "enabled": true,
+    "idle_threshold_minutes": 30,
+    "cooldown_minutes": 60,
+    "min_turns_before_suggest": 3,
+  },
+}
+```
+
+### 9.2 Behavior
+
+At the start of each fetch interceptor call (before the account-selection loop):
+
+1. Compute idle time = `now - willowLastRequestTime`
+2. If idle time ≥ threshold AND cooldown since last suggestion has elapsed AND session has ≥ min turns:
+   - Show toast: `🌿 Idle for {N}m with {T} turns of context. Consider /clear for a fresh start.`
+   - Update `willowLastSuggestionTime`
+3. Always update `willowLastRequestTime` to current time
+
+This mirrors Claude Code v2.1.84+'s idle-return prompt (which triggers after 75+ min idle). The plugin's default is 30 min, matching a more aggressive freshness strategy.
+
+## 10) `/anthropic review` Slash Command
+
+Provides access to Claude Code Review (Bughunter) results directly from the CLI.
+
+### 10.1 Subcommands
+
+| Command                             | Purpose                                                      |
+| ----------------------------------- | ------------------------------------------------------------ |
+| `/anthropic review`                 | Auto-detect PR for current branch, show review results       |
+| `/anthropic review pr [<number>]`   | Show review results for specific PR (or current branch's PR) |
+| `/anthropic review branch [<name>]` | Find PRs for a branch and show review results for each       |
+| `/anthropic review status`          | Check if Claude Code Review is configured on the repo        |
+| `/anthropic review help`            | Usage guide with severity level documentation                |
+
+### 10.2 Requirements
+
+- `gh` CLI (GitHub CLI) must be installed and authenticated
+- Repository must be a GitHub repo
+
+### 10.3 Output
+
+Parses `bughunter-severity` JSON from check run output and displays severity counts with color markers (🔴 Important, 🟡 Nit, 🟣 Pre-existing). Falls back to showing raw check run status when bughunter data is not available.
+
+## 11) Quick verification checklist
 
 To audit whether mimicry is active at runtime:
 

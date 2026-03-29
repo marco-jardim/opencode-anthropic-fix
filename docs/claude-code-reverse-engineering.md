@@ -5,7 +5,7 @@
 **Build Time:** `2026-03-29T02:16:58Z`
 **Internal Codename:** `tengu`
 **Purpose:** Full reverse-engineering for OpenCode plugin mimicry of Claude Code authentication and API calls
-**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86
+**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87
 
 ---
 
@@ -27,6 +27,7 @@
 14. [Implementation Guide for OpenCode Plugin](#14-implementation-guide-for-opencode-plugin)
 15. [Gap Analysis: Current OpenCode Plugin vs Claude Code](#15-gap-analysis-current-opencode-plugin-vs-claude-code)
 16. [Enforcement Changelog](#16-enforcement-changelog)
+17. [Code Review for Claude Code (Bughunter)](#17-code-review-for-claude-code-bughunter)
 
 ---
 
@@ -530,8 +531,8 @@ X-Stainless-Timeout: 600
 | `context-management-2025-06-27`   | Context management                                               |
 | `structured-outputs-2025-12-15`   | Structured outputs                                               |
 | `web-search-2025-03-05`           | Web search                                                       |
-| `tool-examples-2025-10-29`        | Tool examples                                                    |
 | `advanced-tool-use-2025-11-20`    | Advanced tool use                                                |
+| `task-budgets-2026-03-13`         | Task budgets (output_config limits for subagent tasks)           |
 | `tool-search-tool-2025-10-19`     | Tool search                                                      |
 | `effort-2025-11-24`               | Effort parameter                                                 |
 | `prompt-caching-scope-2026-01-05` | Prompt caching scope                                             |
@@ -750,7 +751,8 @@ Stored in `~/.claude/config.json` as `anonymousId`. Used for analytics, NOT for 
   },
   "speed": "fast",
   "context_management": { "edits": [...] },
-  "output_config": { "format": "json_schema", "schema": {...} }
+  "output_config": { "format": "json_schema", "schema": {...} },
+  "task_budget": { "type": "tokens", "total": 100000, "remaining": 80000 }
 }
 ```
 
@@ -1476,7 +1478,6 @@ const body = {
     "context-management-2025-06-27",
     "structured-outputs-2025-12-15",
     "web-search-2025-03-05",
-    "tool-examples-2025-10-29",
     "advanced-tool-use-2025-11-20",
     "tool-search-tool-2025-10-19",
     "effort-2025-11-24",
@@ -1764,13 +1765,13 @@ context-1m-2025-08-07        (if model supports)
 context-management-2025-06-27
 structured-outputs-2025-12-15
 web-search-2025-03-05
-tool-examples-2025-10-29
 advanced-tool-use-2025-11-20
 tool-search-tool-2025-10-19
 effort-2025-11-24
 prompt-caching-scope-2026-01-05
 fast-mode-2026-02-01          (if fast mode + model supports)
 redact-thinking-2026-02-12
+task-budgets-2026-03-13       (if task budget present)
 ```
 
 **Impact:** HIGH — missing betas are a clear fingerprint difference.
@@ -1793,15 +1794,16 @@ redact-thinking-2026-02-12
 
 ### 15.19 Version Staleness — TRACKING
 
-**Status:** Requires periodic updates. Latest analyzed: `2.1.83`.
+**Status:** Requires periodic updates. Latest analyzed: `2.1.87`.
 
 **History:**
 
 - v0.0.26: Updated from `2.1.79` to `2.1.80`
 - v0.0.27: Updated to `2.1.81`
-- Current target: `2.1.83` (v2.1.82 was not published)
+- v0.0.34: Updated to `2.1.84`
+- v0.0.35: Updated to `2.1.87` (v2.1.85, v2.1.86 analyzed but no breaking changes)
 
-**Claude Code actual:** `2.1.83` (updates regularly; startup version fetch available via `fetch_claude_code_version_on_startup`).
+**Claude Code actual:** `2.1.87` (updates regularly; startup version fetch available via `fetch_claude_code_version_on_startup`).
 
 ### 15.20 Summary: Priority Fixes
 
@@ -1941,8 +1943,116 @@ This change makes static `cch=00000` values detectable as non-genuine in v2.1.81
 
 **Fix:** Implemented `computeBillingCacheHash()` matching the `NP1()` algorithm.
 
+### 2026-03-29 — v2.1.85–v2.1.87 Changes (Beta Removal, Idle Return)
+
+**Type:** Client-side changes. No OAuth/auth breaking changes.
+
+**Key changes across v2.1.85–v2.1.87 (from v2.1.84):**
+
+| Change                                        | Detail                                                                                                                                          | Mimicry Impact                         |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| **`tool-examples-2025-10-29` beta REMOVED**   | No longer in the always-on beta list. Was present since v2.1.79. Removed in v2.1.87 bundle.                                                     | **MEDIUM** — must remove from base set |
+| **`task-budgets-2026-03-13` beta shortcut**   | Now referenced in help text alongside other toggleable betas. Beta itself was added in v2.1.84.                                                 | LOW — already in BETA_SHORTCUTS        |
+| **`output_config` body field (task budgets)** | When `task-budgets-2026-03-13` beta active, `output_config: {max_output_tokens: N}` can be injected to limit task output.                       | LOW — proxy repasses body as-is        |
+| **Idle-return detection (Willow Mode)**       | Upstream now detects sessions idle >30min with 3+ turns and suggests `/clear`. Plugin implementation mirrors this with configurable thresholds. | NONE — UI behavior only                |
+| **SDK version unchanged**                     | All versions 2.1.85–2.1.87 still bundle `@anthropic-ai/sdk` v0.208.0.                                                                           | NONE                                   |
+
+**Fixes implemented in plugin v0.0.35:**
+
+- Removed `tool-examples-2025-10-29` from always-on beta list
+- Updated `FALLBACK_CLAUDE_CLI_VERSION` to `"2.1.87"` and `CLAUDE_CODE_BUILD_TIME` to `"2026-03-29T02:16:58Z"`
+- Added `task-budgets` / `budgets` shortcuts to `BETA_SHORTCUTS` map
+- Added `output_config` body injection when task-budgets beta is active
+- Added ECONNRESET/EPIPE recovery (disable keepalive on connection-reset errors)
+- Added Willow Mode (idle detection with configurable thresholds and cooldown)
+- Added `/anthropic review` slash command for Code Review (Bughunter) results
+
+**OAuth/Auth:** STABLE — no changes.
+**Beta headers:** `tool-examples-2025-10-29` removed from base set. `task-budgets-2026-03-13` remains conditional.
+**API request shape:** STABLE — `output_config` body field conditional on task-budgets beta.
+
+---
+
+## 17. Code Review for Claude Code (Bughunter)
+
+### 17.1 Overview
+
+Claude Code Review is a multi-agent PR review service (internal codename: **bughunter**, also known as **ultrareview**). Announced March 9, 2026. Available for Teams and Enterprise subscriptions only.
+
+### 17.2 How It Works
+
+- Fleet of specialized AI agents analyze PRs in parallel
+- Each agent focuses on different issue types (logic errors, security, edge cases, regressions)
+- Full codebase context (not just diffs)
+- Built-in verification step filters false positives
+- Posts inline comments on specific lines — does NOT approve or block PRs
+
+### 17.3 Triggers (Per Repository)
+
+| Trigger                | Behavior                                                  |
+| ---------------------- | --------------------------------------------------------- |
+| Once after PR creation | Single review when PR opens or marked ready for review    |
+| After every push       | Review on every code push (tracks evolving PR)            |
+| Manual                 | Only on `@claude review` or `@claude review once` comment |
+
+### 17.4 Severity Levels
+
+| Marker | Level        | Meaning                                    |
+| ------ | ------------ | ------------------------------------------ |
+| 🔴     | Important    | Bug that should be fixed before merging    |
+| 🟡     | Nit          | Minor issue, worth fixing but not blocking |
+| 🟣     | Pre-existing | Bug in codebase not introduced by this PR  |
+
+### 17.5 Output Format
+
+- **Inline comments**: Posted on exact lines where issues found
+- **Check run**: "Claude Code Review" check run alongside CI checks
+- **Summary table**: All findings sorted by severity in check run details
+- **Auto-resolution**: When developer fixes flagged issue, thread auto-resolves (if "After every push" enabled)
+
+### 17.6 Machine-Readable Output
+
+The check run output contains a hidden `bughunter-severity` JSON blob:
+
+```bash
+gh api repos/OWNER/REPO/check-runs/CHECK_RUN_ID \
+  --jq '.output.text | split("bughunter-severity: ")[1] | split(" -->")[0] | fromjson'
+```
+
+Returns: `{"normal": 2, "nit": 1, "pre_existing": 0}`
+
+### 17.7 Customization
+
+| File        | Purpose                                                                    |
+| ----------- | -------------------------------------------------------------------------- |
+| `CLAUDE.md` | General project instructions (all tasks)                                   |
+| `REVIEW.md` | Review-specific: style guides, conventions, required checks, skip patterns |
+
+REVIEW.md violations are treated as nit-level findings.
+
+### 17.8 Setup
+
+1. Go to `claude.ai/admin-settings/claude-code`
+2. Click **Setup** → Install Claude GitHub App
+3. Permissions: Contents (read+write), Issues (read+write), Pull Requests (read+write)
+4. Select repositories, configure triggers per repo
+
+### 17.9 Pricing
+
+- **Average**: $15–25 per review
+- **Billing**: Token-usage based, separate from plan's included usage
+- **Cost control**: Monthly spend cap at `claude.ai/admin-settings/usage`
+- **Trigger impact**: "After every push" multiplies cost by number of pushes
+
+### 17.10 Limitations
+
+- Not available for orgs with Zero Data Retention
+- Draft PRs don't trigger auto-review (use manual `@claude review`)
+- Advisory only — does not approve or block PRs
+- Average ~20 minutes per review
+
 ---
 
 _Generated by reverse-engineering `@anthropic-ai/claude-code` cli.js bundle._
-_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84_
-_Last updated: 2026-03-26_
+_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87_
+_Last updated: 2026-03-29_
