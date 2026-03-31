@@ -2,6 +2,28 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.0.37] — 2026-03-31
+
+### Emulation Sync
+
+- **Bumped to Claude Code v2.1.88** — updated `FALLBACK_CLAUDE_CLI_VERSION`, `CLAUDE_CODE_BUILD_TIME`, SDK version map entry for v2.1.88 (SDK 0.208.0)
+- No breaking mimesis changes — betas, headers, and body fields unchanged between v87 and v88
+
+### Notes (v2.1.88 internal changes, no action needed)
+
+- New `PermissionDenied` hook event (auto mode classifier deny → hook can retry)
+- New `classifierApprovable` field on safety checks (routine boundaries vs exploit attempts)
+- System prompt refactored: new `# Session-specific guidance` first-position block; Ask-tool/`! <command>` hints moved from `# System`; subagent/skill hints moved from `# Using your tools`
+- Global cache separator now first-party-only (no env-var/feature-flag pathway)
+- Manual compact excludes prior compact summaries from re-summarization
+- Compact summaries skip message classification
+
+## [0.0.36] — 2026-03-30
+
+### Fixes
+
+- **noReply bug fix** — `/anthropic` slash commands now set `output.noReply = true` to prevent command text from leaking to the agent as a user message
+
 ## [0.0.35] — 2026-03-29
 
 ### Emulation Sync

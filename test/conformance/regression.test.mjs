@@ -808,11 +808,11 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all required always-on betas for non-Haiku model (v2.1.87 set)", async () => {
+  it("contains all required always-on betas for non-Haiku model (v2.1.88 set)", async () => {
     const { headers } = await sendRequest(fetchFn);
     const beta = headers.get("anthropic-beta");
 
-    // RE doc §15.16 always-on set — synced to v2.1.87
+    // RE doc §15.16 always-on set — synced to v2.1.88
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
     expect(beta).toContain("advanced-tool-use-2025-11-20");
@@ -905,7 +905,7 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
-describe("E2E: Version is 2.1.87", () => {
+describe("E2E: Version is 2.1.88", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -914,17 +914,17 @@ describe("E2E: Version is 2.1.87", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.87", async () => {
+  it("User-Agent contains 2.1.88", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.87");
+    expect(headers.get("user-agent")).toContain("2.1.88");
   });
 
-  it("billing header contains 2.1.87", async () => {
+  it("billing header contains 2.1.88", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.87");
+    expect(body.system[0].text).toContain("2.1.88");
   });
 });
 

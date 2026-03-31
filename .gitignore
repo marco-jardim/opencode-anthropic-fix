@@ -1,7 +1,9 @@
 node_modules/
 _analysis/
 _tmp_*/
+tmp/
 *.tgz
 .env
 .env.*
 nul
+RESEARCH_SUMMARY.txt

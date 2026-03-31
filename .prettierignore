@@ -2,3 +2,5 @@ dist/
 node_modules/
 .mitm/
 _tmp_*/
+tmp/
+.opencode/
