@@ -263,14 +263,20 @@ Platform-specific betas (not cross-provider defaults):
 
 ### 5.3 Current plugin gaps vs reference
 
+Newly auto-included in v0.0.38:
+
+- `token-efficient-tools-2026-03-28` (default on, `config.token_economy.token_efficient_tools`)
+- `summarize-connector-text-2026-03-13` (default on, `config.token_economy.connector_text_summarization`)
+- `redact-thinking-2026-02-12` (opt-in, `config.token_economy.redact_thinking`)
+- `advanced-tool-use-2025-11-20` for 1P/foundry provider (was incorrectly using 3P header)
+
 No dedicated automatic composition yet for:
 
-- `redact-thinking-2026-02-12` (intentionally opt-in — OpenCode users benefit from seeing thinking blocks)
-- `afk-mode-2026-01-31`
-- `tool-search-tool-2025-10-19`
+- `afk-mode-2026-01-31` (transcript classifier — ant-only)
 - `advisor-tool-2026-03-01` (v2.1.84+ — feature-flagged, niche)
+- `cli-internal-2026-02-09` (ant-only)
 
-`task-budgets-2026-03-13` is now available as a BETA_SHORTCUTS shortcut (`task-budgets` / `budgets`) and propagates `output_config` body injection when active.
+`task-budgets-2026-03-13` is available as a BETA_SHORTCUTS shortcut (`task-budgets` / `budgets`) and propagates `output_config` body injection when active.
 
 Remaining gaps can be injected manually through `ANTHROPIC_BETAS` or `/anthropic betas add` when operationally required.
 
@@ -466,7 +472,70 @@ Provides access to Claude Code Review (Bughunter) results directly from the CLI.
 
 Parses `bughunter-severity` JSON from check run output and displays severity counts with color markers (🔴 Important, 🟡 Nit, 🟣 Pre-existing). Falls back to showing raw check run status when bughunter data is not available.
 
-## 11) Quick verification checklist
+## 11) Token Economy
+
+### 11.1 Configuration
+
+In `anthropic-auth.json`:
+
+```jsonc
+{
+  "token_economy": {
+    "token_efficient_tools": true,
+    "redact_thinking": false,
+    "connector_text_summarization": true,
+  },
+}
+```
+
+Toggle at runtime via `/anthropic set`:
+
+- `/anthropic set token-efficient-tools on|off`
+- `/anthropic set redact-thinking on|off`
+- `/anthropic set connector-text on|off`
+
+### 11.2 Token-Efficient Tools
+
+When `token_efficient_tools` is true, adds `token-efficient-tools-2026-03-28` to the beta header. This switches tool_use blocks from ANTML to JSON format (FC v3), saving ~4.5% output tokens.
+
+**Mutual exclusion:** When active, `structured-outputs-2025-12-15` is NOT added (API rejects both together). If structured-outputs is needed, disable token-efficient-tools.
+
+### 11.3 Redact Thinking
+
+When `redact_thinking` is true, adds `redact-thinking-2026-02-12` to the beta header. The API returns `redacted_thinking` blocks instead of thinking summaries, reducing token overhead on subsequent turns.
+
+**Default: off** — OpenCode users benefit from seeing thinking blocks. Enable if thinking summaries are not needed.
+
+### 11.4 Connector-Text Summarization
+
+When `connector_text_summarization` is true, adds `summarize-connector-text-2026-03-13` to the beta header. The API summarizes assistant text between tool calls (anti-distillation measure).
+
+### 11.5 Provider-Aware Tool Search Header
+
+The plugin now uses the correct tool search beta header per provider:
+
+| Provider                  | Header                         |
+| ------------------------- | ------------------------------ |
+| 1P (firstParty) / Foundry | `advanced-tool-use-2025-11-20` |
+| Vertex / Bedrock          | `tool-search-tool-2025-10-19`  |
+
+This matches Claude Code's `getToolSearchBetaHeader()` function.
+
+### 11.6 Beta Header Latching
+
+Once a beta is first sent in a session, it continues being sent for all subsequent requests. This prevents mid-session cache key changes that would bust ~50-70K tokens of server-side prompt cache.
+
+State: `betaLatchState = { sent: Set, dirty: false, lastHeader: null }`. The `dirty` flag is set when token economy config changes via `/anthropic set`, allowing intentional removal.
+
+### 11.7 Cache TTL Session Latching
+
+The `cache_policy` config is latched at the first API request. Subsequent requests use the latched value even if the user changes cache-ttl settings mid-session. This prevents mixed TTLs from busting the prompt cache.
+
+### 11.8 Title Generator Cache Skip
+
+Requests detected as title generators (system prompt contains "Generate a short title") do not receive `cache_control` breakpoints. These fire-and-forget queries have unique prompts that are never reused, so caching wastes write tokens.
+
+## 12) Quick verification checklist
 
 To audit whether mimicry is active at runtime:
 

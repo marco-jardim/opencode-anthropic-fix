@@ -158,6 +158,24 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
   let willowLastRequestTime = Date.now();
   let willowLastSuggestionTime = 0;
 
+  // Beta header latching: once a beta is sent in a session, it stays on for
+  // the rest of the session to prevent cache key churn (~50-70K tokens per flip).
+  // Cleared on /clear or /compact if needed.
+  const betaLatchState = {
+    /** @type {Set<string>} betas that have been sent at least once this session */
+    sent: new Set(),
+    /** When true, a config change invalidated the latch and next request rebuilds. */
+    dirty: false,
+    /** @type {string | null} The last computed beta header string (for latching). */
+    lastHeader: null,
+  };
+
+  // Cache TTL session latching: latch the cache policy at session start
+  // so mid-session toggles don't bust the server-side prompt cache.
+  let sessionCachePolicyLatched = false;
+  /** @type {{ttl: string, ttl_supported: boolean, boundary_marker?: boolean} | null} */
+  let latchedCachePolicy = null;
+
   /**
    * Whether OPENCODE_ANTHROPIC_INITIAL_ACCOUNT env var pinned this session to a
    * specific account. When true, syncActiveIndexFromDisk is skipped and strategy
@@ -845,6 +863,43 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
             adaptiveContextState.escalatedByError = false;
             adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
           }
+        },
+        "token-efficient-tools": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          const te = config.token_economy || {
+            token_efficient_tools: true,
+            redact_thinking: false,
+            connector_text_summarization: true,
+          };
+          te.token_efficient_tools = enabled;
+          saveConfig({ token_economy: te });
+          config.token_economy = te;
+          // Invalidate latched betas so the change takes effect next request
+          betaLatchState.dirty = true;
+        },
+        "redact-thinking": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          const te = config.token_economy || {
+            token_efficient_tools: true,
+            redact_thinking: false,
+            connector_text_summarization: true,
+          };
+          te.redact_thinking = enabled;
+          saveConfig({ token_economy: te });
+          config.token_economy = te;
+          betaLatchState.dirty = true;
+        },
+        "connector-text": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          const te = config.token_economy || {
+            token_efficient_tools: true,
+            redact_thinking: false,
+            connector_text_summarization: true,
+          };
+          te.connector_text_summarization = enabled;
+          saveConfig({ token_economy: te });
+          config.token_economy = te;
+          betaLatchState.dirty = true;
         },
       };
 
@@ -2397,7 +2452,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 
                 const _adaptiveOverride = _adaptiveOverrideForRequest;
 
-                const computedBetaHeader = buildAnthropicBetaHeader(
+                // Token economy config (resolved once, passed to beta builder)
+                const _tokenEconomy = config.token_economy || {};
+
+                let computedBetaHeader = buildAnthropicBetaHeader(
                   "",
                   getSignatureEmulationEnabled(),
                   _reqModel,
@@ -2407,7 +2465,42 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   requestUrl?.pathname,
                   _reqHasFileRefs,
                   _adaptiveOverride,
+                  _tokenEconomy,
                 );
+
+                // Beta header latching: once a beta has been sent in this session,
+                // keep sending it to avoid server-side cache key churn (~50-70K tokens
+                // per flip). The latch is sticky-on: new betas can be added but never
+                // removed mid-session unless explicitly invalidated by config change.
+                {
+                  const currentBetas = computedBetaHeader
+                    .split(",")
+                    .map((b) => b.trim())
+                    .filter(Boolean);
+                  // Add all current betas to the latch set
+                  for (const b of currentBetas) betaLatchState.sent.add(b);
+                  // If a config change dirtied the latch, rebuild from current (allow removal)
+                  if (betaLatchState.dirty) {
+                    betaLatchState.dirty = false;
+                    betaLatchState.sent = new Set(currentBetas);
+                  }
+                  // Merge latched betas that aren't in the current set
+                  const merged = new Set(currentBetas);
+                  for (const b of betaLatchState.sent) merged.add(b);
+                  computedBetaHeader = [...merged].join(",");
+                  betaLatchState.lastHeader = computedBetaHeader;
+                }
+
+                // Cache TTL session latching: latch the cache policy at session start
+                // so mid-session toggles don't bust the server-side prompt cache.
+                if (!sessionCachePolicyLatched) {
+                  sessionCachePolicyLatched = true;
+                  latchedCachePolicy = config.cache_policy
+                    ? { ...config.cache_policy }
+                    : { ttl: "1h", ttl_supported: true };
+                }
+                const effectiveCachePolicy = latchedCachePolicy ||
+                  config.cache_policy || { ttl: "1h", ttl_supported: true };
 
                 let body = transformRequestBody(
                   requestInit.body,
@@ -2416,7 +2509,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     claudeCliVersion,
                     promptCompactionMode: getPromptCompactionMode(),
                     provider: _reqProvider,
-                    cachePolicy: config.cache_policy || { ttl: "1h", ttl_supported: true },
+                    cachePolicy: effectiveCachePolicy,
                     fastMode: config.fast_mode || false,
                     strategy: getEffectiveStrategy(),
                   },
@@ -2443,6 +2536,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     strategy: getEffectiveStrategy(),
                   },
                   _adaptiveOverride,
+                  _tokenEconomy,
                 );
                 // Execute the request
                 let response;
@@ -3656,6 +3750,8 @@ const EXPERIMENTAL_BETA_FLAGS = new Set([
   "prompt-caching-scope-2026-01-05",
   "redact-thinking-2026-02-12",
   "structured-outputs-2025-12-15",
+  "summarize-connector-text-2026-03-13",
+  "token-efficient-tools-2026-03-28",
   "tool-examples-2025-10-29",
   "tool-search-tool-2025-10-19",
   "web-search-2025-03-05",
@@ -3669,6 +3765,11 @@ const BETA_SHORTCUTS = new Map([
   ["opus-fast", "fast-mode-2026-02-01"],
   ["task-budgets", "task-budgets-2026-03-13"],
   ["budgets", "task-budgets-2026-03-13"],
+  ["efficient-tools", "token-efficient-tools-2026-03-28"],
+  ["token-efficient", "token-efficient-tools-2026-03-28"],
+  ["redact-thinking", "redact-thinking-2026-02-12"],
+  ["connector-text", "summarize-connector-text-2026-03-13"],
+  ["anti-distill", "summarize-connector-text-2026-03-13"],
 ]);
 const STAINLESS_HELPER_KEYS = [
   "x_stainless_helper",
@@ -4324,6 +4425,7 @@ function buildAnthropicBetaHeader(
   requestPath,
   hasFileReferences,
   adaptiveOverride,
+  tokenEconomy,
 ) {
   const incomingBetasList = incomingBeta
     .split(",")
@@ -4350,13 +4452,23 @@ function buildAnthropicBetaHeader(
   const nonInteractive = isNonInteractiveMode();
   const haiku = isHaikuModel(model);
   const isRoundRobin = strategy === "round-robin";
+  const te = tokenEconomy || {};
 
   // === ALWAYS-ON BETAS (Claude Code v2.1.84 base set) ===
   // These are ALWAYS included regardless of env vars or feature flags.
   if (!haiku) {
     betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"
   }
-  betas.push(ADVANCED_TOOL_USE_BETA_FLAG); // "advanced-tool-use-2025-11-20"
+
+  // Tool search: use provider-aware header.
+  // 1P/Foundry → advanced-tool-use-2025-11-20 (enables broader tool capabilities)
+  // Vertex/Bedrock → tool-search-tool-2025-10-19 (3P-compatible subset)
+  if (provider === "vertex" || provider === "bedrock") {
+    betas.push("tool-search-tool-2025-10-19");
+  } else {
+    betas.push(ADVANCED_TOOL_USE_BETA_FLAG); // "advanced-tool-use-2025-11-20"
+  }
+
   betas.push(FAST_MODE_BETA_FLAG); // "fast-mode-2026-02-01"
   betas.push(EFFORT_BETA_FLAG); // "effort-2025-11-24"
 
@@ -4386,8 +4498,14 @@ function buildAnthropicBetaHeader(
   // Context management — always-on in Claude Code (not env-gated)
   betas.push("context-management-2025-06-27");
 
-  // Structured outputs — always-on for capable models
-  if (supportsStructuredOutputs(model)) {
+  // Structured outputs vs token-efficient-tools: mutually exclusive.
+  // token-efficient-tools gives ~4.5% output token reduction (JSON FC v3).
+  // When both are configured, token-efficient-tools wins (per CC source:
+  // "strict wins" internally, but we prefer token savings for proxy users).
+  if (te.token_efficient_tools && !disableExperimentalBetas) {
+    betas.push("token-efficient-tools-2026-03-28");
+    // Skip structured-outputs — API rejects both together
+  } else if (supportsStructuredOutputs(model)) {
     betas.push("structured-outputs-2025-12-15");
   }
 
@@ -4395,9 +4513,6 @@ function buildAnthropicBetaHeader(
   if (supportsWebSearch(model)) {
     betas.push("web-search-2025-03-05");
   }
-
-  // Tool search tool
-  betas.push("tool-search-tool-2025-10-19");
 
   // Files API — scoped to file endpoints/references
   if (isFilesEndpoint || hasFileReferences) {
@@ -4409,10 +4524,20 @@ function buildAnthropicBetaHeader(
     betas.push(TOKEN_COUNTING_BETA_FLAG);
   }
 
-  // === OPTIONAL BETAS (env-gated, intentionally NOT always-on) ===
+  // === TOKEN ECONOMY BETAS (config-controlled) ===
 
-  // redact-thinking — NOT auto-included (users benefit from seeing thinking blocks)
-  // Available via: /anthropic betas add redact-thinking-2026-02-12
+  // redact-thinking: suppresses thinking summaries server-side.
+  // When enabled, API returns redacted_thinking blocks instead of summaries.
+  // Saves bandwidth and tokens for users who don't inspect thinking.
+  if (te.redact_thinking && !disableExperimentalBetas) {
+    betas.push("redact-thinking-2026-02-12");
+  }
+
+  // summarize-connector-text: API summarizes assistant text between tool calls.
+  // Anti-distillation measure — same mechanism as thinking blocks (summary + signature).
+  if (te.connector_text_summarization && !disableExperimentalBetas) {
+    betas.push("summarize-connector-text-2026-03-13");
+  }
 
   // afk-mode — NOT auto-included (requires user opt-in)
   // Available via: /anthropic betas add afk-mode-2026-01-31
@@ -4559,7 +4684,16 @@ async function fetchLatestClaudeCodeVersion(timeoutMs = 1200) {
  * @param {{enabled: boolean, claudeCliVersion: string, strategy?: import('./lib/config.mjs').AccountSelectionStrategy, customBetas?: string[]}} signature
  * @returns {Headers}
  */
-function buildRequestHeaders(input, requestInit, accessToken, requestBody, requestUrl, signature, adaptiveOverride) {
+function buildRequestHeaders(
+  input,
+  requestInit,
+  accessToken,
+  requestBody,
+  requestUrl,
+  signature,
+  adaptiveOverride,
+  tokenEconomy,
+) {
   const requestHeaders = new Headers();
   if (input instanceof Request) {
     input.headers.forEach((value, key) => {
@@ -4600,6 +4734,7 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
     requestUrl?.pathname,
     hasFileReferences,
     adaptiveOverride,
+    tokenEconomy,
   );
 
   const authTokenOverride = process.env.ANTHROPIC_AUTH_TOKEN?.trim();
@@ -4753,7 +4888,15 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
     // Cache breakpoint optimization: add cache_control to the last content block
     // of each user/assistant message for maximum prefix caching.
     // Skip for round-robin strategy (cache defeated by account rotation).
-    if (signature.enabled && signature.cachePolicy?.ttl !== "off" && signature.cachePolicy?.ttl_supported !== false) {
+    // Skip for title generators / fire-and-forget queries: these are one-shot
+    // requests that don't benefit from caching and would pollute the cache pool.
+    const isTitleGen = isTitleGeneratorSystemBlocks(parsed.system || []);
+    if (
+      signature.enabled &&
+      signature.cachePolicy?.ttl !== "off" &&
+      signature.cachePolicy?.ttl_supported !== false &&
+      !isTitleGen
+    ) {
       const strategy = signature.strategy || "sticky";
       if (strategy !== "round-robin" && Array.isArray(parsed.messages)) {
         const cacheControl = { type: "ephemeral", ttl: signature.cachePolicy?.ttl || "1h" };

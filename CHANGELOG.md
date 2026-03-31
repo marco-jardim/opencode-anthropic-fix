@@ -2,6 +2,38 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.0.38] — 2026-03-31
+
+### Token Economy
+
+- **Token-efficient tools** — `token-efficient-tools-2026-03-28` beta auto-included (default on). JSON tool_use format (FC v3) saves ~4.5% output tokens. Mutually exclusive with structured-outputs.
+- **Redact thinking** — `redact-thinking-2026-02-12` beta opt-in (default off). Suppresses thinking summaries server-side. Toggle with `/anthropic set redact-thinking on|off`.
+- **Connector-text summarization** — `summarize-connector-text-2026-03-13` beta auto-included (default on). API-side anti-distillation for assistant text between tool calls.
+- **Provider-aware tool search** — uses `advanced-tool-use-2025-11-20` for 1P/foundry, `tool-search-tool-2025-10-19` for vertex/bedrock (was incorrectly using 3P header for all providers).
+- **Beta header latching** — once a beta is sent in a session, it stays on for all subsequent requests. Prevents ~50-70K token cache key churn from mid-session beta changes.
+- **Cache TTL session latching** — cache policy latched at first request for session stability.
+- **Title generator cache skip** — title generator requests skip cache_control breakpoints (fire-and-forget queries don't benefit from caching).
+
+### Configuration
+
+New `token_economy` config section in `anthropic-auth.json`:
+
+```jsonc
+{
+  "token_economy": {
+    "token_efficient_tools": true,
+    "redact_thinking": false,
+    "connector_text_summarization": true,
+  },
+}
+```
+
+New `/anthropic set` commands: `token-efficient-tools`, `redact-thinking`, `connector-text`.
+
+### Tests
+
+- All 533 tests passing
+
 ## [0.0.37] — 2026-03-31
 
 ### Emulation Sync

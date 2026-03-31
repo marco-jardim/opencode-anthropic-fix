@@ -821,7 +821,17 @@ describe("E2E: Beta composition is complete and correct", () => {
     expect(beta).toContain("interleaved-thinking-2025-05-14");
     expect(beta).toContain("prompt-caching-scope-2026-01-05");
     expect(beta).toContain("context-management-2025-06-27");
-    expect(beta).toContain("tool-search-tool-2025-10-19");
+    // Provider-aware tool search: 1P uses advanced-tool-use, 3P uses tool-search-tool.
+    // Since tests hit first-party (default), expect advanced-tool-use.
+    expect(beta).toContain("advanced-tool-use-2025-11-20");
+
+    // Token economy betas (config-controlled, defaults in DEFAULT_CONFIG.token_economy)
+    // token-efficient-tools is on by default
+    expect(beta).toContain("token-efficient-tools-2026-03-28");
+    // connector-text is on by default
+    expect(beta).toContain("summarize-connector-text-2026-03-13");
+    // redact-thinking is off by default
+    expect(beta).not.toContain("redact-thinking-2026-02-12");
 
     // Removed in v2.1.84 — must NOT be sent
     expect(beta).not.toContain("tool-examples-2025-10-29");

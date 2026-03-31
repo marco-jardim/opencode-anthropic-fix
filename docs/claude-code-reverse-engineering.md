@@ -1314,6 +1314,50 @@ cost =
 
 Budget injection: `maxBudgetUsd` param → `budget_usd` attachment in system context.
 
+### 12.7 Token-Efficient Tools (FC v3)
+
+Beta: `token-efficient-tools-2026-03-28`. Sends tool_use blocks in JSON format instead of ANTML, giving ~4.5% output token reduction. Mutually exclusive with `structured-outputs-2025-12-15` — the API rejects both together (tool_use.py:139).
+
+**Gating in Claude Code:** Ant-only, behind `tengu_amber_json_tools` GrowthBook gate. Only enabled when `shouldIncludeFirstPartyOnlyBetas()` is true and structured-outputs is not active.
+
+**Plugin implementation:** Enabled by default via `config.token_economy.token_efficient_tools`. Automatically skips `structured-outputs-2025-12-15` when active. Listed in `EXPERIMENTAL_BETA_FLAGS` so it's stripped when `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` is set.
+
+### 12.8 Redact Thinking
+
+Beta: `redact-thinking-2026-02-12`. Tells the API to suppress thinking summaries server-side. The API returns `redacted_thinking` blocks instead, which the client renders as a stub. Only meaningful for interactive sessions where thinking summaries are rarely examined (ctrl+o display).
+
+**Gating in Claude Code:** First-party only, non-interactive sessions, unless `showThinkingSummaries=true` in settings.
+
+**Plugin implementation:** Opt-in via `config.token_economy.redact_thinking` (default: false). Toggle with `/anthropic set redact-thinking on|off`.
+
+### 12.9 Connector-Text Summarization (Anti-Distillation)
+
+Beta: `summarize-connector-text-2026-03-13`. The API buffers assistant text between tool calls, summarizes it, and returns the summary with a signature so the original can be restored on subsequent turns — same mechanism as thinking blocks. This prevents model distillation from assistant responses.
+
+**Gating in Claude Code:** Ant-only, behind `tengu_slate_prism` GrowthBook gate + `USE_CONNECTOR_TEXT_SUMMARIZATION` env var (tri-state: `=1` forces on, `=0` forces off, unset defers to GrowthBook).
+
+**Plugin implementation:** Enabled by default via `config.token_economy.connector_text_summarization`. Listed in `EXPERIMENTAL_BETA_FLAGS`. Toggle with `/anthropic set connector-text on|off`.
+
+### 12.10 Beta Header Latching
+
+Once a beta header is first sent in a session, it continues being sent for all subsequent requests in that session. This prevents mid-session cache key changes that would bust ~50-70K tokens of prompt cache.
+
+**Claude Code implementation:** Uses `setAfkModeHeaderLatched()`, `setFastModeHeaderLatched()`, `setCacheEditingHeaderLatched()` to track latches. Latches cleared on `/clear` and `/compact` via `clearBetaHeaderLatches()`.
+
+**Plugin implementation:** `betaLatchState` object tracks `sent` (Set of all betas sent), `dirty` (reset flag from config changes), and `lastHeader` (last computed header). After each beta header computation, all current betas are added to `sent`; on subsequent requests, any betas in `sent` but not in the current computation are merged back. The `dirty` flag is set when the user changes token economy config via `/anthropic set`, allowing intentional beta removal.
+
+### 12.11 Cache TTL Session Latching
+
+Cache policy (particularly the 1h TTL eligibility) is latched at the first API request of a session. Subsequent requests use the latched value even if the underlying config changes. This prevents mixed TTLs that would bust the server-side prompt cache.
+
+**Claude Code implementation:** `setPromptCache1hEligible()` and `setPromptCache1hAllowlist()` in bootstrap state.
+
+**Plugin implementation:** `sessionCachePolicyLatched` flag and `latchedCachePolicy` value. Set on first request, used for all subsequent requests.
+
+### 12.12 Title Generator Cache Skip
+
+Title generator requests (detected by `isTitleGeneratorSystemBlocks()` — checks for "Generate a short title" in system prompt) do not receive `cache_control` breakpoints. These are fire-and-forget queries where caching waste outweighs benefit, since the prompt is unique per conversation and never reused.
+
 ---
 
 ## 13. Logging
@@ -1750,11 +1794,20 @@ See [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181) for full de
 
 **Impact:** MEDIUM — missing beta could affect model context window availability.
 
-### 15.16 Beta Composition — Gated Behind Env Vars
+### 15.16 Beta Composition — ~~Gated Behind Env Vars~~ PARTIALLY FIXED
 
-**Current:** Many betas require environment variables to enable (e.g., `TENGU_MARBLE_ANVIL`, `TENGU_TOOL_PEAR`, `TENGU_SCARF_COFFEE`).
+**Status:** PARTIALLY FIXED (v0.0.38)
 
-**Claude Code actual:** These betas are always included in the base array for first-party calls. They are not gated behind env vars.
+**Previous issue:** Many betas required environment variables to enable. Beta composition was static per-session.
+
+**Fixes applied (v0.0.38):**
+
+- Provider-aware tool search: `advanced-tool-use-2025-11-20` for 1P/foundry, `tool-search-tool-2025-10-19` for vertex/bedrock
+- `token-efficient-tools-2026-03-28` now auto-included (default on, config toggle)
+- `summarize-connector-text-2026-03-13` now auto-included (default on, config toggle)
+- `redact-thinking-2026-02-12` now available as opt-in config toggle
+- Beta header latching prevents mid-session cache key churn
+- Cache TTL session latching for stability
 
 **Betas that should always be present for first-party:**
 
@@ -1763,18 +1816,25 @@ claude-code-20250219
 interleaved-thinking-2025-05-14
 context-1m-2025-08-07        (if model supports)
 context-management-2025-06-27
-structured-outputs-2025-12-15
+structured-outputs-2025-12-15 (if NOT token-efficient-tools)
 web-search-2025-03-05
-advanced-tool-use-2025-11-20
-tool-search-tool-2025-10-19
+advanced-tool-use-2025-11-20  (1P/foundry) / tool-search-tool-2025-10-19 (vertex/bedrock)
 effort-2025-11-24
 prompt-caching-scope-2026-01-05
 fast-mode-2026-02-01          (if fast mode + model supports)
-redact-thinking-2026-02-12
+redact-thinking-2026-02-12    (if opt-in)
+token-efficient-tools-2026-03-28 (if NOT structured-outputs)
+summarize-connector-text-2026-03-13
 task-budgets-2026-03-13       (if task budget present)
 ```
 
-**Impact:** HIGH — missing betas are a clear fingerprint difference.
+**Remaining gaps:**
+
+- `afk-mode-2026-01-31` (transcript classifier — ant-only feature)
+- `advisor-tool-2026-03-01` (ant-only, niche)
+- `cli-internal-2026-02-09` (ant-only)
+
+**Impact:** MEDIUM — most important betas now present. Remaining gaps are ant-only features.
 
 ### 15.17 System Prompt Identity Cache Scope — WRONG
 
@@ -1996,6 +2056,26 @@ This change makes static `cch=00000` values detectable as non-genuine in v2.1.81
 
 **OAuth/Auth:** STABLE — no changes.
 **Beta headers:** STABLE — identical set to v2.1.87.
+**API request shape:** STABLE — no new body fields.
+
+### 2026-03-31 — Token Economy Improvements (Plugin v0.0.38)
+
+**Type:** Plugin-side improvements. No Claude Code version changes.
+
+**Key changes in plugin v0.0.38:**
+
+| Change                                         | Detail                                                                                                                                                    | Mimicry Impact                               |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| **`token-efficient-tools-2026-03-28` beta**    | NEW — auto-included when `token_economy.token_efficient_tools` is true (default). Mutually exclusive with structured-outputs. ~4.5% output token savings. | **MEDIUM** — closer to ant-internal beta set |
+| **`redact-thinking-2026-02-12` beta**          | NEW — opt-in via `token_economy.redact_thinking` (default off). Suppresses thinking summaries server-side.                                                | LOW — opt-in only                            |
+| **`summarize-connector-text-2026-03-13` beta** | NEW — auto-included when `token_economy.connector_text_summarization` is true (default). Anti-distillation.                                               | **MEDIUM** — matches ant-internal beta set   |
+| **Provider-aware tool search**                 | FIXED — `advanced-tool-use-2025-11-20` for 1P/foundry, `tool-search-tool-2025-10-19` for vertex/bedrock                                                   | **MEDIUM** — correct header per provider     |
+| **Beta header latching**                       | NEW — betas never removed mid-session (prevents ~50-70K token cache key churn)                                                                            | HIGH — matches CC session stability          |
+| **Cache TTL session latching**                 | NEW — cache policy latched at first request                                                                                                               | HIGH — matches CC cache stability            |
+| **Title generator cache skip**                 | NEW — title requests skip cache_control breakpoints                                                                                                       | LOW — optimization only                      |
+
+**OAuth/Auth:** STABLE — no changes.
+**Beta headers:** Three new betas now auto-included or opt-in. Provider-aware tool search header.
 **API request shape:** STABLE — no new body fields.
 
 ---
