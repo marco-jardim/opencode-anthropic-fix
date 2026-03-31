@@ -158,7 +158,7 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 | P6  | `handleAnthropicSlashCommand()` at line 523 with stats display at lines 631–714 | Done         |
 | P7  | Retry logic at line ~2272 (`serviceWideRetryCount`, `shouldRetryCount`)         | Done         |
 | P8  | `sessionMetrics.lastQuota` populated from response headers at lines 2618–2621   | Done         |
-| P9  | Test suite: 535 tests passing (127 + 40 + 42 + others)                          | Verify first |
+| P9  | Test suite: 543 tests passing (127 + 40 + 42 + others)                          | Verify first |
 | P10 | Phase 0 pre-flight results documented before Phase 1 begins                     | Required     |
 
 ---
@@ -208,9 +208,9 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 #### Pre-flight Checks
 
-- [ ] 0.a: Environment has `index.mjs` at expected line ranges (spot-check lines 2272, 3210, 4454, 4723, 4851)
-- [ ] 0.b: Vitest test suite passes: `npm test` exits 0
-- [ ] 0.c: Active OAuth account available for live API calls
+- [ ] [tier:fast] 0.a: Environment has `index.mjs` at expected line ranges (spot-check lines 2272, 3210, 4454, 4723, 4851)
+- [ ] [tier:medium] 0.b: Vitest test suite passes: `npm test` exits 0
+- [ ] [tier:fast] 0.c: Active OAuth account available for live API calls
 
 ---
 
@@ -312,6 +312,8 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 #### Phase 0 — New Tests
 
+> [tier:medium] All Phase 0 tests are written and run by the medium-tier agent.
+
 | Test | Description                                                 |
 | ---- | ----------------------------------------------------------- |
 | T0.1 | `preflightHeadRequest()` resolves in < 10s on clean network |
@@ -324,16 +326,18 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 #### Phase 0 Acceptance Criteria
 
-- [ ] All 6 pre-flight tasks documented in `preflight-results-plan-a.md`
-- [ ] Every `PREFLIGHT_*` variable has a value (not "unknown")
-- [ ] Go/no-go decisions written for A1, A6, A7
+- [ ] [tier:fast] All 6 pre-flight tasks documented in `preflight-results-plan-a.md`
+- [ ] [tier:fast] Every `PREFLIGHT_*` variable has a value (not "unknown")
+- [ ] [tier:fast] Go/no-go decisions written for A1, A6, A7
 
 #### Phase 0 Definition of Done
 
-- [ ] `preflight-results-plan-a.md` committed
-- [ ] No Phase 1 tasks started without Phase 0 sign-off
+- [ ] [tier:fast] `preflight-results-plan-a.md` committed
+- [ ] [tier:fast] No Phase 1 tasks started without Phase 0 sign-off
 
 #### Phase 0 Senior QA Review
+
+> [tier:heavy] Senior QA review for Phase 0.
 
 - Verify pre-flight tests don't accidentally consume significant API tokens
 - Confirm proxy detection approach works on Windows (`HTTPS_PROXY` case-sensitivity)
@@ -348,9 +352,9 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 #### Pre-flight Check (Phase 1)
 
-- [ ] Phase 0 results confirm `PREFLIGHT_PRECONNECT !== "blocked"` before starting 1.1
-- [ ] Phase 0 results confirm `PREFLIGHT_OVERFLOW_FORMAT.confirmed === true` before starting 1.3
-- [ ] `npm test` passes (zero regressions baseline)
+- [ ] [tier:fast] Phase 0 results confirm `PREFLIGHT_PRECONNECT !== "blocked"` before starting 1.1
+- [ ] [tier:fast] Phase 0 results confirm `PREFLIGHT_OVERFLOW_FORMAT.confirmed === true` before starting 1.3
+- [ ] [tier:medium] `npm test` passes (zero regressions baseline)
 
 ---
 
@@ -396,15 +400,15 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 **Tests:**
 
-- [ ] T1.1.1: `preconnectApi()` called at startup when `preconnect.enabled: true`
-- [ ] T1.1.2: `preconnectApi()` skipped when `preconnect.enabled: false`
-- [ ] T1.1.3: `preconnectApi()` skipped when `HTTPS_PROXY` env var is set
+- [ ] [tier:medium] T1.1.1: `preconnectApi()` called at startup when `preconnect.enabled: true`
+- [ ] [tier:medium] T1.1.2: `preconnectApi()` skipped when `preconnect.enabled: false`
+- [ ] [tier:medium] T1.1.3: `preconnectApi()` skipped when `HTTPS_PROXY` env var is set
 
 **Phase 1.1 acceptance criteria:**
 
-- [ ] No `await` on preconnect — startup time not blocked
-- [ ] No exception thrown if preconnect fails (network offline, DNS failure)
-- [ ] Config key `preconnect.enabled` toggles feature off
+- [ ] [tier:fast] No `await` on preconnect — startup time not blocked
+- [ ] [tier:medium] No exception thrown if preconnect fails (network offline, DNS failure)
+- [ ] [tier:fast] Config key `preconnect.enabled` toggles feature off
 
 ---
 
@@ -452,16 +456,16 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 **Tests:**
 
-- [ ] T1.2.1: No caller `max_tokens` → resolved to `8_000` (default)
-- [ ] T1.2.2: Caller-specified `max_tokens` is preserved unchanged
-- [ ] T1.2.3: After `stop_reason === "max_tokens"`, next request resolves to `64_000`
-- [ ] T1.2.4: After escalated response (non-truncated), resets to `8_000` on next request
-- [ ] T1.2.5: `output_cap.enabled: false` → passthrough behavior (no cap applied)
+- [ ] [tier:medium] T1.2.1: No caller `max_tokens` → resolved to `8_000` (default)
+- [ ] [tier:medium] T1.2.2: Caller-specified `max_tokens` is preserved unchanged
+- [ ] [tier:medium] T1.2.3: After `stop_reason === "max_tokens"`, next request resolves to `64_000`
+- [ ] [tier:medium] T1.2.4: After escalated response (non-truncated), resets to `8_000` on next request
+- [ ] [tier:medium] T1.2.5: `output_cap.enabled: false` → passthrough behavior (no cap applied)
 
 **Phase 1.2 acceptance criteria:**
 
-- [ ] Existing tests for `transformRequestBody()` still pass
-- [ ] Escalation is sticky exactly one turn (then resets)
+- [ ] [tier:medium] Existing tests for `transformRequestBody()` still pass
+- [ ] [tier:medium] Escalation is sticky exactly one turn (then resets)
 
 ---
 
@@ -508,22 +512,24 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 **Tests:**
 
-- [ ] T1.3.1: `parseContextLimitError()` parses the exact format from preflight result
-- [ ] T1.3.2: `parseContextLimitError()` returns `null` for unrelated error messages
-- [ ] T1.3.3: Auto-retry fires with reduced `max_tokens` on first overflow
-- [ ] T1.3.4: Overflow-retry uses correct safe value: `limit - input - 1000`
-- [ ] T1.3.5: Second overflow in the same request does NOT retry (guard prevents infinite loop)
-- [ ] T1.3.6: `overflow_recovery.enabled: false` → no auto-retry, error surfaces normally
+- [ ] [tier:medium] T1.3.1: `parseContextLimitError()` parses the exact format from preflight result
+- [ ] [tier:medium] T1.3.2: `parseContextLimitError()` returns `null` for unrelated error messages
+- [ ] [tier:medium] T1.3.3: Auto-retry fires with reduced `max_tokens` on first overflow
+- [ ] [tier:medium] T1.3.4: Overflow-retry uses correct safe value: `limit - input - 1000`
+- [ ] [tier:medium] T1.3.5: Second overflow in the same request does NOT retry (guard prevents infinite loop)
+- [ ] [tier:medium] T1.3.6: `overflow_recovery.enabled: false` → no auto-retry, error surfaces normally
 
 **Phase 1.3 acceptance criteria:**
 
-- [ ] No infinite retry loops (single overflow-retry only per request)
-- [ ] `overflowRetryAttempted` flag is request-scoped, not session-scoped
-- [ ] Safety margin is configurable via `overflow_recovery.safety_margin`
+- [ ] [tier:medium] No infinite retry loops (single overflow-retry only per request)
+- [ ] [tier:fast] `overflowRetryAttempted` flag is request-scoped, not session-scoped
+- [ ] [tier:fast] Safety margin is configurable via `overflow_recovery.safety_margin`
 
 ---
 
 #### Phase 1 — New Tests Summary
+
+> [tier:medium] All Phase 1 tests are written and run by the medium-tier agent.
 
 | Task                 | Tests         | Subtotal |
 | -------------------- | ------------- | -------- |
@@ -534,19 +540,21 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 #### Phase 1 Acceptance Criteria
 
-- [ ] `npm test` passes with all 14 new tests green, no regressions
-- [ ] Preconnect fires at startup (verify via mock fetch spy)
-- [ ] `prompt_too_long` error no longer surfaces when auto-recovery fires
-- [ ] Default `max_tokens` for new requests is 8,000 (verify via request capture)
+- [ ] [tier:medium] `npm test` passes with all 14 new tests green, no regressions
+- [ ] [tier:fast] Preconnect fires at startup (verify via mock fetch spy)
+- [ ] [tier:fast] `prompt_too_long` error no longer surfaces when auto-recovery fires
+- [ ] [tier:fast] Default `max_tokens` for new requests is 8,000 (verify via request capture)
 
 #### Phase 1 Definition of Done
 
-- [ ] All 3 tasks code-complete
-- [ ] `lib/config.mjs` updated with `preconnect`, `output_cap`, `overflow_recovery` sections
-- [ ] TypeScript JSDoc types added for new config sections
-- [ ] Existing conformance tests pass: `npm run test:conformance`
+- [ ] [tier:medium] All 3 tasks code-complete
+- [ ] [tier:fast] `lib/config.mjs` updated with `preconnect`, `output_cap`, `overflow_recovery` sections
+- [ ] [tier:fast] TypeScript JSDoc types added for new config sections
+- [ ] [tier:medium] Existing conformance tests pass: `npm run test:conformance`
 
 #### Phase 1 Senior QA Review
+
+> [tier:heavy] Senior QA review for Phase 1.
 
 - Confirm preconnect cannot be `await`-ed (no latency regression on slow networks)
 - Verify `max_tokens: 0` caller edge case does not conflict with `output_cap` logic
@@ -562,9 +570,9 @@ Add 10 self-contained improvements to the OpenCode anthropic-auth plugin that en
 
 #### Pre-flight Check (Phase 2)
 
-- [ ] Phase 1 `npm test` passed with 0 failures
-- [ ] `sessionMetrics` at line 3210 accumulates correctly (manual spot-check)
-- [ ] `/anthropic stats` command at line 631 renders without error
+- [ ] [tier:medium] Phase 1 `npm test` passed with 0 failures
+- [ ] [tier:fast] `sessionMetrics` at line 3210 accumulates correctly (manual spot-check)
+- [ ] [tier:fast] `/anthropic stats` command at line 631 renders without error
 
 ---
 
@@ -602,13 +610,13 @@ sessionMetrics.lastModelId = null;
 
 **Tests:**
 
-- [ ] T2.1.1: After two requests with different models, `perModel` has two entries
-- [ ] T2.1.2: Per-model cost is calculated correctly using pricing table
-- [ ] T2.1.3: `/anthropic stats reset` zeroes all `sessionMetrics` fields
-- [ ] T2.1.4: Per-model section suppressed when only one model has been used
-- [ ] T2.1.5: Unknown model uses Sonnet 4.6 pricing as fallback
-- [ ] T2.1.6: Stats display includes session duration in minutes
-- [ ] T2.1.7: `linesChanged` increments per file_write/file_edit tool result
+- [ ] [tier:medium] T2.1.1: After two requests with different models, `perModel` has two entries
+- [ ] [tier:medium] T2.1.2: Per-model cost is calculated correctly using pricing table
+- [ ] [tier:medium] T2.1.3: `/anthropic stats reset` zeroes all `sessionMetrics` fields
+- [ ] [tier:medium] T2.1.4: Per-model section suppressed when only one model has been used
+- [ ] [tier:medium] T2.1.5: Unknown model uses Sonnet 4.6 pricing as fallback
+- [ ] [tier:medium] T2.1.6: Stats display includes session duration in minutes
+- [ ] [tier:medium] T2.1.7: `linesChanged` increments per file_write/file_edit tool result
 
 ---
 
@@ -656,12 +664,12 @@ sessionMetrics.lastModelId = null;
 
 **Tests:**
 
-- [ ] T2.2.1: `analyzeRequestContext()` correctly counts tokens per role
-- [ ] T2.2.2: Tool results grouped by `tool_name` with token sums
-- [ ] T2.2.3: Duplicate detection fires when same content appears in 2+ tool_result blocks
-- [ ] T2.2.4: No duplicate false-positive for different content with same length
-- [ ] T2.2.5: Empty/missing body returns "No request captured yet."
-- [ ] T2.2.6: Malformed JSON body handled gracefully (no crash)
+- [ ] [tier:medium] T2.2.1: `analyzeRequestContext()` correctly counts tokens per role
+- [ ] [tier:medium] T2.2.2: Tool results grouped by `tool_name` with token sums
+- [ ] [tier:medium] T2.2.3: Duplicate detection fires when same content appears in 2+ tool_result blocks
+- [ ] [tier:medium] T2.2.4: No duplicate false-positive for different content with same length
+- [ ] [tier:medium] T2.2.5: Empty/missing body returns "No request captured yet."
+- [ ] [tier:medium] T2.2.6: Malformed JSON body handled gracefully (no crash)
 
 ---
 
@@ -691,14 +699,15 @@ const cacheBreakState = {
 
 **Implementation steps:**
 
-1. [tier:medium] Add `cacheBreakState` object near `adaptiveContextState` at line ~3235
-2. [tier:medium] Pre-call: extract system prompt blocks + tool schemas from request body; hash each; store in `cacheBreakState.sourceHashes` with LRU eviction at 10 entries
-3. [tier:medium] Post-call (after `cache_read_input_tokens` available from `message_start` event):
+1. [tier:fast] Read existing `adaptiveContextState` at line ~3235 and `message_start` event handling in the fetch interceptor to understand where `cache_read_input_tokens` is available
+2. [tier:medium] Add `cacheBreakState` object near `adaptiveContextState` at line ~3235
+3. [tier:medium] Pre-call: extract system prompt blocks + tool schemas from request body; hash each; store in `cacheBreakState.sourceHashes` with LRU eviction at 10 entries
+4. [tier:medium] Post-call (after `cache_read_input_tokens` available from `message_start` event):
    - Compare against `cacheBreakState.prevCacheRead`
    - If drop > `alertThreshold`, call `detectCacheBreak()` to identify changed sources
    - Fire toast: "Cache break detected: tool schema for `<tool_name>` changed (−2,400 tokens)"
-4. [tier:medium] Reset `prevCacheRead` and source hashes on context compaction signal (detect via the compaction marker in `transformRequestBody()`)
-5. [tier:medium] Add config to `lib/config.mjs`:
+5. [tier:medium] Reset `prevCacheRead` and source hashes on context compaction signal (detect via the compaction marker in `transformRequestBody()`)
+6. [tier:medium] Add config to `lib/config.mjs`:
    ```js
    cache_break_detection: {
      enabled: true,
@@ -708,17 +717,19 @@ const cacheBreakState = {
 
 **Tests:**
 
-- [ ] T2.3.1: Hash computed for system prompt block before each request
-- [ ] T2.3.2: Alert fires when `cache_read_input_tokens` drops by >2,000 vs prior turn
-- [ ] T2.3.3: No alert when drop is ≤2,000 (below threshold)
-- [ ] T2.3.4: Changed tool schema identified by name in alert message
-- [ ] T2.3.5: Source hash map never exceeds 10 entries (LRU eviction)
-- [ ] T2.3.6: State resets after compaction event
-- [ ] T2.3.7: `cache_break_detection.enabled: false` → no hashing, no alerts
+- [ ] [tier:medium] T2.3.1: Hash computed for system prompt block before each request
+- [ ] [tier:medium] T2.3.2: Alert fires when `cache_read_input_tokens` drops by >2,000 vs prior turn
+- [ ] [tier:medium] T2.3.3: No alert when drop is ≤2,000 (below threshold)
+- [ ] [tier:medium] T2.3.4: Changed tool schema identified by name in alert message
+- [ ] [tier:medium] T2.3.5: Source hash map never exceeds 10 entries (LRU eviction)
+- [ ] [tier:medium] T2.3.6: State resets after compaction event
+- [ ] [tier:medium] T2.3.7: `cache_break_detection.enabled: false` → no hashing, no alerts
 
 ---
 
 #### Phase 2 — New Tests Summary
+
+> [tier:medium] All Phase 2 tests are written and run by the medium-tier agent.
 
 | Task              | Tests         | Subtotal |
 | ----------------- | ------------- | -------- |
@@ -729,17 +740,19 @@ const cacheBreakState = {
 
 #### Phase 2 Acceptance Criteria
 
-- [ ] `/anthropic stats reset` zeroes session metrics correctly
-- [ ] `/anthropic context` renders without error on a real request body
-- [ ] Cache break alert fires in test when system prompt changes between turns
+- [ ] [tier:fast] `/anthropic stats reset` zeroes session metrics correctly
+- [ ] [tier:fast] `/anthropic context` renders without error on a real request body
+- [ ] [tier:medium] Cache break alert fires in test when system prompt changes between turns
 
 #### Phase 2 Definition of Done
 
-- [ ] All 3 tasks code-complete and tested
-- [ ] `sessionMetrics` JSDoc type comment updated with new fields
-- [ ] No extra memory allocation in the hot path (pre-call hashing deferred until after interceptor decision)
+- [ ] [tier:medium] All 3 tasks code-complete and tested
+- [ ] [tier:fast] `sessionMetrics` JSDoc type comment updated with new fields
+- [ ] [tier:heavy] No extra memory allocation in the hot path (pre-call hashing deferred until after interceptor decision)
 
 #### Phase 2 Senior QA Review
+
+> [tier:heavy] Senior QA review for Phase 2.
 
 - Verify `lastRequestBody` 2MB cap doesn't silently corrupt context analysis for very large requests
 - Confirm `analyzeRequestContext()` handles streaming requests (where body is already sent) correctly
@@ -756,10 +769,10 @@ const cacheBreakState = {
 
 #### Pre-flight Check (Phase 3)
 
-- [ ] Phase 2 `npm test` passed with 0 failures (534+ tests)
-- [ ] `PREFLIGHT_OAUTH_USAGE` documented from Phase 0
-- [ ] `PREFLIGHT_CLEAR_TOOL_USES` and `PREFLIGHT_CLEAR_THINKING` documented from Phase 0
-- [ ] Phase 2 session metrics accumulating accurately (manual verification)
+- [ ] [tier:medium] Phase 2 `npm test` passed with 0 failures (542+ tests)
+- [ ] [tier:fast] `PREFLIGHT_OAUTH_USAGE` documented from Phase 0
+- [ ] [tier:fast] `PREFLIGHT_CLEAR_TOOL_USES` and `PREFLIGHT_CLEAR_THINKING` documented from Phase 0
+- [ ] [tier:fast] Phase 2 session metrics accumulating accurately (manual verification)
 
 ---
 
@@ -811,13 +824,13 @@ const cacheBreakState = {
 
 **Tests:**
 
-- [ ] T3.1.1: Poll triggered after every 10th request (`turns % 10 === 0`)
-- [ ] T3.1.2: Poll triggered after 5 minutes since last poll regardless of request count
-- [ ] T3.1.3: No poll when `PREFLIGHT_OAUTH_USAGE === "not_found"` (feature gate)
-- [ ] T3.1.4: Danger toast fires when ≤25% remaining
-- [ ] T3.1.5: Warning toast fires when ≤50% remaining
-- [ ] T3.1.6: Caution toast fires once when ≤75% remaining (deduplicated)
-- [ ] T3.1.7: Non-2xx response from usage endpoint does not throw or block main flow
+- [ ] [tier:medium] T3.1.1: Poll triggered after every 10th request (`turns % 10 === 0`)
+- [ ] [tier:medium] T3.1.2: Poll triggered after 5 minutes since last poll regardless of request count
+- [ ] [tier:medium] T3.1.3: No poll when `PREFLIGHT_OAUTH_USAGE === "not_found"` (feature gate)
+- [ ] [tier:medium] T3.1.4: Danger toast fires when ≤25% remaining
+- [ ] [tier:medium] T3.1.5: Warning toast fires when ≤50% remaining
+- [ ] [tier:medium] T3.1.6: Caution toast fires once when ≤75% remaining (deduplicated)
+- [ ] [tier:medium] T3.1.7: Non-2xx response from usage endpoint does not throw or block main flow
 
 ---
 
@@ -870,12 +883,12 @@ const cacheBreakState = {
 
 **Tests:**
 
-- [ ] T3.2.1: Request with title generation system prompt classified as `background`
-- [ ] T3.2.2: Request with `max_tokens <= 256` and `messages.length <= 2` classified as `background`
-- [ ] T3.2.3: Normal multi-turn request classified as `foreground`
-- [ ] T3.2.4: Background request gets 0 service-wide retries (no 529 retry)
-- [ ] T3.2.5: Background request gets max 1 `x-should-retry` retry
-- [ ] T3.2.6: `request_classification.enabled: false` → all requests use foreground retry budget
+- [ ] [tier:medium] T3.2.1: Request with title generation system prompt classified as `background`
+- [ ] [tier:medium] T3.2.2: Request with `max_tokens <= 256` and `messages.length <= 2` classified as `background`
+- [ ] [tier:medium] T3.2.3: Normal multi-turn request classified as `foreground`
+- [ ] [tier:medium] T3.2.4: Background request gets 0 service-wide retries (no 529 retry)
+- [ ] [tier:medium] T3.2.5: Background request gets max 1 `x-should-retry` retry
+- [ ] [tier:medium] T3.2.6: `request_classification.enabled: false` → all requests use foreground retry budget
 
 ---
 
@@ -934,14 +947,14 @@ sessionMetrics.tokenBudget = {
 
 **Tests:**
 
-- [ ] T3.3.1: `"+500k"` parsed as 500,000 tokens
-- [ ] T3.3.2: `"use 2M tokens"` parsed as 2,000,000 tokens
-- [ ] T3.3.3: `"spend 500k"` parsed as 500,000 tokens
-- [ ] T3.3.4: Budget status injected into system prompt when limit is set
-- [ ] T3.3.5: Stop signal fired at 90% of limit
-- [ ] T3.3.6: Diminishing returns detected after 3 continuations with <500 token delta
-- [ ] T3.3.7: `token_budget.enabled: false` → no parsing, no injection
-- [ ] T3.3.8: `token_budget.default: 500000` sets budget without user message
+- [ ] [tier:medium] T3.3.1: `"+500k"` parsed as 500,000 tokens
+- [ ] [tier:medium] T3.3.2: `"use 2M tokens"` parsed as 2,000,000 tokens
+- [ ] [tier:medium] T3.3.3: `"spend 500k"` parsed as 500,000 tokens
+- [ ] [tier:medium] T3.3.4: Budget status injected into system prompt when limit is set
+- [ ] [tier:medium] T3.3.5: Stop signal fired at 90% of limit
+- [ ] [tier:medium] T3.3.6: Diminishing returns detected after 3 continuations with <500 token delta
+- [ ] [tier:medium] T3.3.7: `token_budget.enabled: false` → no parsing, no injection
+- [ ] [tier:medium] T3.3.8: `token_budget.default: 500000` sets budget without user message
 
 ---
 
@@ -992,18 +1005,20 @@ const microcompactState = {
 
 **Tests:**
 
-- [ ] T3.4.1: `clear_tool_uses_20250919` beta added when >80% window used
-- [ ] T3.4.2: `clear_thinking_20251015` beta added when idle >1h
-- [ ] T3.4.3: Neither beta added when <80% window used
-- [ ] T3.4.4: Feature fully gated: when `PREFLIGHT_CLEAR_TOOL_USES === "rejected"`, no beta added
-- [ ] T3.4.5: `microcompact.enabled: false` → no betas added regardless of window usage
-- [ ] T3.4.6: `microcompact.threshold_percent: 90` changes the trigger point
-- [ ] T3.4.7: `microcompactState.active` resets after compaction event
-- [ ] T3.4.8: Thinking clear beta not added twice in consecutive turns (idempotent)
+- [ ] [tier:medium] T3.4.1: `clear_tool_uses_20250919` beta added when >80% window used
+- [ ] [tier:medium] T3.4.2: `clear_thinking_20251015` beta added when idle >1h
+- [ ] [tier:medium] T3.4.3: Neither beta added when <80% window used
+- [ ] [tier:medium] T3.4.4: Feature fully gated: when `PREFLIGHT_CLEAR_TOOL_USES === "rejected"`, no beta added
+- [ ] [tier:medium] T3.4.5: `microcompact.enabled: false` → no betas added regardless of window usage
+- [ ] [tier:medium] T3.4.6: `microcompact.threshold_percent: 90` changes the trigger point
+- [ ] [tier:medium] T3.4.7: `microcompactState.active` resets after compaction event
+- [ ] [tier:medium] T3.4.8: Thinking clear beta not added twice in consecutive turns (idempotent)
 
 ---
 
 #### Phase 3 — New Tests Summary
+
+> [tier:medium] All Phase 3 tests are written and run by the medium-tier agent.
 
 | Task                    | Tests         | Subtotal |
 | ----------------------- | ------------- | -------- |
@@ -1015,19 +1030,21 @@ const microcompactState = {
 
 #### Phase 3 Acceptance Criteria
 
-- [ ] Rate limit toast fires at ≤25% remaining (verified with mock usage response)
-- [ ] Background requests confirmed to receive `maxServiceRetries = 0` in interceptor
-- [ ] Token budget `+500k` parsed and system prompt injected in test harness
-- [ ] Microcompact betas appear in `anthropic-beta` header when window >80% (mock token estimate)
+- [ ] [tier:medium] Rate limit toast fires at ≤25% remaining (verified with mock usage response)
+- [ ] [tier:fast] Background requests confirmed to receive `maxServiceRetries = 0` in interceptor
+- [ ] [tier:medium] Token budget `+500k` parsed and system prompt injected in test harness
+- [ ] [tier:medium] Microcompact betas appear in `anthropic-beta` header when window >80% (mock token estimate)
 
 #### Phase 3 Definition of Done
 
-- [ ] All 4 tasks code-complete and tested
-- [ ] `npm test` passes (549+ tests — prior 535 + 29 new phase-3 + 14 phase-1 + 20 phase-2 = 598 total, less ~3 pre-flight = 595 new + existing)
-- [ ] Microcompact pre-flight gate respected: if `PREFLIGHT_CLEAR_TOOL_USES === "rejected"`, feature disabled automatically with log message
-- [ ] No system-prompt modifications without explicit config enable (`token_budget.enabled: true`)
+- [ ] [tier:medium] All 4 tasks code-complete and tested
+- [ ] [tier:medium] `npm test` passes (557+ tests — prior 543 + 29 new phase-3 + 14 phase-1 + 20 phase-2 = 606 total, less ~3 pre-flight = 603 new + existing)
+- [ ] [tier:fast] Microcompact pre-flight gate respected: if `PREFLIGHT_CLEAR_TOOL_USES === "rejected"`, feature disabled automatically with log message
+- [ ] [tier:fast] No system-prompt modifications without explicit config enable (`token_budget.enabled: true`)
 
 #### Phase 3 Senior QA Review
+
+> [tier:heavy] Senior QA review for Phase 3.
 
 - Verify A9 budget injection does not conflict with A3 cache break detection (injecting a new block changes the system prompt hash every turn → would generate false cache break alerts). Fix: exclude the budget injection block from cache break hashing.
 - Verify A7 microcompact does not interact with A2 overflow recovery (adding betas doesn't change `max_tokens` arithmetic)
@@ -1045,9 +1062,9 @@ const microcompactState = {
 
 #### Pre-flight Check (Phase 4)
 
-- [ ] `npm test` passes with all new tests from phases 1–3 green
-- [ ] No `console.error` spam in normal operation (manual run check)
-- [ ] `npm run test:conformance` passes (zero regression on existing conformance suite)
+- [ ] [tier:medium] `npm test` passes with all new tests from phases 1–3 green
+- [ ] [tier:fast] No `console.error` spam in normal operation (manual run check)
+- [ ] [tier:medium] `npm run test:conformance` passes (zero regression on existing conformance suite)
 
 ---
 
@@ -1064,12 +1081,12 @@ const microcompactState = {
 
 **Tests:**
 
-- [ ] T4.1.1: A2 + A10: overflow recovery `max_tokens` capped at output_cap default
-- [ ] T4.1.2: A3 + A9: budget block change does not trigger cache break alert
-- [ ] T4.1.3: A6 poll interval counts foreground turns only
-- [ ] T4.1.4: A1: slow preconnect does not delay first real request
-- [ ] T4.1.5: Session reset zeroes all new state fields
-- [ ] T4.1.6: Full mock session: 20 turns, stats accurate at end
+- [ ] [tier:heavy] T4.1.1: A2 + A10: overflow recovery `max_tokens` capped at output_cap default
+- [ ] [tier:heavy] T4.1.2: A3 + A9: budget block change does not trigger cache break alert
+- [ ] [tier:medium] T4.1.3: A6 poll interval counts foreground turns only
+- [ ] [tier:fast] T4.1.4: A1: slow preconnect does not delay first real request
+- [ ] [tier:medium] T4.1.5: Session reset zeroes all new state fields
+- [ ] [tier:heavy] T4.1.6: Full mock session: 20 turns, stats accurate at end
 
 ---
 
@@ -1102,6 +1119,8 @@ const microcompactState = {
 
 #### Phase 4 — New Tests Summary
 
+> [tier:medium] All Phase 4 tests are written and run by the medium-tier agent.
+
 | Task                       | Tests         | Subtotal                              |
 | -------------------------- | ------------- | ------------------------------------- |
 | Integration                | T4.1.1–T4.1.6 | 6                                     |
@@ -1110,19 +1129,21 @@ const microcompactState = {
 
 #### Phase 4 Acceptance Criteria
 
-- [ ] All 6 integration tests pass
-- [ ] `npm test` passes with complete new test suite (prior 535 + ~75 new = ~610 total)
-- [ ] `npm run test:conformance` passes (40 conformance tests unchanged)
-- [ ] `README.md` documents all 10 new config sections
+- [ ] [tier:medium] All 6 integration tests pass
+- [ ] [tier:medium] `npm test` passes with complete new test suite (prior 543 + ~75 new = ~618 total)
+- [ ] [tier:medium] `npm run test:conformance` passes (40 conformance tests unchanged)
+- [ ] [tier:fast] `README.md` documents all 10 new config sections
 
 #### Phase 4 Definition of Done
 
-- [ ] All 4 tasks complete
-- [ ] No TODO comments left in new code
-- [ ] No `console.log` debug statements left in production paths
-- [ ] CHANGELOG.md updated
+- [ ] [tier:medium] All 4 tasks complete
+- [ ] [tier:fast] No TODO comments left in new code
+- [ ] [tier:fast] No `console.log` debug statements left in production paths
+- [ ] [tier:fast] CHANGELOG.md updated
 
 #### Phase 4 Senior QA Review
+
+> [tier:heavy] Senior QA review for Phase 4.
 
 - Final check: does any Plan A feature change the `anthropic-beta` header composition in a way that conflicts with Plan B (implementation-plan-v2.md) beta management? Answer must be documented.
 - Confirm `clear_tool_uses_20250919` and `clear_thinking_20251015` (A7) are added to the always-on beta set gating in `buildAnthropicBetaHeader()` at line ~4454, not to the `ALWAYS_ON_BETAS` constant (since they are microcompact-specific, not always-on).
@@ -1132,15 +1153,15 @@ const microcompactState = {
 
 ## 5. Global Acceptance Criteria
 
-- [ ] All 10 features (A1–A10) implemented and tested
-- [ ] `npm test` passes: ~610 total tests (535 existing + ~75 new), 0 failures
-- [ ] `npm run test:conformance` passes: 40 conformance tests unchanged
-- [ ] `lib/config.test.mjs`: 42 existing tests pass + new tests for each new config section
-- [ ] Every new feature has a config toggle that, when set to `false`/`0`/disabled, produces **identical behavior** to the pre-plan baseline
-- [ ] No new npm runtime dependencies
-- [ ] No TypeScript `@ts-ignore` or `as any` suppressions
-- [ ] `README.md` documents all new config keys with examples
-- [ ] Phase 0 `preflight-results-plan-a.md` completed and committed
+- [ ] [tier:heavy] All 10 features (A1–A10) implemented and tested
+- [ ] [tier:medium] `npm test` passes: ~618 total tests (543 existing + ~75 new), 0 failures
+- [ ] [tier:medium] `npm run test:conformance` passes: 40 conformance tests unchanged
+- [ ] [tier:medium] `lib/config.test.mjs`: 42 existing tests pass + new tests for each new config section
+- [ ] [tier:heavy] Every new feature has a config toggle that, when set to `false`/`0`/disabled, produces **identical behavior** to the pre-plan baseline
+- [ ] [tier:fast] No new npm runtime dependencies
+- [ ] [tier:fast] No TypeScript `@ts-ignore` or `as any` suppressions
+- [ ] [tier:fast] `README.md` documents all new config keys with examples
+- [ ] [tier:fast] Phase 0 `preflight-results-plan-a.md` completed and committed
 
 ---
 
@@ -1163,47 +1184,49 @@ The **plan** is Done when all phases are Done AND global acceptance criteria are
 
 ## 7. Global Senior QA Review
 
+> [tier:heavy] Global QA review — all items reviewed by the heavy-tier agent.
+
 A senior QA engineer should verify:
 
 ### Session Lifecycle
 
-- [ ] **Init → Requests → Compaction → Reset:** All new state fields (`microcompactState`, `cacheBreakState`, `sessionMetrics.tokenBudget`, `sessionMetrics.lastStopReason`, `sessionMetrics.lastRequestBody`) are correctly zeroed or reset on session compaction
-- [ ] **Multi-session:** Plugin used for 2+ consecutive OpenCode sessions — state does not leak between sessions
+- [ ] [tier:heavy] **Init → Requests → Compaction → Reset:** All new state fields (`microcompactState`, `cacheBreakState`, `sessionMetrics.tokenBudget`, `sessionMetrics.lastStopReason`, `sessionMetrics.lastRequestBody`) are correctly zeroed or reset on session compaction
+- [ ] [tier:heavy] **Multi-session:** Plugin used for 2+ consecutive OpenCode sessions — state does not leak between sessions
 
 ### Cross-Feature Interactions
 
-- [ ] A2 + A10 (overflow + output cap): reviewed and tested (T4.1.1)
-- [ ] A3 + A9 (cache break + budget injection): false-positive mitigation implemented and tested (T4.1.2)
-- [ ] A6 + A8 (rate limit polling + fg/bg classification): poll interval foreground-only (T4.1.3)
-- [ ] A7 + existing `buildAnthropicBetaHeader()`: microcompact betas appended correctly, not duplicated
+- [ ] [tier:heavy] A2 + A10 (overflow + output cap): reviewed and tested (T4.1.1)
+- [ ] [tier:heavy] A3 + A9 (cache break + budget injection): false-positive mitigation implemented and tested (T4.1.2)
+- [ ] [tier:heavy] A6 + A8 (rate limit polling + fg/bg classification): poll interval foreground-only (T4.1.3)
+- [ ] [tier:heavy] A7 + existing `buildAnthropicBetaHeader()`: microcompact betas appended correctly, not duplicated
 
 ### Error Recovery Paths
 
-- [ ] A2 overflow recovery: verify the overflow-retry does NOT also trigger the adaptive context escalation path (A2 and adaptive context are separate retry reasons at line ~2719)
-- [ ] A6 usage endpoint non-2xx: no request blocking, no unhandled rejection
-- [ ] A7 with rejected preflight: graceful fallback, no beta injected, feature logs once and stays quiet
+- [ ] [tier:heavy] A2 overflow recovery: verify the overflow-retry does NOT also trigger the adaptive context escalation path (A2 and adaptive context are separate retry reasons at line ~2719)
+- [ ] [tier:heavy] A6 usage endpoint non-2xx: no request blocking, no unhandled rejection
+- [ ] [tier:heavy] A7 with rejected preflight: graceful fallback, no beta injected, feature logs once and stays quiet
 
 ### Config Backward Compatibility
 
-- [ ] No existing config keys renamed or removed
-- [ ] All new config sections have defaults in `DEFAULT_CONFIG`
-- [ ] `createDefaultConfig()` at line ~193 deep-clones all new sections
-- [ ] Users with old config files (missing new sections) get defaults merged in correctly
+- [ ] [tier:fast] No existing config keys renamed or removed
+- [ ] [tier:fast] All new config sections have defaults in `DEFAULT_CONFIG`
+- [ ] [tier:fast] `createDefaultConfig()` at line ~193 deep-clones all new sections
+- [ ] [tier:fast] Users with old config files (missing new sections) get defaults merged in correctly
 
 ### Performance
 
-- [ ] Preconnect (A1): confirmed fire-and-forget, no await
-- [ ] Cache break hashing (A3): lazy, only when enabled, not in critical path
-- [ ] Context analysis (A5): on-demand only, not per-request
-- [ ] Budget parser (A9): scans only the last user message, not all history
+- [ ] [tier:fast] Preconnect (A1): confirmed fire-and-forget, no await
+- [ ] [tier:fast] Cache break hashing (A3): lazy, only when enabled, not in critical path
+- [ ] [tier:fast] Context analysis (A5): on-demand only, not per-request
+- [ ] [tier:fast] Budget parser (A9): scans only the last user message, not all history
 
 ### Memory Leak Potential (Long Sessions)
 
-- [ ] `cacheBreakState.sourceHashes`: LRU capped at 10 entries
-- [ ] `sessionMetrics.lastRequestBody`: capped at 2MB
-- [ ] `sessionMetrics.tokenBudget.outputHistory`: capped at 5 entries
-- [ ] `sessionMetrics.perModel`: grows by unique model count (bounded in practice to 2–3 models)
-- [ ] `microcompactState`: no unbounded growth
+- [ ] [tier:fast] `cacheBreakState.sourceHashes`: LRU capped at 10 entries
+- [ ] [tier:fast] `sessionMetrics.lastRequestBody`: capped at 2MB
+- [ ] [tier:fast] `sessionMetrics.tokenBudget.outputHistory`: capped at 5 entries
+- [ ] [tier:fast] `sessionMetrics.perModel`: grows by unique model count (bounded in practice to 2–3 models)
+- [ ] [tier:fast] `microcompactState`: no unbounded growth
 
 ---
 
@@ -1327,20 +1350,20 @@ Legend: ✏️ = Modified, 🔍 = Audited/Verified, NEW = Created
 
 | Phase     | Feature               | New Tests   | Running Total | Notes                  |
 | --------- | --------------------- | ----------- | ------------- | ---------------------- |
-| Baseline  | Existing suite        | 535         | 535           | 127 + 40 + 42 + others |
-| 0         | Pre-flight validation | 3           | 538           | T0.1–T0.3              |
-| 1         | A1 preconnect         | 3           | 541           | T1.1.1–T1.1.3          |
-| 1         | A10 output cap        | 5           | 546           | T1.2.1–T1.2.5          |
-| 1         | A2 overflow recovery  | 6           | 552           | T1.3.1–T1.3.6          |
-| 2         | A4 stats              | 7           | 559           | T2.1.1–T2.1.7          |
-| 2         | A5 context command    | 6           | 565           | T2.2.1–T2.2.6          |
-| 2         | A3 cache break        | 7           | 572           | T2.3.1–T2.3.7          |
-| 3         | A6 rate limits        | 7           | 579           | T3.1.1–T3.1.7          |
-| 3         | A8 fg/bg class        | 6           | 585           | T3.2.1–T3.2.6          |
-| 3         | A9 token budget       | 8           | 593           | T3.3.1–T3.3.8          |
-| 3         | A7 microcompact       | 8           | 601           | T3.4.1–T3.4.8          |
-| 4         | Integration           | 6           | 607           | T4.1.1–T4.1.6          |
-| **Total** | **10 features**       | **~72 new** | **~607**      | Exceeds 60-80 target ✓ |
+| Baseline  | Existing suite        | 543         | 543           | 127 + 40 + 42 + others |
+| 0         | Pre-flight validation | 3           | 546           | T0.1–T0.3              |
+| 1         | A1 preconnect         | 3           | 549           | T1.1.1–T1.1.3          |
+| 1         | A10 output cap        | 5           | 554           | T1.2.1–T1.2.5          |
+| 1         | A2 overflow recovery  | 6           | 560           | T1.3.1–T1.3.6          |
+| 2         | A4 stats              | 7           | 567           | T2.1.1–T2.1.7          |
+| 2         | A5 context command    | 6           | 573           | T2.2.1–T2.2.6          |
+| 2         | A3 cache break        | 7           | 580           | T2.3.1–T2.3.7          |
+| 3         | A6 rate limits        | 7           | 587           | T3.1.1–T3.1.7          |
+| 3         | A8 fg/bg class        | 6           | 593           | T3.2.1–T3.2.6          |
+| 3         | A9 token budget       | 8           | 601           | T3.3.1–T3.3.8          |
+| 3         | A7 microcompact       | 8           | 609           | T3.4.1–T3.4.8          |
+| 4         | Integration           | 6           | 615           | T4.1.1–T4.1.6          |
+| **Total** | **10 features**       | **~72 new** | **~615**      | Exceeds 60-80 target ✓ |
 
 **Edge cases covered across all phases:**
 
