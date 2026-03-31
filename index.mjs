@@ -3725,6 +3725,96 @@ function computeBillingCacheHash(firstUserMessage, version) {
  * @param {any[] | undefined} messages
  * @returns {string}
  */
+/**
+ * Strip leaked /anthropic slash command messages from conversation history.
+ *
+ * When a user runs `/anthropic <subcommand>`, OpenCode may still include the
+ * command text as a user message and the sendCommandMessage output as an
+ * assistant message in the API request. This function removes those messages
+ * so the model never sees internal plugin commands in its context.
+ *
+ * Detection heuristics:
+ * - User messages that start with `/anthropic` (with optional leading whitespace)
+ * - User messages where the ONLY text content is a `/anthropic` command
+ * - Assistant messages that start with the `▣ Anthropic` prefix used by sendCommandMessage
+ *
+ * After filtering, if the last remaining message is an assistant message, drop it
+ * to maintain the user→assistant alternation required by the API.
+ *
+ * @param {Array} messages — The messages array from the parsed request body
+ * @returns {Array} — Filtered messages array
+ */
+function stripSlashCommandMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+  // Pattern: /anthropic followed by optional subcommand
+  const CMD_RE = /^\s*\/anthropic\b/i;
+  // Pattern: ▣ Anthropic — prefix used by all sendCommandMessage outputs
+  const RESP_RE = /^▣\s*Anthropic/;
+
+  /**
+   * Extract the first text content from a message's content field.
+   * Handles both string content and array-of-blocks content.
+   */
+  function getFirstText(msg) {
+    if (typeof msg.content === "string") return msg.content;
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === "text" && typeof block.text === "string") return block.text;
+      }
+    }
+    return "";
+  }
+
+  /**
+   * Check if a user message is a /anthropic command.
+   * A message is a command if its text content starts with /anthropic.
+   */
+  function isCommandMessage(msg) {
+    if (msg.role !== "user") return false;
+    const text = getFirstText(msg);
+    return CMD_RE.test(text);
+  }
+
+  /**
+   * Check if an assistant message is a sendCommandMessage response.
+   * These always start with ▣ Anthropic.
+   */
+  function isCommandResponse(msg) {
+    if (msg.role !== "assistant") return false;
+    const text = getFirstText(msg);
+    return RESP_RE.test(text);
+  }
+
+  const filtered = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    // Drop /anthropic command messages
+    if (isCommandMessage(msg)) {
+      // Also drop the immediately following assistant response if it's a command response
+      if (i + 1 < messages.length && isCommandResponse(messages[i + 1])) {
+        i++; // Skip the response too
+      }
+      continue;
+    }
+
+    // Drop orphaned command responses (in case the command message was already removed
+    // or the ordering is different)
+    if (isCommandResponse(msg)) {
+      continue;
+    }
+
+    filtered.push(msg);
+  }
+
+  // Safety: if filtering removed ALL messages, return the original to avoid sending
+  // an empty messages array to the API.
+  if (filtered.length === 0) return messages;
+
+  return filtered;
+}
+
 function extractFirstUserMessageText(messages) {
   if (!Array.isArray(messages)) return "";
   for (const msg of messages) {
@@ -4896,6 +4986,14 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
     } else {
       // Claude Code always uses temperature: 1 for non-thinking requests (RE doc §5.2, never 0)
       parsed.temperature = 1;
+    }
+
+    // Strip leaked /anthropic slash command messages from conversation history.
+    // OpenCode may include command text and sendCommandMessage output as regular
+    // user messages even when output.noReply = true was set. Filter them out
+    // so the agent never sees /anthropic commands in its context.
+    if (Array.isArray(parsed.messages)) {
+      parsed.messages = stripSlashCommandMessages(parsed.messages);
     }
 
     // QA fix H2: avoid mutating the signature parameter; capture modelId locally

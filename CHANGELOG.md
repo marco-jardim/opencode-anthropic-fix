@@ -2,6 +2,16 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.0.39] — 2026-03-31
+
+### Bug Fixes
+
+- **Slash command context leak** — `/anthropic` command text and `sendCommandMessage` output were leaking into the API messages array, causing the agent to see and respond to internal plugin commands. Added `stripSlashCommandMessages()` in `transformRequestBody()` that strips user messages starting with `/anthropic` and their associated `▣ Anthropic` responses before sending to the API.
+
+### Tests
+
+- 8 new slash command stripping tests (543 total)
+
 ## [0.0.38] — 2026-03-31
 
 ### Token Economy

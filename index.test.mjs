@@ -4295,3 +4295,209 @@ describe("adaptive 1M context", () => {
     expect(init.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slash Command Message Stripping
+// ---------------------------------------------------------------------------
+describe("slash command message stripping", () => {
+  let fetchFn;
+  let client;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    loadAccounts.mockResolvedValue(null);
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "test-refresh",
+      access: "test-access",
+      expires: Date.now() + 3600_000,
+    });
+
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+    fetchFn = result.fetch;
+  });
+
+  it("strips user message starting with /anthropic from conversation", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi there" },
+      { role: "user", content: "/anthropic switch 2" },
+      { role: "assistant", content: "▣ Anthropic\n\nSwitched active account to #2." },
+      { role: "user", content: "Now do something" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    // The /anthropic message and its ▣ Anthropic response should be gone
+    expect(parsed.messages).toHaveLength(3);
+    expect(parsed.messages[0].content).toBe("Hello");
+    expect(parsed.messages[1].content).toBe("Hi there");
+    expect(parsed.messages[2].content).toBe("Now do something");
+  });
+
+  it("strips /anthropic command with array content blocks", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: [{ type: "text", text: "/anthropic stats" }] },
+      { role: "assistant", content: [{ type: "text", text: "▣ Anthropic Stats\n\nSession: 5 turns" }] },
+      { role: "user", content: [{ type: "text", text: "Continue working" }] },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.messages).toHaveLength(1);
+    expect(parsed.messages[0].content[0].text).toBe("Continue working");
+  });
+
+  it("strips multiple /anthropic commands from conversation", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "/anthropic config" },
+      { role: "assistant", content: "▣ Anthropic Config\n\nemulation: on" },
+      { role: "user", content: "Write a function" },
+      { role: "assistant", content: "Here is the function..." },
+      { role: "user", content: "/anthropic betas add web-search" },
+      { role: "assistant", content: "▣ Anthropic Betas\n\nAdded: web-search" },
+      { role: "user", content: "Now use web search" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.messages).toHaveLength(3);
+    expect(parsed.messages[0].content).toBe("Write a function");
+    expect(parsed.messages[1].content).toBe("Here is the function...");
+    expect(parsed.messages[2].content).toBe("Now use web search");
+  });
+
+  it("preserves messages that mention /anthropic but don't start with it", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "How do I use /anthropic commands?" },
+      { role: "assistant", content: "You can type /anthropic followed by a subcommand." },
+      { role: "user", content: "Thanks!" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    // All 3 messages preserved — none start with /anthropic
+    expect(parsed.messages).toHaveLength(3);
+    expect(parsed.messages[0].content).toBe("How do I use /anthropic commands?");
+    expect(parsed.messages[2].content).toBe("Thanks!");
+  });
+
+  it("does not strip non-command messages", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "Hello world" },
+      { role: "assistant", content: "Hello!" },
+      { role: "user", content: "What is 2+2?" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.messages).toHaveLength(3);
+  });
+
+  it("handles /anthropic with leading whitespace", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "  /anthropic switch 1" },
+      { role: "assistant", content: "▣ Anthropic\n\nSwitched." },
+      { role: "user", content: "Continue" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.messages).toHaveLength(1);
+    expect(parsed.messages[0].content).toBe("Continue");
+  });
+
+  it("does not return empty messages array when all messages are commands", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "/anthropic config" },
+      { role: "assistant", content: "▣ Anthropic Config\n\nDone." },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    // Safety: returns original messages rather than empty array
+    expect(parsed.messages.length).toBeGreaterThan(0);
+  });
+
+  it("strips orphaned ▣ Anthropic response without preceding command", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "▣ Anthropic\n\nSome leftover command output" },
+      { role: "user", content: "Do something" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.messages).toHaveLength(2);
+    expect(parsed.messages[0].content).toBe("Hello");
+    expect(parsed.messages[1].content).toBe("Do something");
+  });
+});
