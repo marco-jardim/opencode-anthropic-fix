@@ -2723,10 +2723,15 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     // Auto-escalate adaptive context on prompt_too_long so the retry
                     // includes the 1M beta header (if model supports it).
                     if (config.adaptive_context?.enabled) {
-                      forceEscalateAdaptiveContext();
-                      toast("⬡ 1M context force-activated (prompt too long)", "warning", {
-                        debounceKey: "adaptive-ctx",
-                      }).catch(() => {});
+                      const stateChanged = forceEscalateAdaptiveContext();
+                      if (stateChanged) {
+                        // Invalidate cached adaptive decision so the retry loop
+                        // re-evaluates with the new active=true state.
+                        _adaptiveDecisionMade = false;
+                        toast("⬡ 1M context force-activated (prompt too long)", "warning", {
+                          debounceKey: "adaptive-ctx",
+                        }).catch(() => {});
+                      }
                     }
                     try {
                       const parsedBody = JSON.parse(body);
@@ -3309,7 +3314,7 @@ function estimatePromptTokens(bodyString) {
  * @returns {boolean}
  */
 function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
-  // Non-adaptive: use static check
+  // Non-adaptive: use static check (only explicit "1m" models)
   if (!adaptiveConfig.enabled) {
     return hasOneMillionContext(model);
   }
@@ -3319,8 +3324,8 @@ function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
     return false;
   }
 
-  // Model must be eligible for 1M context at all
-  if (!hasOneMillionContext(model)) {
+  // Model must be eligible for 1M context at all (includes Opus 4.6)
+  if (!isEligibleFor1MContext(model)) {
     return false;
   }
 
@@ -3329,10 +3334,25 @@ function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
 
   if (adaptiveContextState.active) {
     // Currently active — consider de-escalation
-    // Don't de-escalate if error-escalated (sticky)
+
+    // Error-escalated: sticky for ERROR_STICKY_TURNS turns, then allow de-escalation
+    // if prompt has dropped well below threshold (prevents permanent 1M lock-in).
+    const ERROR_STICKY_TURNS = 5;
     if (adaptiveContextState.escalatedByError) {
-      return true;
+      if (turnsSinceTransition < ERROR_STICKY_TURNS) {
+        return true; // Still within sticky window
+      }
+      // Past sticky window: allow de-escalation if tokens dropped significantly
+      // (below 75% of deescalation threshold to avoid flapping)
+      if (estimatedTokens < adaptiveConfig.deescalation_threshold * 0.75) {
+        adaptiveContextState.active = false;
+        adaptiveContextState.escalatedByError = false;
+        adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
+        return false;
+      }
+      return true; // Still high enough to keep 1M
     }
+
     // Hysteresis: require at least 2 turns before considering de-escalation
     if (turnsSinceTransition < 2) {
       return true;
@@ -3362,13 +3382,17 @@ function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
 
 /**
  * Force-escalate adaptive context (e.g. after prompt_too_long error).
+ * Returns true so callers can invalidate cached decisions.
+ * @returns {boolean}
  */
 function forceEscalateAdaptiveContext() {
+  const wasActive = adaptiveContextState.active;
   if (!adaptiveContextState.active) {
     adaptiveContextState.active = true;
     adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
   }
   adaptiveContextState.escalatedByError = true;
+  return !wasActive; // true if state actually changed
 }
 
 const MODEL_PRICING = {
@@ -3985,12 +4009,24 @@ function isAdaptiveThinkingModel(model) {
 }
 
 /**
- * @param {string | undefined} body
+ * Check if a model is eligible for 1M context (can receive context-1m beta).
+ * This includes models with explicit "1m" in the name AND Opus 4.6.
+ * @param {string} model
+ * @returns {boolean}
+ */
+function isEligibleFor1MContext(model) {
+  return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model) || isOpus46Model(model);
+}
+
+/**
+ * Check if a model should ALWAYS use 1M context (static mode, no adaptive gating).
+ * Only models with explicit "1m" in the name — NOT bare Opus 4.6.
+ * When adaptive_context is enabled, Opus 4.6 uses the adaptive decision instead.
+ * @param {string} model
  * @returns {boolean}
  */
 function hasOneMillionContext(model) {
-  // Models with explicit 1m suffix, or Opus 4.6 (1M by default since v2.1.75).
-  return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model) || isOpus46Model(model);
+  return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model);
 }
 
 /**

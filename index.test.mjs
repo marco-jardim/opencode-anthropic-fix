@@ -4241,3 +4241,57 @@ describe("override_model_limits", () => {
     expect(provider.models["claude-sonnet-4-1m"].limit.context).toBe(200_000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Adaptive 1M Context
+// ---------------------------------------------------------------------------
+describe("adaptive 1M context", () => {
+  let fetchFn;
+  let client;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    loadAccounts.mockResolvedValue(null);
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "test-refresh",
+      access: "test-access",
+      expires: Date.now() + 3600_000,
+    });
+
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+    fetchFn = result.fetch;
+  });
+
+  it("does NOT send context-1m for bare Opus 4.6 when adaptive is disabled (default test config)", async () => {
+    // The test harness sets adaptive_context.enabled = false.
+    // Bare Opus 4.6 (no "1m" suffix) should NOT get context-1m in static mode.
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-4-6", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
+  });
+
+  it("STILL sends context-1m for explicit 1m models when adaptive is disabled", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-1m", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+  });
+});
