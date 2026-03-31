@@ -14,6 +14,14 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 - **Cache TTL session latching** — cache policy latched at first request for session stability.
 - **Title generator cache skip** — title generator requests skip cache_control breakpoints (fire-and-forget queries don't benefit from caching).
 
+### Adaptive 1M Context Fix
+
+Three bugs fixed in the adaptive context auto-toggle system:
+
+1. **Eligibility vs always-on confusion** — `hasOneMillionContext()` returned `true` for all Opus 4.6 models, keeping 1M always-on even when adaptive context was supposed to gate it. Split into `isEligibleFor1MContext()` (includes Opus 4.6) and `hasOneMillionContext()` (only explicit "-1m" suffix models).
+2. **Sticky error escalation** — `escalatedByError` (set after `prompt_too_long`) was permanent until session compaction. Now clears after 5 turns if tokens drop below 75% of the de-escalation threshold.
+3. **Cached decision invalidation** — `forceEscalateAdaptiveContext()` during `prompt_too_long` retry didn't reset the cached `_adaptiveOverrideForRequest`, so the retry used the stale (non-escalated) decision. Now resets `_adaptiveDecisionMade = false` after force-escalation.
+
 ### Configuration
 
 New `token_economy` config section in `anthropic-auth.json`:
@@ -32,7 +40,7 @@ New `/anthropic set` commands: `token-efficient-tools`, `redact-thinking`, `conn
 
 ### Tests
 
-- All 533 tests passing
+- All 535 tests passing (533 original + 2 new adaptive context tests)
 
 ## [0.0.37] — 2026-03-31
 
