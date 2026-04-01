@@ -2308,15 +2308,14 @@ describe("fetch interceptor — account exhaustion", () => {
     expect(mockFetch).toHaveBeenCalledTimes(3);
   });
 
-  it.each([
-    { status: 529, errorType: "overloaded_error", errorMsg: "Server is overloaded" },
-    { status: 503, errorType: "service_unavailable", errorMsg: "temporarily unavailable" },
-  ])("retries $status up to 2 times then returns directly", async ({ status, errorType, errorMsg }) => {
+  it("retries 503 up to 2 times then returns directly", async () => {
     const fetchFn = await setupFetchFn(client, [{}, {}]);
 
-    // 529/503 are retried up to 2 times (RE doc §5.5)
+    // 503 is retried up to 2 times (RE doc §5.5)
     const makeErrorResponse = () =>
-      new Response(JSON.stringify({ error: { type: errorType, message: errorMsg } }), { status });
+      new Response(JSON.stringify({ error: { type: "service_unavailable", message: "temporarily unavailable" } }), {
+        status: 503,
+      });
     mockFetch.mockResolvedValueOnce(makeErrorResponse());
     mockFetch.mockResolvedValueOnce(makeErrorResponse());
     mockFetch.mockResolvedValueOnce(makeErrorResponse());
@@ -2326,9 +2325,38 @@ describe("fetch interceptor — account exhaustion", () => {
       body: JSON.stringify({ messages: [] }),
     });
 
-    expect(response.status).toBe(status);
+    expect(response.status).toBe(503);
     // 1 initial + 2 retries = 3 total attempts
     expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries 529 up to 2 times then attempts quota-aware account switch", async () => {
+    // Give both accounts valid tokens so token refresh doesn't trigger extra fetch calls
+    const expires = Date.now() + 3600_000;
+    const fetchFn = await setupFetchFn(client, [
+      { access: "access-1", expires },
+      { access: "access-2", expires },
+    ]);
+
+    // 529 with 2 accounts: after 2 retries on account 0, overload recovery
+    // switches to account 1 for one more attempt.
+    // The background pollOAuthUsage also fires one fetch call on success.
+    const makeErrorResponse = () =>
+      new Response(JSON.stringify({ error: { type: "overloaded_error", message: "Server is overloaded" } }), {
+        status: 529,
+      });
+    // Use mockResolvedValue for unlimited 529 responses (covers API + background poll calls)
+    mockFetch.mockResolvedValue(makeErrorResponse());
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    expect(response.status).toBe(529);
+    // 3 on account 0 + 1 on account 1 + 1 background poll = 5
+    // (background poll is fire-and-forget so timing may vary)
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(4);
   });
 
   it("returns 500 directly without switching accounts", async () => {

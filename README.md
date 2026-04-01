@@ -51,9 +51,19 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Runtime config + custom betas** &mdash; `/anthropic set`, `/anthropic config`, and `/anthropic betas` slash commands for live feature toggling without restarting OpenCode
 - **Files API integration** &mdash; upload, list, download, and manage files via `/anthropic files` with endpoint/content-scoped `files-api-2025-04-14` beta injection
 - **Code execution support** &mdash; available via explicit custom beta opt-in (`code-execution-2025-08-25`), not auto-enabled
-- **Deep QA conformance** &mdash; 491 tests across 11 test files, including 40 regression tests validating every header, body field, OAuth parameter, beta flag, system prompt block, response handling path, and telemetry schema against the [reverse-engineering doc](docs/claude-code-reverse-engineering.md)
+- **Deep QA conformance** &mdash; 680+ tests across 26 test files, including 40 regression tests validating every header, body field, OAuth parameter, beta flag, system prompt block, response handling path, and telemetry schema against the [reverse-engineering doc](docs/claude-code-reverse-engineering.md)
 - **Prompt caching with 1h TTL** &mdash; extended cache TTL on system prompt blocks, auto-disabled if API rejects; cache hit rate tracking with configurable warning threshold
+- **API preconnect** &mdash; fire-and-forget HEAD request on init to pre-warm TCP+TLS connection, skipped when proxy/mTLS detected
+- **8K default output cap** &mdash; limits `max_tokens` to 8K by default, auto-escalates to 64K after output truncation, resets after one turn
+- **Context overflow auto-recovery** &mdash; parses structured `prompt_too_long` errors to auto-reduce `max_tokens` before falling back to message trimming
+- **Cache break detection** &mdash; hashes system prompt and tool schemas per turn, alerts when `cache_read_input_tokens` drops >2K
+- **`/anthropic context` command** &mdash; token breakdown by role, tool_result grouping, duplicate content detection via SHA-256
+- **Token budget parsing** &mdash; natural-language budget expressions (`+500k`, `use 2M tokens`) with system prompt injection and diminishing returns detection
+- **Microcompact context trimming** &mdash; injects `clear_tool_uses` / `clear_thinking` betas at >80% context utilization
+- **FG/BG request classification** &mdash; reduced retry budget for background requests (title generation, short queries)
+- **Smart 529 overload recovery** &mdash; quota-aware account switching on overload exhaustion with cooldown and progressive error messaging
 - **Proactive rate limit detection** &mdash; reads `anthropic-ratelimit-unified-*-utilization` headers (tokens, requests, input-tokens) and applies health penalties before hitting 429
+- **OAuth usage polling** &mdash; periodic polling of `/api/oauth/usage` endpoint with progressive warning toasts (caution/warning/danger)
 - **529/503 retry with Stainless backoff** &mdash; service-wide overload errors retried up to 2 times using the same exponential backoff formula as the official SDK
 - **OAuth CSRF protection** &mdash; state parameter stored and validated on callback, independent from PKCE verifier
 - **Telemetry emulation (opt-in)** &mdash; minimal `tengu_started`/`tengu_exit` events matching Claude Code's schema; disabled by default for privacy
@@ -466,6 +476,67 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
     "quiet": false,
     // Minimum seconds between account-switch toasts (0-300)
     "debounce_seconds": 30,
+  },
+
+  // API preconnect: fire-and-forget HEAD to pre-warm TCP+TLS on init.
+  // Skipped automatically when proxy/mTLS environment is detected.
+  "preconnect": {
+    "enabled": true,
+    "timeout_ms": 10000,
+  },
+
+  // Output cap: default max_tokens per request. Escalates to 64K
+  // after stop_reason: "max_tokens", then resets after one turn.
+  "output_cap": {
+    "enabled": true,
+    "default_max_tokens": 8000,
+    "escalated_max_tokens": 64000,
+  },
+
+  // Overflow recovery: auto-reduce max_tokens when the API returns
+  // a structured "prompt_too_long" error, before falling back to
+  // message trimming.
+  "overflow_recovery": {
+    "enabled": true,
+    "safety_margin": 1000,
+  },
+
+  // Cache break detection: toast alert when cache_read_input_tokens
+  // drops significantly between turns (system prompt or tool change).
+  "cache_break_detection": {
+    "enabled": true,
+    "alert_threshold": 2000,
+  },
+
+  // Request classification: reduced retry budget for background
+  // requests (title generation, short context queries).
+  "request_classification": {
+    "enabled": true,
+    "background_max_service_retries": 0,
+    "background_max_should_retries": 1,
+  },
+
+  // Token budget: parse natural-language budget expressions in user
+  // messages (e.g. "+500k", "use 2M tokens"). Disabled by default.
+  "token_budget": {
+    "enabled": false,
+    "default": 0,
+    "completion_threshold": 0.9,
+  },
+
+  // Microcompact: inject clear_tool_uses/clear_thinking betas
+  // when context utilization exceeds threshold_percent.
+  "microcompact": {
+    "enabled": true,
+    "threshold_percent": 80,
+  },
+
+  // Overload recovery: quota-aware account switching on 529
+  // exhaustion, with cooldown and error messaging.
+  "overload_recovery": {
+    "enabled": true,
+    "default_cooldown_ms": 60000,
+    "poll_quota_on_overload": true,
   },
 }
 ```

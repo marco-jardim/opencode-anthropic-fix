@@ -626,6 +626,37 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 
     // /anthropic stats — show enhanced session statistics
     if (primary === "stats") {
+      // Handle reset subcommand
+      const secondary = (args[1] || "").toLowerCase();
+      if (secondary === "reset") {
+        sessionMetrics.turns = 0;
+        sessionMetrics.totalInput = 0;
+        sessionMetrics.totalOutput = 0;
+        sessionMetrics.totalCacheRead = 0;
+        sessionMetrics.totalCacheWrite = 0;
+        sessionMetrics.totalWebSearchRequests = 0;
+        sessionMetrics.recentCacheRates = [];
+        sessionMetrics.sessionCostUsd = 0;
+        sessionMetrics.costBreakdown = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        sessionMetrics.sessionStartTime = Date.now();
+        sessionMetrics.lastQuota = {
+          tokens: 0,
+          requests: 0,
+          inputTokens: 0,
+          updatedAt: 0,
+          fiveHour: { utilization: 0, resets_at: null },
+          sevenDay: { utilization: 0, resets_at: null },
+          lastPollAt: 0,
+        };
+        sessionMetrics.lastStopReason = null;
+        sessionMetrics.perModel = {};
+        sessionMetrics.lastModelId = null;
+        sessionMetrics.lastRequestBody = null;
+        sessionMetrics.tokenBudget = { limit: 0, used: 0, continuations: 0, outputHistory: [] };
+        await sendCommandMessage(input.sessionID, "\u25a3 Anthropic\n\nStats reset.");
+        return;
+      }
+
       const avgRate = getAverageCacheHitRate();
       const totalTokens =
         sessionMetrics.totalInput +
@@ -679,6 +710,17 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
         lines.push(`Burn rate: $${(burnRate * 60).toFixed(2)}/hr`);
       }
 
+      // Per-model breakdown (only show when multiple models used)
+      const modelIds = Object.keys(sessionMetrics.perModel);
+      if (modelIds.length > 1) {
+        lines.push("", "Per-model breakdown:");
+        for (const mid of modelIds) {
+          const pm = sessionMetrics.perModel[mid];
+          const totalTk = pm.input + pm.output + pm.cacheRead + pm.cacheWrite;
+          lines.push(`  ${mid}: ${totalTk.toLocaleString()} tokens, $${pm.costUsd.toFixed(4)} (${pm.turns} turns)`);
+        }
+      }
+
       const maxBudget = parseFloat(process.env.OPENCODE_ANTHROPIC_MAX_BUDGET_USD || "0");
       if (maxBudget > 0) {
         const pct = (sessionMetrics.sessionCostUsd / maxBudget) * 100;
@@ -703,6 +745,27 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
         quotaParts.push(`requests: ${(q.requests * 100).toFixed(0)}%`);
         quotaParts.push(`input-tokens: ${(q.inputTokens * 100).toFixed(0)}%`);
         lines.push("", `Rate limit utilization: ${quotaParts.join(", ")}`);
+      }
+
+      // Usage endpoint data (A6)
+      if (sessionMetrics.lastQuota.lastPollAt > 0) {
+        const q5h = sessionMetrics.lastQuota.fiveHour;
+        const q7d = sessionMetrics.lastQuota.sevenDay;
+        const pollAge = Math.round((Date.now() - sessionMetrics.lastQuota.lastPollAt) / 60_000);
+        lines.push("", `Usage endpoint (${pollAge}m ago):`);
+        lines.push(`  5-hour: ${q5h.utilization.toFixed(0)}% used${q5h.resets_at ? ` (resets ${q5h.resets_at})` : ""}`);
+        lines.push(`  7-day:  ${q7d.utilization.toFixed(0)}% used${q7d.resets_at ? ` (resets ${q7d.resets_at})` : ""}`);
+      }
+
+      // Token budget display (A9)
+      const tb = sessionMetrics.tokenBudget;
+      if (tb.limit > 0) {
+        const pct = ((tb.used / tb.limit) * 100).toFixed(0);
+        lines.push("", `Token budget: ${tb.used.toLocaleString()} / ${tb.limit.toLocaleString()} (${pct}%)`);
+        lines.push(`  Continuations: ${tb.continuations}`);
+        if (detectDiminishingReturns(tb.outputHistory)) {
+          lines.push(`  Warning: Diminishing returns detected (last 3 outputs < 500 tokens)`);
+        }
       }
 
       await sendCommandMessage(input.sessionID, lines.join("\n"));
@@ -740,6 +803,49 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       } else if (maxUtil >= 0.7) {
         lines.push("", "Utilization is moderate. Consider monitoring if sustained.");
       }
+      await sendCommandMessage(input.sessionID, lines.join("\n"));
+      return;
+    }
+
+    // /anthropic context — show token breakdown of last request
+    if (primary === "context") {
+      if (!sessionMetrics.lastRequestBody) {
+        await sendCommandMessage(
+          input.sessionID,
+          "▣ Anthropic Context\n\nNo request captured yet. Make at least one API request first.",
+        );
+        return;
+      }
+
+      const analysis = analyzeRequestContext(sessionMetrics.lastRequestBody);
+      const lines = [
+        "▣ Anthropic Context Breakdown (estimated)",
+        "",
+        `System:          ${analysis.systemTokens.toLocaleString()} tokens`,
+        `User messages:   ${analysis.userTokens.toLocaleString()} tokens`,
+      ];
+
+      if (analysis.toolResultTokens > 0) {
+        lines.push(`  tool_result:   ${analysis.toolResultTokens.toLocaleString()} tokens`);
+        const toolNames = Object.keys(analysis.toolBreakdown).sort(
+          (a, b) => analysis.toolBreakdown[b].tokens - analysis.toolBreakdown[a].tokens,
+        );
+        for (const name of toolNames) {
+          const tb = analysis.toolBreakdown[name];
+          lines.push(`    ${name}: ${tb.tokens.toLocaleString()} tokens  (${tb.count} blocks)`);
+        }
+      }
+
+      lines.push(`Assistant:       ${analysis.assistantTokens.toLocaleString()} tokens`);
+      lines.push(`Total:           ${analysis.totalTokens.toLocaleString()} tokens`);
+
+      if (analysis.duplicates.count > 0) {
+        lines.push(
+          "",
+          `\u26a0 ${analysis.duplicates.count} duplicate file contents detected (~${analysis.duplicates.wastedTokens.toLocaleString()} tokens wasted)`,
+        );
+      }
+
       await sendCommandMessage(input.sessionID, lines.join("\n"));
       return;
     }
@@ -2180,6 +2286,9 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
             sessionId: signatureSessionId,
           });
 
+          // Pre-warm TCP+TLS connection to Anthropic API (fire-and-forget)
+          preconnectApi(config);
+
           return {
             apiKey: "",
             /**
@@ -2272,8 +2381,18 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
               let serviceWideRetryCount = 0; // Track 529/503 retries (max 2 per RE doc §5.5)
               let shouldRetryCount = 0; // Track x-should-retry forced retries (cap at 3)
               let consecutive529Count = 0;
+              // Classify request for retry budget (A8)
+              const requestClass =
+                config.request_classification?.enabled !== false ? classifyApiRequest(requestInit.body) : "foreground";
+              const maxServiceRetries =
+                requestClass === "background"
+                  ? (config.request_classification?.background_max_service_retries ?? 0)
+                  : 2;
+              const maxShouldRetries =
+                requestClass === "background" ? (config.request_classification?.background_max_should_retries ?? 1) : 3;
               let _adaptiveDecisionMade = false; // Ensure adaptive context decision is made only once per logical request
               let _adaptiveOverrideForRequest; // Cached adaptive override for all retry attempts
+              let _overloadRecoveryAttempted = false; // Guard: only one quota-aware switch per request
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account — use pinned account on first attempt if available
                 const account =
@@ -2455,6 +2574,25 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 // Token economy config (resolved once, passed to beta builder)
                 const _tokenEconomy = config.token_economy || {};
 
+                // Microcompact: inject clear betas at high context utilization
+                let _microcompactBetas = null;
+                if (requestInit.body) {
+                  const estimatedTokens = estimatePromptTokens(requestInit.body);
+                  if (shouldMicrocompact(estimatedTokens, config)) {
+                    _microcompactBetas = buildMicrocompactBetas();
+                    if (!microcompactState.active) {
+                      microcompactState.active = true;
+                      microcompactState.lastActivatedTurn = sessionMetrics.turns;
+                      toast(`Microcompact activated at ~${Math.round(estimatedTokens / 1000)}K tokens`, "info", {
+                        debounceKey: "microcompact",
+                      }).catch(() => {});
+                    }
+                  } else if (microcompactState.active) {
+                    // Deactivate if tokens dropped below threshold
+                    microcompactState.active = false;
+                  }
+                }
+
                 let computedBetaHeader = buildAnthropicBetaHeader(
                   "",
                   getSignatureEmulationEnabled(),
@@ -2466,6 +2604,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   _reqHasFileRefs,
                   _adaptiveOverride,
                   _tokenEconomy,
+                  _microcompactBetas, // NEW
                 );
 
                 // Beta header latching: once a beta has been sent in this session,
@@ -2519,8 +2658,24 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     accountId: getAccountIdentifier(account),
                   },
                   computedBetaHeader,
+                  config,
                 );
                 logTransformedSystemPrompt(body);
+
+                // Capture request body for /anthropic context (2MB cap)
+                if (typeof body === "string" && body.length <= 2_000_000) {
+                  sessionMetrics.lastRequestBody = body;
+                } else if (typeof body === "string") {
+                  sessionMetrics.lastRequestBody = body.slice(0, 2_000_000);
+                }
+
+                // Pre-call: extract cache source hashes for cache break detection
+                if (config.cache_break_detection?.enabled && typeof body === "string") {
+                  const currentHashes = extractCacheSourceHashes(body);
+                  if (currentHashes.size > 0) {
+                    cacheBreakState._pendingHashes = currentHashes;
+                  }
+                }
 
                 // Build headers with the selected account's token
                 const requestHeaders = buildRequestHeaders(
@@ -2720,6 +2875,45 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     !requestInit._reactiveCompactAttempted
                   ) {
                     debugLog("prompt too long — attempting reactive message trimming");
+
+                    // --- Overflow recovery: parse structured error and reduce max_tokens ---
+                    // This is attempted BEFORE message trimming. If we can parse the exact
+                    // numbers from the error, we reduce max_tokens to fit and retry without
+                    // losing any conversation history.
+                    if (config.overflow_recovery?.enabled && !requestInit._overflowRecoveryAttempted) {
+                      const overflow = parseContextLimitError(errorBody);
+                      if (overflow) {
+                        const margin = config.overflow_recovery.safety_margin ?? 1_000;
+                        const safeMaxTokens = computeSafeMaxTokens(overflow.input, overflow.limit, margin);
+                        if (safeMaxTokens > 0) {
+                          debugLog("overflow recovery: reducing max_tokens", {
+                            original: overflow.maxTokens,
+                            safe: safeMaxTokens,
+                            input: overflow.input,
+                            limit: overflow.limit,
+                            margin,
+                          });
+                          try {
+                            const recoveryBody = JSON.parse(body);
+                            recoveryBody.max_tokens = safeMaxTokens;
+                            requestInit.body = JSON.stringify(recoveryBody);
+                            // Update `body` variable for subsequent iterations
+                            body = requestInit.body;
+                            requestInit._overflowRecoveryAttempted = true;
+                            attempt--;
+                            toast(
+                              `Context overflow: reduced max_tokens ${overflow.maxTokens.toLocaleString()} → ${safeMaxTokens.toLocaleString()}`,
+                              "warning",
+                              { debounceKey: "overflow-recovery" },
+                            ).catch(() => {});
+                            continue;
+                          } catch {
+                            // Body parse failed, fall through to message trimming
+                          }
+                        }
+                      }
+                    }
+
                     // Auto-escalate adaptive context on prompt_too_long so the retry
                     // includes the 1M beta header (if model supports it).
                     if (config.adaptive_context?.enabled) {
@@ -2826,8 +3020,8 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   const accountSpecific = isAccountSpecificError(response.status, errorBody);
 
                   // x-should-retry: true forces a retry for service-wide errors (RE doc §5.5)
-                  // Capped at 3 retries to prevent infinite loops (QA fix C1)
-                  if (shouldRetry === true && !accountSpecific && shouldRetryCount < 3) {
+                  // Capped at maxShouldRetries to prevent infinite loops (QA fix C1)
+                  if (shouldRetry === true && !accountSpecific && shouldRetryCount < maxShouldRetries) {
                     shouldRetryCount++;
                     const retryDelay = parseRetryAfterMsHeader(response) ?? parseRetryAfterHeader(response) ?? 2000;
                     debugLog("x-should-retry: true on service-wide error, sleeping before retry", {
@@ -2882,8 +3076,11 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   }
 
                   // 529 (overloaded) and 503 (service unavailable) — brief sleep-and-retry
-                  // per RE doc §5.5 (Stainless SDK retries 500+ codes up to 2 times)
-                  if ((response.status === 529 || response.status === 503) && serviceWideRetryCount < 2) {
+                  // per RE doc u00a75.5 (Stainless SDK retries 500+ codes up to maxServiceRetries times)
+                  if (
+                    (response.status === 529 || response.status === 503) &&
+                    serviceWideRetryCount < maxServiceRetries
+                  ) {
                     serviceWideRetryCount++;
 
                     // Track consecutive 529s for model fallback
@@ -2925,21 +3122,71 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     const baseDelay = Math.min(0.5 * Math.pow(2, serviceWideRetryCount), 8);
                     const jitter = 1 - Math.random() * 0.25;
                     const sleepMs = Math.round(baseDelay * jitter * 1000);
-                    debugLog("service-wide retryable error, sleeping before retry", {
+                    const retryLabel = response.status === 529 ? "overloaded" : "unavailable";
+                    debugLog(`service-wide ${retryLabel} error, sleeping before retry`, {
                       status: response.status,
                       attempt: serviceWideRetryCount,
+                      maxRetries: maxServiceRetries,
                       sleepMs,
                     });
+                    toast(
+                      `API ${retryLabel} (${response.status}): retry ${serviceWideRetryCount}/${maxServiceRetries} in ${(sleepMs / 1000).toFixed(1)}s`,
+                      "warning",
+                      { debounceKey: "service-retry" },
+                    ).catch(() => {});
                     await new Promise((r) => setTimeout(r, sleepMs));
                     // Decrement attempt so this retry doesn't consume an account slot
                     attempt--;
                     continue;
                   }
 
-                  // Non-retryable service-wide error — return to caller
-                  debugLog("service-wide response error, returning directly", {
-                    status: response.status,
-                  });
+                  // Non-retryable service-wide error — attempt quota-aware account switch for 529
+                  if (
+                    response.status === 529 &&
+                    accountManager &&
+                    account &&
+                    config.overload_recovery?.enabled !== false &&
+                    !_overloadRecoveryAttempted
+                  ) {
+                    _overloadRecoveryAttempted = true;
+                    const recovery = tryQuotaAwareAccountSwitch(account, accountManager, config);
+                    if (recovery.switched && recovery.nextAccount) {
+                      // Fire-and-forget: poll quota for the overloaded account in background
+                      if (config.overload_recovery?.poll_quota_on_overload && account?.access) {
+                        pollOAuthUsage(config, account.access).catch(() => {});
+                      }
+                      const fromName = account.email || `Account ${account.index + 1}`;
+                      const toName = recovery.nextAccount.email || `Account ${recovery.nextAccount.index + 1}`;
+                      const cooldownMin = Math.ceil(recovery.cooldownMs / 60_000);
+                      toast(`529 overloaded: ${fromName} → ${toName} (cooldown ${cooldownMin}m)`, "warning", {
+                        debounceKey: "overload-switch",
+                      }).catch(() => {});
+                      debugLog("overload recovery: retrying with new account", {
+                        from: account.index,
+                        to: recovery.nextAccount.index,
+                        cooldownMs: recovery.cooldownMs,
+                      });
+                      // Don't consume an attempt slot — this is a recovery switch
+                      attempt--;
+                      continue;
+                    }
+
+                    // Could not switch — build comprehensive error message and toast
+                    const errorMsg = buildOverloadErrorMessage(
+                      account,
+                      accountManager,
+                      serviceWideRetryCount,
+                      maxServiceRetries,
+                    );
+                    toast(errorMsg, "error", { debounceKey: "overload-exhausted" }).catch(() => {});
+                    debugLog("overload recovery: all accounts exhausted", {
+                      errorMsg,
+                    });
+                  } else {
+                    debugLog("service-wide response error, returning directly", {
+                      status: response.status,
+                    });
+                  }
                   return transformResponse(response);
                 }
 
@@ -3015,6 +3262,86 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                         toast(parts.join(" | "), "info", { debounceKey: `usage-turn-${sessionMetrics.turns}` }).catch(
                           () => {},
                         );
+                      }
+
+                      // Cache break detection (post-call)
+                      if (config.cache_break_detection?.enabled) {
+                        const cacheRead = usage.cacheReadTokens || 0;
+                        const threshold = config.cache_break_detection.alert_threshold ?? 2_000;
+
+                        // Only alert after the first turn (need a baseline)
+                        if (
+                          cacheBreakState.prevCacheRead > 0 &&
+                          cacheBreakState.prevCacheRead - cacheRead > threshold &&
+                          cacheBreakState.lastAlertTurn !== sessionMetrics.turns
+                        ) {
+                          const drop = cacheBreakState.prevCacheRead - cacheRead;
+                          let alertMsg = `Cache break detected (u2212${drop.toLocaleString()} tokens)`;
+
+                          // Identify changed sources if we have pending hashes
+                          if (cacheBreakState._pendingHashes && cacheBreakState.sourceHashes.size > 0) {
+                            const changedSources = detectCacheBreakSources(
+                              cacheBreakState._pendingHashes,
+                              cacheBreakState.sourceHashes,
+                            );
+                            if (changedSources.length > 0) {
+                              alertMsg += `: ${changedSources.join(", ")} changed`;
+                            }
+                          }
+
+                          toast(alertMsg, "warning", { debounceKey: "cache-break" }).catch(() => {});
+                          cacheBreakState.lastAlertTurn = sessionMetrics.turns;
+                        }
+
+                        cacheBreakState.prevCacheRead = cacheRead;
+                        // Store current hashes as baseline for next comparison
+                        if (cacheBreakState._pendingHashes) {
+                          cacheBreakState.sourceHashes = cacheBreakState._pendingHashes;
+                          delete cacheBreakState._pendingHashes;
+                        }
+                      }
+
+                      // Rate limit awareness: periodic usage endpoint polling (A6)
+                      const shouldPollUsage =
+                        sessionMetrics.turns % 10 === 0 ||
+                        Date.now() - sessionMetrics.lastQuota.lastPollAt > 5 * 60_000;
+                      if (shouldPollUsage && accessToken) {
+                        pollOAuthUsage(config, accessToken)
+                          .then(() => {
+                            // Check warning levels after poll
+                            const level5h = computeQuotaWarningLevel(sessionMetrics.lastQuota.fiveHour);
+                            const level7d = computeQuotaWarningLevel(sessionMetrics.lastQuota.sevenDay);
+                            const highestLevel =
+                              level5h === "danger" || level7d === "danger"
+                                ? "danger"
+                                : level5h === "warning" || level7d === "warning"
+                                  ? "warning"
+                                  : level5h === "caution" || level7d === "caution"
+                                    ? "caution"
+                                    : null;
+
+                            if (highestLevel === "danger") {
+                              toast(
+                                `Usage limit: \u226425% remaining (5h: ${sessionMetrics.lastQuota.fiveHour.utilization.toFixed(0)}%, 7d: ${sessionMetrics.lastQuota.sevenDay.utilization.toFixed(0)}%)`,
+                                "warning",
+                                { debounceKey: "usage-danger" },
+                              ).catch(() => {});
+                            } else if (highestLevel === "warning") {
+                              toast(
+                                `Usage limit: \u226450% remaining (5h: ${sessionMetrics.lastQuota.fiveHour.utilization.toFixed(0)}%, 7d: ${sessionMetrics.lastQuota.sevenDay.utilization.toFixed(0)}%)`,
+                                "warning",
+                                { debounceKey: "usage-warning" },
+                              ).catch(() => {});
+                            } else if (highestLevel === "caution" && !quotaWarningState.cautionShown) {
+                              quotaWarningState.cautionShown = true;
+                              toast(
+                                `Usage limit: \u226475% remaining (5h: ${sessionMetrics.lastQuota.fiveHour.utilization.toFixed(0)}%, 7d: ${sessionMetrics.lastQuota.sevenDay.utilization.toFixed(0)}%)`,
+                                "info",
+                                { debounceKey: "usage-caution" },
+                              ).catch(() => {});
+                            }
+                          })
+                          .catch(() => {});
                       }
                     }
                   : null;
@@ -3178,6 +3505,14 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
       adaptiveContextState.escalatedByError = false;
 
+      // Reset cache break detection state on compaction
+      cacheBreakState.prevCacheRead = 0;
+      cacheBreakState.sourceHashes = new Map();
+      cacheBreakState.lastAlertTurn = 0;
+
+      microcompactState.active = false;
+      microcompactState.lastActivatedTurn = 0;
+
       // Inject Anthropic-specific context into compaction
       if (!accountManager) return;
       const account = accountManager.getCurrentAccount();
@@ -3206,7 +3541,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 // Session-level cache & cost tracking (Phase 4)
 // ---------------------------------------------------------------------------
 
-/** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, totalWebSearchRequests: number, recentCacheRates: number[], sessionCostUsd: number, costBreakdown: {input: number, output: number, cacheRead: number, cacheWrite: number}, sessionStartTime: number, lastQuota: {tokens: number, requests: number, inputTokens: number, updatedAt: number}}} */
+/** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, totalWebSearchRequests: number, recentCacheRates: number[], sessionCostUsd: number, costBreakdown: {input: number, output: number, cacheRead: number, cacheWrite: number}, sessionStartTime: number, lastQuota: {tokens: number, requests: number, inputTokens: number, updatedAt: number, fiveHour: {utilization: number, resets_at: string|null}, sevenDay: {utilization: number, resets_at: string|null}, lastPollAt: number}, lastStopReason: string | null, perModel: Record<string, {input: number, output: number, cacheRead: number, cacheWrite: number, costUsd: number, turns: number}>, lastModelId: string | null, lastRequestBody: string | null, tokenBudget: {limit: number, used: number, continuations: number, outputHistory: number[]}}} */
 const sessionMetrics = {
   turns: 0,
   totalInput: 0,
@@ -3218,7 +3553,27 @@ const sessionMetrics = {
   sessionCostUsd: 0,
   costBreakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   sessionStartTime: Date.now(),
-  lastQuota: { tokens: 0, requests: 0, inputTokens: 0, updatedAt: 0 },
+  lastQuota: {
+    tokens: 0,
+    requests: 0,
+    inputTokens: 0,
+    updatedAt: 0,
+    // Usage endpoint polling (A6)
+    fiveHour: { utilization: 0, resets_at: null },
+    sevenDay: { utilization: 0, resets_at: null },
+    lastPollAt: 0,
+  },
+  lastStopReason: null, // tracks most recent stop_reason for output cap escalation
+  perModel: {}, // Map<modelId, { input, output, cacheRead, cacheWrite, costUsd, turns }>
+  lastModelId: null,
+  lastRequestBody: null, // Last intercepted request body (JSON string, capped 2MB) for /anthropic context
+  /** Token budget tracking (A9) */
+  tokenBudget: {
+    limit: 0, // 0 = unset
+    used: 0, // accumulated output tokens
+    continuations: 0,
+    outputHistory: [], // last 5 output token deltas
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -3240,6 +3595,495 @@ const adaptiveContextState = {
   /** Set when escalation was triggered by a prompt_too_long error. */
   escalatedByError: false,
 };
+
+// ---------------------------------------------------------------------------
+// Cache break detection state (Phase 2, Task 2.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tracks cache source hashes and previous cache_read_input_tokens to detect
+ * cache breaks (e.g. system prompt or tool schema changes).
+ *
+ * @type {{ prevCacheRead: number, sourceHashes: Map<string, string>, lastAlertTurn: number }}
+ */
+const cacheBreakState = {
+  prevCacheRead: 0,
+  sourceHashes: new Map(),
+  lastAlertTurn: 0,
+};
+
+// ---------------------------------------------------------------------------
+// Microcompact state (Phase 3, Task 3.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tracks whether microcompact betas are currently active.
+ * @type {{ active: boolean, lastActivatedTurn: number }}
+ */
+const microcompactState = {
+  active: false,
+  lastActivatedTurn: 0,
+};
+
+/**
+ * Determine if microcompact betas should be injected based on estimated token usage.
+ * @param {number} estimatedTokens - Estimated prompt token count
+ * @param {object} config - Plugin config
+ * @returns {boolean}
+ */
+function shouldMicrocompact(estimatedTokens, config) {
+  if (!config.microcompact?.enabled) return false;
+  const thresholdPct = config.microcompact.threshold_percent ?? 80;
+  // Use the model's context window. Default to 200K if unknown.
+  // Adaptive context may escalate to 1M, but we use the base 200K for threshold
+  // to be conservative (microcompact at 160K tokens is still valuable).
+  const contextWindow = 200_000;
+  const threshold = contextWindow * (thresholdPct / 100);
+  return estimatedTokens >= threshold;
+}
+
+/**
+ * Build the list of microcompact betas to inject.
+ * @returns {string[]} Array of beta flag strings
+ */
+function buildMicrocompactBetas() {
+  return ["clear_tool_uses_20250919", "clear_thinking_20251015"];
+}
+
+/**
+ * Hash a string for cache source fingerprinting.
+ * @param {string} content
+ * @returns {string} 16-char hex hash
+ */
+function hashCacheSource(content) {
+  return createHashCrypto("sha256").update(content).digest("hex").slice(0, 16);
+}
+
+// ---------------------------------------------------------------------------
+// OAuth usage endpoint polling (A6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Poll the /api/oauth/usage endpoint for session/weekly utilization.
+ * Fire-and-forget: non-2xx responses are silently ignored.
+ * @param {object} config
+ * @param {string} accessToken
+ */
+async function pollOAuthUsage(config, accessToken) {
+  try {
+    const resp = await fetch("https://api.anthropic.com/api/oauth/usage", {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "anthropic-beta": "oauth-2025-04-20",
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!resp.ok) {
+      return;
+    }
+    const data = await resp.json();
+    if (data.five_hour) {
+      sessionMetrics.lastQuota.fiveHour = {
+        utilization: data.five_hour.utilization ?? 0,
+        resets_at: data.five_hour.resets_at ?? null,
+      };
+    }
+    if (data.seven_day) {
+      sessionMetrics.lastQuota.sevenDay = {
+        utilization: data.seven_day.utilization ?? 0,
+        resets_at: data.seven_day.resets_at ?? null,
+      };
+    }
+    sessionMetrics.lastQuota.lastPollAt = Date.now();
+  } catch {
+    // Polling is fire-and-forget; errors are silently swallowed.
+  }
+}
+
+/** @type {{ cautionShown: boolean }} */
+const quotaWarningState = { cautionShown: false };
+
+/**
+ * Compute warning level based on utilization percentage.
+ * @param {{ utilization: number }} quota - utilization is 0-100
+ * @returns {"danger" | "warning" | "caution" | null}
+ */
+function computeQuotaWarningLevel(quota) {
+  if (!quota || typeof quota.utilization !== "number") return null;
+  const remaining = 100 - quota.utilization;
+  if (remaining <= 25) return "danger";
+  if (remaining <= 50) return "warning";
+  if (remaining <= 75) return "caution";
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Overload recovery: quota-aware account switching on 529 exhaustion (3.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a comprehensive error message for 529/overloaded errors.
+ * Includes quota info, account status, and reset times.
+ *
+ * @param {object} account - Current account
+ * @param {object} accountManager - Account manager instance
+ * @param {number} serviceWideRetryCount - How many 529 retries were attempted
+ * @param {number} maxServiceRetries - Max allowed retries
+ * @returns {string}
+ */
+function buildOverloadErrorMessage(account, accountManager, serviceWideRetryCount, maxServiceRetries) {
+  const accountName = account?.email || `Account ${(account?.index ?? 0) + 1}`;
+  const totalAccounts = accountManager?.getAccountCount() ?? 1;
+  const parts = [
+    `Anthropic API overloaded (529).`,
+    `Retried ${serviceWideRetryCount}/${maxServiceRetries} times on ${accountName}.`,
+  ];
+
+  // Add quota information if available
+  const fh = sessionMetrics.lastQuota.fiveHour;
+  const sd = sessionMetrics.lastQuota.sevenDay;
+  if (fh?.utilization > 0 || sd?.utilization > 0) {
+    parts.push(
+      `Quota: 5h=${fh?.utilization?.toFixed(0) ?? "?"}%` +
+        (fh?.resets_at ? ` (resets ${formatResetTime(fh.resets_at)})` : "") +
+        `, 7d=${sd?.utilization?.toFixed(0) ?? "?"}%` +
+        (sd?.resets_at ? ` (resets ${formatResetTime(sd.resets_at)})` : ""),
+    );
+  }
+
+  if (totalAccounts > 1) {
+    parts.push(`Tried switching across ${totalAccounts} accounts — all exhausted or overloaded.`);
+  } else {
+    parts.push(`Only 1 account configured. Add more accounts with '/anthropic login' for automatic failover.`);
+  }
+
+  parts.push(`Wait a few minutes or switch models with a smaller context window.`);
+  return parts.join(" ");
+}
+
+/**
+ * Format a reset timestamp into a human-readable relative string.
+ * @param {string | null} isoTimestamp
+ * @returns {string}
+ */
+function formatResetTime(isoTimestamp) {
+  if (!isoTimestamp) return "unknown";
+  try {
+    const resetMs = new Date(isoTimestamp).getTime();
+    if (isNaN(resetMs)) return "unknown";
+    const diffMs = resetMs - Date.now();
+    if (diffMs <= 0) return "now";
+    const mins = Math.ceil(diffMs / 60_000);
+    if (mins < 60) return `~${mins}m`;
+    const hours = Math.round(mins / 60);
+    return `~${hours}h`;
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Attempt quota-aware account switch after 529 retries are exhausted.
+ * Polls quota, marks current account with cooldown, tries to switch.
+ *
+ * @param {object} account - Current (overloaded) account
+ * @param {object} accountManager - Account manager
+ * @param {object} config - Plugin config
+ * @returns {{ switched: boolean, nextAccount: object | null, cooldownMs: number }}
+ */
+function tryQuotaAwareAccountSwitch(account, accountManager, config) {
+  const result = { switched: false, nextAccount: null, cooldownMs: 0 };
+  if (!config.overload_recovery?.enabled) return result;
+
+  const defaultCooldown = config.overload_recovery.default_cooldown_ms ?? 60_000;
+
+  // Use cached quota data for smarter cooldown (no HTTP calls in retry path)
+  let cooldownMs = defaultCooldown;
+  const fh = sessionMetrics.lastQuota.fiveHour;
+  if (fh?.resets_at) {
+    try {
+      const resetMs = new Date(fh.resets_at).getTime();
+      if (!isNaN(resetMs) && resetMs > Date.now()) {
+        // Set cooldown to last until quota resets (capped at 30 min)
+        cooldownMs = Math.min(resetMs - Date.now(), 30 * 60_000);
+      }
+    } catch {
+      // Date parse failed, use default cooldown
+    }
+  }
+
+  // Mark current account with cooldown
+  if (account && accountManager) {
+    accountManager.markRateLimited(account, "RATE_LIMIT_EXCEEDED", cooldownMs);
+    result.cooldownMs = cooldownMs;
+  }
+
+  // Try to get a different account
+  if (accountManager && accountManager.getAccountCount() > 0) {
+    const nextAccount = accountManager.getCurrentAccount();
+    if (nextAccount && nextAccount.index !== account?.index) {
+      result.switched = true;
+      result.nextAccount = nextAccount;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Extract cache source hashes from a request body.
+ * Hashes system prompt blocks and tool schemas to identify what changed.
+ *
+ * @param {string} bodyStr - JSON request body
+ * @returns {Map<string, string>} source_id → hash
+ */
+function extractCacheSourceHashes(bodyStr) {
+  const hashes = new Map();
+  try {
+    const parsed = JSON.parse(bodyStr);
+
+    // Hash system prompt (excluding token budget blocks injected by injectTokenBudgetBlock)
+    if (Array.isArray(parsed.system)) {
+      const systemText = parsed.system
+        .filter((b) => !(b.text && b.text.startsWith("Token budget:")))
+        .map((b) => b.text || "")
+        .join("");
+      if (systemText) hashes.set("system_prompt", hashCacheSource(systemText));
+    } else if (typeof parsed.system === "string" && parsed.system) {
+      hashes.set("system_prompt", hashCacheSource(parsed.system));
+    }
+
+    // Hash tool schemas (by name)
+    if (Array.isArray(parsed.tools)) {
+      for (const tool of parsed.tools) {
+        if (tool.name) {
+          hashes.set(`tool:${tool.name}`, hashCacheSource(JSON.stringify(tool)));
+        }
+      }
+    }
+  } catch {
+    // Ignore parse errors
+  }
+
+  // LRU eviction: cap at 10 entries
+  if (hashes.size > 10) {
+    const entries = [...hashes.entries()];
+    return new Map(entries.slice(entries.length - 10));
+  }
+  return hashes;
+}
+
+/**
+ * Detect cache break by comparing current vs previous source hashes.
+ * @param {Map<string, string>} currentHashes
+ * @param {Map<string, string>} previousHashes
+ * @returns {string[]} Names of changed sources, or empty array
+ */
+function detectCacheBreakSources(currentHashes, previousHashes) {
+  if (previousHashes.size === 0) return []; // No baseline yet
+  const changed = [];
+  for (const [key, hash] of currentHashes) {
+    const prev = previousHashes.get(key);
+    if (prev && prev !== hash) {
+      changed.push(key);
+    }
+  }
+  // Check for removed sources
+  for (const key of previousHashes.keys()) {
+    if (!currentHashes.has(key)) {
+      changed.push(key);
+    }
+  }
+  return changed;
+}
+
+/**
+ * Parse the structured context limit error message from the Anthropic API.
+ * @param {string | null | undefined} msg - Error body text
+ * @returns {{ input: number, maxTokens: number, limit: number } | null}
+ */
+function parseContextLimitError(msg) {
+  if (!msg || typeof msg !== "string") return null;
+  const m = msg.match(/input length and `max_tokens` exceed context limit:\s*(\d+)\s*\+\s*(\d+)\s*>\s*(\d+)/);
+  if (!m) return null;
+  return { input: +m[1], maxTokens: +m[2], limit: +m[3] };
+}
+
+/**
+ * Compute a safe max_tokens value that fits within the context limit.
+ * @param {number} input - Input token count from error
+ * @param {number} limit - Context window limit from error
+ * @param {number} [margin=1000] - Safety margin to subtract
+ * @returns {number}
+ */
+function computeSafeMaxTokens(input, limit, margin = 1000) {
+  return Math.max(1, limit - input - margin);
+}
+
+/**
+ * Detect whether the environment uses a proxy or custom mTLS configuration.
+ * Pure predicate — no side effects.
+ * @returns {boolean}
+ */
+function isProxyOrMtlsEnvironment() {
+  const proxyVars = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY"];
+  const mtlsVars = ["NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE"];
+  for (const v of proxyVars) {
+    if (process.env[v]) return true;
+  }
+  for (const v of mtlsVars) {
+    if (process.env[v]) return true;
+  }
+  return false;
+}
+
+/**
+ * Fire-and-forget HEAD request to pre-warm TCP+TLS connection pool.
+ * Skips in proxy/mTLS environments where the HEAD may be intercepted.
+ * @param {import('./lib/config.mjs').AnthropicAuthConfig} config
+ */
+async function preconnectApi(config) {
+  if (!config.preconnect?.enabled) return;
+  if (isProxyOrMtlsEnvironment()) return;
+  try {
+    await Promise.race([
+      globalThis.fetch("https://api.anthropic.com", { method: "HEAD" }),
+      new Promise((_, r) =>
+        setTimeout(() => r(new Error("preconnect timeout")), config.preconnect.timeout_ms ?? 10_000),
+      ),
+    ]);
+  } catch {
+    /* fire-and-forget — never throws */
+  }
+}
+
+/**
+ * Classify an API request as foreground (user-initiated) or background
+ * (title generation, speculation). Background requests receive a reduced
+ * retry budget to preserve quota for user-facing work.
+ *
+ * @param {object|string} body - Parsed request body (or raw string to parse)
+ * @returns {"foreground" | "background"}
+ */
+function classifyApiRequest(body) {
+  try {
+    const parsed = typeof body === "string" ? JSON.parse(body) : body;
+    if (!parsed || typeof parsed !== "object") return "foreground";
+
+    const msgCount = parsed.messages?.length ?? 0;
+    const maxToks = parsed.max_tokens ?? 99999;
+
+    // Title generation signal: system prompt contains "Generate a short title"
+    const systemBlocks = Array.isArray(parsed.system) ? parsed.system : [];
+    const hasTitleSignal = systemBlocks.some(
+      (b) => typeof b.text === "string" && b.text.includes("Generate a short title"),
+    );
+
+    // Background: title generation OR very short context with tiny output
+    if (hasTitleSignal) return "background";
+    if (msgCount <= 2 && maxToks <= 256) return "background";
+
+    return "foreground";
+  } catch {
+    return "foreground"; // Parse error → safe default
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Token Budget Parsing & Enforcement (A9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse natural-language budget expressions from user messages.
+ * Supports: +500k, 500,000, 2M, 2 million, "spend 500k", "use 2M tokens", "budget: 1M".
+ * Only scans the last user message to avoid re-triggering from history.
+ *
+ * @param {Array<{role: string, content: string | Array<{type: string, text?: string}>}>} messages
+ * @returns {number} Parsed token count, or 0 if no budget expression found
+ */
+function parseNaturalLanguageBudget(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return 0;
+
+  // Find the last user message
+  let lastUserText = "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      const content = messages[i].content;
+      if (typeof content === "string") {
+        lastUserText = content;
+      } else if (Array.isArray(content)) {
+        lastUserText = content
+          .filter((b) => b.type === "text" && typeof b.text === "string")
+          .map((b) => b.text)
+          .join(" ");
+      }
+      break;
+    }
+  }
+  if (!lastUserText) return 0;
+
+  // Patterns ordered from most specific to least
+  const patterns = [
+    /\buse\s+(\d[\d,]*)\s*([mk])\s*tokens?\b/i,
+    /\bspend\s+(\d[\d,]*)\s*([mk])?\b/i,
+    /\bbudget[:\s]+(\d[\d,]*)\s*([mk])?\b/i,
+    /\+(\d[\d,]*)\s*([mk])\b/i,
+    /\b(\d[\d,]*)\s*million\s*tokens?\b/i,
+  ];
+
+  for (const re of patterns) {
+    const m = lastUserText.match(re);
+    if (m) {
+      const num = parseFloat(m[1].replace(/,/g, ""));
+      if (isNaN(num) || num <= 0) continue;
+      const suffix = (m[2] || "").toLowerCase();
+      if (re === patterns[4]) {
+        // "N million tokens" — the regex has no suffix group
+        return num * 1_000_000;
+      }
+      if (suffix === "m") return num * 1_000_000;
+      if (suffix === "k") return num * 1_000;
+      // No suffix — treat as absolute count
+      return num;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Inject a token budget status block into the system prompt.
+ * Prepends a text block with budget progress and threshold info.
+ *
+ * @param {Array<{type: string, text?: string, [k: string]: any}>} systemBlocks
+ * @param {{limit: number, used: number, continuations: number}} budget
+ * @param {number} threshold - Completion threshold (0-1, e.g. 0.9)
+ * @returns {Array<{type: string, text?: string, [k: string]: any}>}
+ */
+function injectTokenBudgetBlock(systemBlocks, budget, threshold) {
+  if (!budget || budget.limit <= 0) return systemBlocks;
+  const pct = ((budget.used / budget.limit) * 100).toFixed(0);
+  const thresholdTokens = Math.round(budget.limit * threshold);
+  const remaining = Math.max(0, budget.limit - budget.used);
+  const block = {
+    type: "text",
+    text: `Token budget: ${budget.used.toLocaleString()}/${budget.limit.toLocaleString()} tokens used (${pct}%). Stop generating at ${thresholdTokens.toLocaleString()} tokens. Remaining: ${remaining.toLocaleString()} tokens.`,
+  };
+  return [block, ...(systemBlocks || [])];
+}
+
+/**
+ * Detect diminishing returns: ≥3 continuations AND last 3 output deltas all < 500 tokens.
+ *
+ * @param {number[]} outputHistory - Recent output token deltas
+ * @returns {boolean}
+ */
+function detectDiminishingReturns(outputHistory) {
+  if (!Array.isArray(outputHistory) || outputHistory.length < 3) return false;
+  const last3 = outputHistory.slice(-3);
+  return last3.every((d) => d < 500);
+}
 
 /**
  * Estimate prompt token count from the raw request body string.
@@ -3293,6 +4137,108 @@ function estimatePromptTokens(bodyString) {
     // Fallback: raw body length / 4 if JSON parsing fails
     return Math.ceil(bodyString.length / 4);
   }
+}
+
+/**
+ * Analyze a request body to produce a token breakdown by role and tool.
+ * Used by `/anthropic context` command.
+ *
+ * @param {string} bodyStr - JSON request body string
+ * @returns {{ systemTokens: number, userTokens: number, assistantTokens: number, toolResultTokens: number, toolBreakdown: Record<string, { tokens: number, count: number }>, totalTokens: number, duplicates: { count: number, wastedTokens: number } }}
+ */
+function analyzeRequestContext(bodyStr) {
+  const result = {
+    systemTokens: 0,
+    userTokens: 0,
+    assistantTokens: 0,
+    toolResultTokens: 0,
+    toolBreakdown: /** @type {Record<string, { tokens: number, count: number }>} */ ({}),
+    totalTokens: 0,
+    duplicates: { count: 0, wastedTokens: 0 },
+  };
+
+  if (!bodyStr || typeof bodyStr !== "string") return result;
+
+  try {
+    const parsed = JSON.parse(bodyStr);
+    const contentHashes = new Map(); // hash → { tokens, count }
+
+    // Estimate tokens from a string (4 chars/token heuristic)
+    const estimateTokens = (/** @type {string} */ s) => Math.ceil((s || "").length / 4);
+
+    // System prompt
+    if (Array.isArray(parsed.system)) {
+      for (const block of parsed.system) {
+        if (block.type === "text" && typeof block.text === "string") {
+          result.systemTokens += estimateTokens(block.text);
+        }
+      }
+    } else if (typeof parsed.system === "string") {
+      result.systemTokens += estimateTokens(parsed.system);
+    }
+
+    // Messages
+    if (Array.isArray(parsed.messages)) {
+      for (const msg of parsed.messages) {
+        const role = msg.role || "unknown";
+        const blocks =
+          typeof msg.content === "string"
+            ? [{ type: "text", text: msg.content }]
+            : Array.isArray(msg.content)
+              ? msg.content
+              : [];
+
+        for (const block of blocks) {
+          if (block.type === "text" && typeof block.text === "string") {
+            const tokens = estimateTokens(block.text);
+            if (role === "user") result.userTokens += tokens;
+            else if (role === "assistant") result.assistantTokens += tokens;
+          } else if (block.type === "tool_result") {
+            // tool_result content can be string or array of content blocks
+            let content = "";
+            if (typeof block.content === "string") {
+              content = block.content;
+            } else if (Array.isArray(block.content)) {
+              content = block.content.map((b) => b.text || "").join("");
+            }
+            const tokens = estimateTokens(content);
+            result.toolResultTokens += tokens;
+            result.userTokens += tokens; // tool_result is part of user turn
+
+            // Group by tool_name (may be on the block or need to look up from tool_use_id)
+            const toolName = block.tool_name || block.name || "unknown_tool";
+            if (!result.toolBreakdown[toolName]) {
+              result.toolBreakdown[toolName] = { tokens: 0, count: 0 };
+            }
+            result.toolBreakdown[toolName].tokens += tokens;
+            result.toolBreakdown[toolName].count += 1;
+
+            // Duplicate detection via content hash
+            if (content.length > 0) {
+              const hash = createHashCrypto("sha256").update(content).digest("hex").slice(0, 16);
+              const existing = contentHashes.get(hash);
+              if (existing) {
+                existing.count += 1;
+                result.duplicates.count += 1;
+                result.duplicates.wastedTokens += tokens;
+              } else {
+                contentHashes.set(hash, { tokens, count: 1 });
+              }
+            }
+          } else if (block.type === "tool_use") {
+            const tokens = estimateTokens(JSON.stringify(block.input || {}));
+            if (role === "assistant") result.assistantTokens += tokens;
+          }
+        }
+      }
+    }
+
+    result.totalTokens = result.systemTokens + result.userTokens + result.assistantTokens;
+  } catch {
+    // Malformed JSON — return zeroes
+  }
+
+  return result;
 }
 
 /**
@@ -3478,6 +4424,31 @@ function updateSessionMetrics(usage, model) {
 
   // Total cost
   sessionMetrics.sessionCostUsd += calculateCostUsd(usage, model);
+
+  // Per-model breakdown
+  if (model) {
+    if (!sessionMetrics.perModel[model]) {
+      sessionMetrics.perModel[model] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, turns: 0 };
+    }
+    const pm = sessionMetrics.perModel[model];
+    pm.input += usage.inputTokens;
+    pm.output += usage.outputTokens;
+    pm.cacheRead += usage.cacheReadTokens;
+    pm.cacheWrite += usage.cacheWriteTokens;
+    pm.costUsd += calculateCostUsd(usage, model);
+    pm.turns += 1;
+    sessionMetrics.lastModelId = model;
+  }
+
+  // Token budget tracking (A9)
+  if (sessionMetrics.tokenBudget.limit > 0) {
+    sessionMetrics.tokenBudget.used += usage.outputTokens;
+    sessionMetrics.tokenBudget.continuations += 1;
+    sessionMetrics.tokenBudget.outputHistory.push(usage.outputTokens);
+    if (sessionMetrics.tokenBudget.outputHistory.length > 5) {
+      sessionMetrics.tokenBudget.outputHistory.shift();
+    }
+  }
 }
 
 /**
@@ -4552,6 +5523,7 @@ function buildAnthropicBetaHeader(
   hasFileReferences,
   adaptiveOverride,
   tokenEconomy,
+  microcompactBetas, // NEW 11th param
 ) {
   const incomingBetasList = incomingBeta
     .split(",")
@@ -4667,6 +5639,13 @@ function buildAnthropicBetaHeader(
 
   // afk-mode — NOT auto-included (requires user opt-in)
   // Available via: /anthropic betas add afk-mode-2026-01-31
+
+  // === MICROCOMPACT BETAS (context-aware, Phase 3 Task 3.4) ===
+  if (microcompactBetas?.length) {
+    for (const mb of microcompactBetas) {
+      if (!betas.includes(mb)) betas.push(mb);
+    }
+  }
 
   // Merge incoming betas from the original request
   let mergedBetas = [...new Set([...betas, ...incomingBetasList])];
@@ -4929,6 +5908,29 @@ function buildRequestHeaders(
 }
 
 /**
+ * Resolve max_tokens for a request based on output cap configuration.
+ * If the caller specified max_tokens, it is preserved. Otherwise, defaults
+ * to 8K and escalates to 64K after an output truncation (stop_reason: "max_tokens").
+ *
+ * @param {Record<string, any>} body - Parsed request body
+ * @param {import('./lib/config.mjs').AnthropicAuthConfig} config
+ * @returns {number | undefined} Resolved max_tokens value, or undefined for passthrough
+ */
+function resolveMaxTokens(body, config) {
+  if (!config.output_cap?.enabled) return body.max_tokens; // passthrough
+  if (body.max_tokens != null) return body.max_tokens; // caller-specified wins
+  const escalated = sessionMetrics.lastStopReason === "max_tokens";
+  const result = escalated
+    ? (config.output_cap.escalated_max_tokens ?? 64_000)
+    : (config.output_cap.default_max_tokens ?? 8_000);
+  // Reset after escalation is consumed (sticky for exactly one turn)
+  if (escalated) {
+    sessionMetrics.lastStopReason = null;
+  }
+  return result;
+}
+
+/**
  * Transform the request body: system prompt sanitization and tool prefixing.
  * Preserves behaviors E1-E7.
  *
@@ -4936,15 +5938,20 @@ function buildRequestHeaders(
  * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off', provider?: string}} signature
  * @param {{persistentUserId: string, sessionId: string, accountId: string}} runtime
  * @param {string} [betaHeader] - Pre-computed anthropic-beta header value to inject into the body.
+ * @param {import('./lib/config.mjs').AnthropicAuthConfig} [config] - Plugin configuration for output cap
  * @returns {string | undefined}
  */
-function transformRequestBody(body, signature, runtime, betaHeader) {
+function transformRequestBody(body, signature, runtime, betaHeader, config) {
   if (!body || typeof body !== "string") return body;
 
   const TOOL_PREFIX = "mcp_";
 
   try {
     const parsed = JSON.parse(body);
+    // Output cap: resolve max_tokens before any other body transforms
+    if (config?.output_cap?.enabled) {
+      parsed.max_tokens = resolveMaxTokens(parsed, config);
+    }
     // Bedrock requires betas in the body as "anthropic_beta" (underscore) since it
     // doesn't forward custom HTTP headers. First-party API rejects "betas" in body
     // with "Extra inputs are not permitted" — betas are header-only for first-party.
@@ -5003,6 +6010,25 @@ function transformRequestBody(body, signature, runtime, betaHeader) {
     const signatureWithModel = { ...signature, modelId, firstUserMessage };
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signatureWithModel);
+
+    // Token budget (A9): parse NL budget from last user message, inject status block
+    if (config?.token_budget?.enabled && Array.isArray(parsed.messages)) {
+      const budgetExpr = parseNaturalLanguageBudget(parsed.messages);
+      if (budgetExpr > 0) {
+        sessionMetrics.tokenBudget.limit = budgetExpr;
+      } else if (config.token_budget.default > 0 && sessionMetrics.tokenBudget.limit === 0) {
+        sessionMetrics.tokenBudget.limit = config.token_budget.default;
+      }
+      // If budget is active, inject status into system prompt
+      if (sessionMetrics.tokenBudget.limit > 0) {
+        const threshold = config.token_budget.completion_threshold ?? 0.9;
+        parsed.system = injectTokenBudgetBlock(parsed.system, sessionMetrics.tokenBudget, threshold);
+        // Soft stop: if we've exceeded the threshold, cap max_tokens to 1
+        if (sessionMetrics.tokenBudget.used >= sessionMetrics.tokenBudget.limit * threshold) {
+          parsed.max_tokens = 1;
+        }
+      }
+    }
 
     if (signature.enabled) {
       const currentMetadata =
@@ -5179,6 +6205,10 @@ function extractUsageFromSSEEvent(parsed, stats) {
     // Web search requests (server tool usage)
     if (typeof u.server_tool_use?.web_search_requests === "number") {
       stats.webSearchRequests = u.server_tool_use.web_search_requests;
+    }
+    // Capture stop_reason from message_delta for output cap escalation
+    if (parsed.delta?.stop_reason) {
+      sessionMetrics.lastStopReason = parsed.delta.stop_reason;
     }
     return;
   }

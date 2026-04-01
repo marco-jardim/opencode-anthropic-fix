@@ -2,6 +2,54 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.0.40] — 2026-03-31
+
+### Internal Improvements (Plan A)
+
+10 new features focused on cost optimization, observability, and resilience — no external API behavior changes.
+
+#### Quick Wins
+
+- **A1: API Preconnect** — fire-and-forget HEAD request on plugin init to pre-warm TCP+TLS connection. Auto-skipped when proxy/mTLS environment is detected (`HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, etc.). Config: `preconnect`.
+- **A10: 8K Default Output Cap** — limits `max_tokens` to 8,000 by default (was uncapped). Auto-escalates to 64,000 after `stop_reason: "max_tokens"`, resets after one turn. Preserves caller-specified values. Config: `output_cap`.
+- **A2: Context Overflow Auto-Recovery** — parses structured `prompt_too_long` errors (`input + max_tokens > limit`) to auto-reduce `max_tokens` with a configurable safety margin, before falling back to message trimming. Config: `overflow_recovery`.
+
+#### Observability
+
+- **A4: Per-Model Stats** — `sessionMetrics.perModel` tracks input/output/cache/cost per model. Shown in `/anthropic stats` when >1 model used. `stats reset` supported.
+- **A5: `/anthropic context` Command** — token breakdown by role (system/user/assistant), tool_result grouping by tool name, duplicate content detection via SHA-256 hashing.
+- **A3: Cache Break Detection** — hashes system prompt + tool schemas each turn. Alerts when `cache_read_input_tokens` drops >2K between turns, identifying which source changed. Config: `cache_break_detection`.
+
+#### Cost & Context Optimization
+
+- **A6: Rate Limit Awareness** — polls `/api/oauth/usage` every 10 turns or 5 minutes. Progressive warning toasts (caution at 50%, warning at 75%, danger at 90%). Config integrated into existing quota display.
+- **A8: FG/BG Request Classification** — detects title-generation and short-context background requests. Reduces retry budget (0 service retries, 1 should-retry) to avoid wasting quota on throwaway requests. Config: `request_classification`.
+- **A9: Token Budget Parsing** — parses natural-language budget expressions in user messages (`+500k`, `use 2M tokens`, `budget: 1M`). Injects budget progress into system prompt. Detects diminishing returns. Config: `token_budget` (disabled by default).
+- **A7: Microcompact** — injects `clear_tool_uses_20250919` and `clear_thinking_20251015` betas when context utilization exceeds 80% of window. State resets on session compaction. Config: `microcompact`.
+
+#### Bonus
+
+- **Smart 529 Overload Recovery** — on 529 retry exhaustion, attempts quota-aware account switching with cached usage data for cooldown timing. Comprehensive error messages with quota %, reset times, and action suggestions. Config: `overload_recovery`.
+
+### Bug Fixes
+
+- **`_reqHasFileReferences` → `_reqHasFileRefs`** — variable name mismatch in fetch interceptor caused `ReferenceError` on all file-reference code paths.
+- **`pollOAuthUsage` debugLog scope** — removed `debugLog` calls from module-scope function (only accessible inside plugin closure).
+- **A3+A9 false alarm** — token budget system prompt block excluded from cache source hashing to prevent false cache break alerts every turn.
+
+### Tests
+
+- 137 new tests across 14 new test files (683 total across 26 files)
+- Phase 0: 9 preflight validation tests
+- Phase 1: 28 tests (preconnect, output cap, overflow recovery)
+- Phase 2: 17 tests (context command, cache break detection)
+- Phase 3: 50 tests (rate limit, FG/BG, token budget, microcompact, overload recovery)
+- Phase 4: 36 tests (cross-feature integration, edge cases, performance)
+
+### Configuration
+
+8 new config sections in `anthropic-auth.json`: `preconnect`, `output_cap`, `overflow_recovery`, `cache_break_detection`, `request_classification`, `token_budget`, `microcompact`, `overload_recovery`. All have sensible defaults — no configuration required.
+
 ## [0.0.39] — 2026-03-31
 
 ### Bug Fixes
