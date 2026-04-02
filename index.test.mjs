@@ -4529,3 +4529,239 @@ describe("slash command message stripping", () => {
     expect(parsed.messages[1].content).toBe("Do something");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Orphaned tool_use repair
+// ---------------------------------------------------------------------------
+
+describe("orphaned tool_use repair", () => {
+  let client;
+  let fetchFn;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    delete process.env.DISABLE_INTERLEAVED_THINKING;
+    delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS;
+    delete process.env.USE_API_CONTEXT_MANAGEMENT;
+    delete process.env.TENGU_MARBLE_ANVIL;
+    delete process.env.TENGU_TOOL_PEAR;
+    delete process.env.TENGU_SCARF_COFFEE;
+    delete process.env.ANTHROPIC_BETAS;
+    delete process.env.ANTHROPIC_CUSTOM_HEADERS;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.CLAUDE_CODE_ENTRYPOINT;
+    delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER;
+    delete process.env.CLAUDE_AGENT_SDK_VERSION;
+    delete process.env.CLAUDE_AGENT_SDK_CLIENT_APP;
+    delete process.env.CLAUDE_CODE_CONTAINER_ID;
+    delete process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
+    delete process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION;
+    delete process.env.OPENCODE_ANTHROPIC_PROMPT_COMPACTION;
+    delete process.env.CLAUDE_CODE_ACCOUNT_UUID;
+    delete process.env.CLAUDE_CODE_USER_EMAIL;
+    delete process.env.CLAUDE_CODE_ORGANIZATION_UUID;
+    delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+    process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID = "test-signature-user";
+
+    client = makeClient();
+    loadAccounts.mockResolvedValue(null);
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "test-refresh",
+      access: "test-access",
+      expires: Date.now() + 3600_000,
+    });
+
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+    fetchFn = result.fetch;
+  });
+
+  it("synthesizes tool_result when assistant tool_use has no following user message", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    // Simulate: assistant used a tool, but OpenCode crashed before sending the result.
+    // Then the user sends a new message.
+    const messages = [
+      { role: "user", content: "Hello" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me read that file." },
+          { type: "tool_use", id: "toolu_orphan1", name: "read_file", input: { path: "/test" } },
+        ],
+      },
+      // Missing user tool_result here!
+      { role: "user", content: "What happened?" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+
+    // Should have 4 messages: user, assistant, synthetic tool_result, user
+    expect(parsed.messages).toHaveLength(4);
+    expect(parsed.messages[2].role).toBe("user");
+    expect(parsed.messages[2].content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_orphan1",
+        content: "[Result unavailable — tool execution was interrupted]",
+      },
+    ]);
+    expect(parsed.messages[3].content).toBe("What happened?");
+  });
+
+  it("synthesizes tool_result when assistant tool_use is the last message", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "Hello" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_last1", name: "bash", input: { command: "ls" } }],
+      },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+
+    // repairOrphanedToolUseBlocks + the trailing assistant guard both apply
+    // Result: user, assistant, synthetic tool_result
+    expect(parsed.messages.length).toBeGreaterThanOrEqual(3);
+    // The message right after the assistant should be a user with tool_result
+    const toolResultMsg = parsed.messages[2];
+    expect(toolResultMsg.role).toBe("user");
+    const toolResultBlock = toolResultMsg.content.find((b) => b.type === "tool_result");
+    expect(toolResultBlock).toBeDefined();
+    expect(toolResultBlock.tool_use_id).toBe("toolu_last1");
+  });
+
+  it("patches existing user message with missing tool_result IDs", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    // Assistant used 2 tools, but user message only has result for 1
+    const messages = [
+      { role: "user", content: "Hello" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "toolu_a", name: "read_file", input: {} },
+          { type: "tool_use", id: "toolu_b", name: "bash", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_a", content: "file contents" },
+          // Missing tool_result for toolu_b!
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "OK" }] },
+      { role: "user", content: "Thanks" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+
+    // The user message at index 2 should now have both tool_results
+    const userMsg = parsed.messages[2];
+    expect(userMsg.role).toBe("user");
+    const resultIds = userMsg.content.filter((b) => b.type === "tool_result").map((b) => b.tool_use_id);
+    expect(resultIds).toContain("toolu_a");
+    expect(resultIds).toContain("toolu_b");
+  });
+
+  it("does not modify correctly paired tool_use/tool_result", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const messages = [
+      { role: "user", content: "Hello" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_ok1", name: "read_file", input: {} }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_ok1", content: "the file" }],
+      },
+      { role: "assistant", content: [{ type: "text", text: "Got it." }] },
+      { role: "user", content: "Done" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+
+    // Should have exactly 5 messages — no synthetic ones added
+    expect(parsed.messages).toHaveLength(5);
+  });
+
+  it("repairs multiple orphaned tool_use blocks at different positions", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    // Two separate assistant messages with orphaned tool_use blocks
+    const messages = [
+      { role: "user", content: "Start" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_first", name: "read_file", input: {} }],
+      },
+      // Missing tool_result for toolu_first — next is another user message
+      { role: "user", content: "Keep going" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_second", name: "bash", input: {} }],
+      },
+      // Missing tool_result for toolu_second
+      { role: "user", content: "What happened?" },
+    ];
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+
+    // Should have 7 messages: 5 original + 2 synthetic tool_results
+    expect(parsed.messages).toHaveLength(7);
+
+    // Verify both synthetic tool_results exist
+    const syntheticResults = parsed.messages.filter(
+      (m) =>
+        m.role === "user" &&
+        Array.isArray(m.content) &&
+        m.content.some(
+          (b) => b.type === "tool_result" && b.content === "[Result unavailable — tool execution was interrupted]",
+        ),
+    );
+    expect(syntheticResults).toHaveLength(2);
+  });
+});

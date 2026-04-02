@@ -2973,7 +2973,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                           },
                           ...tail,
                         ];
-                        parsedBody.messages = trimmed;
+                        // Repair any orphaned tool_use blocks created by the trim boundary
+                        // (e.g. first 2 messages include an assistant tool_use whose
+                        // tool_result was in a trimmed middle message).
+                        parsedBody.messages = repairOrphanedToolUseBlocks(trimmed);
                         requestInit.body = JSON.stringify(parsedBody);
                         requestInit._reactiveCompactAttempted = true;
                         // Retry with trimmed messages (decrement attempt to not consume account slot)
@@ -4739,6 +4742,94 @@ function computeBillingCacheHash(firstUserMessage, version) {
  * @param {Array} messages — The messages array from the parsed request body
  * @returns {Array} — Filtered messages array
  */
+
+/**
+ * Repair orphaned tool_use blocks in the message array.
+ *
+ * The Anthropic API requires that every assistant message containing `tool_use`
+ * blocks is immediately followed by a user message with `tool_result` blocks
+ * for each tool_use ID. When OpenCode crashes or hangs mid-tool-execution, the
+ * conversation may be persisted with assistant tool_use blocks that lack
+ * corresponding tool_result responses, causing:
+ *
+ *   "messages.N: `tool_use` ids were found without `tool_result` blocks
+ *    immediately after: toolu_XXXXX"
+ *
+ * This function scans the entire message array and inserts synthetic
+ * tool_result user messages wherever they are missing.
+ *
+ * @param {Array} messages — The messages array from the parsed request body
+ * @returns {Array} — Repaired messages array
+ */
+function repairOrphanedToolUseBlocks(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+  const repaired = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    repaired.push(msg);
+
+    // Only check assistant messages with array content
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+
+    // Collect tool_use IDs from this assistant message
+    const toolUseIds = [];
+    for (const block of msg.content) {
+      if (block.type === "tool_use" && block.id) {
+        toolUseIds.push(block.id);
+      }
+    }
+    if (toolUseIds.length === 0) continue;
+
+    // Check if the next message is a user message with matching tool_results
+    const next = messages[i + 1];
+    if (next && next.role === "user" && Array.isArray(next.content)) {
+      // Collect tool_result IDs present in the next user message
+      const resultIds = new Set();
+      for (const block of next.content) {
+        if (block.type === "tool_result" && block.tool_use_id) {
+          resultIds.add(block.tool_use_id);
+        }
+      }
+
+      // Find which tool_use IDs are missing from the tool_results
+      const missingIds = toolUseIds.filter((id) => !resultIds.has(id));
+      if (missingIds.length === 0) continue; // All paired, nothing to fix
+
+      // There are missing tool_results — inject them into the existing user message.
+      // Clone the next message to avoid mutating the original.
+      const patchedNext = {
+        ...next,
+        content: [
+          ...missingIds.map((id) => ({
+            type: "tool_result",
+            tool_use_id: id,
+            content: "[Result unavailable — tool execution was interrupted]",
+          })),
+          ...next.content,
+        ],
+      };
+      // Replace the next message in-place by skipping it and pushing the patched version
+      i++; // skip original next
+      repaired.push(patchedNext);
+    } else {
+      // Next message is missing or is not a user message — synthesize a full
+      // tool_result user message for all tool_use IDs.
+      repaired.push({
+        role: "user",
+        content: toolUseIds.map((id) => ({
+          type: "tool_result",
+          tool_use_id: id,
+          content: "[Result unavailable — tool execution was interrupted]",
+        })),
+      });
+    }
+  }
+
+  return repaired;
+}
+
 function stripSlashCommandMessages(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
@@ -6130,14 +6221,20 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       parsed.speed = "fast";
     }
 
-    // Guard: ensure messages array never ends with an assistant message.
-    // The API rejects this as "assistant message prefill" when extended thinking is active.
+    // Guard: repair orphaned tool_use blocks anywhere in the message array.
+    // The Anthropic API requires that every assistant message containing tool_use
+    // blocks is immediately followed by a user message with matching tool_result
+    // blocks. When OpenCode crashes/hangs mid-tool-execution, the conversation
+    // state may be saved with unpaired tool_use blocks. This causes:
+    //   "messages.N: `tool_use` ids were found without `tool_result` blocks
+    //    immediately after: toolu_XXXXX"
+    // We scan the full array and synthesize missing tool_result messages.
     if (Array.isArray(parsed.messages) && parsed.messages.length > 0) {
+      parsed.messages = repairOrphanedToolUseBlocks(parsed.messages);
+
+      // Also ensure the array never ends with an assistant message (prefill guard).
       const lastMsg = parsed.messages[parsed.messages.length - 1];
       if (lastMsg && lastMsg.role === "assistant") {
-        // Check if the assistant message contains tool_use blocks — if so,
-        // synthesize tool_result responses instead of bare "Continue." to
-        // respect the Anthropic tool protocol.
         const lastContent = Array.isArray(lastMsg.content) ? lastMsg.content : [];
         const toolUseBlocks = lastContent.filter((b) => b.type === "tool_use");
         if (toolUseBlocks.length > 0) {
