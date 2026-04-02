@@ -2354,28 +2354,35 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
               // pin the first attempt to that account so files are accessible.
               // Without this, round-robin could route to an account that doesn't
               // have the referenced files, causing file_not_found errors.
-              let pinnedAccount = null;
-              if (typeof requestInit.body === "string" && fileAccountMap.size > 0) {
+              // Parse body ONCE before the retry loop and reuse for all downstream logic.
+              // This eliminates 4-5 redundant JSON.parse calls per turn (file pinning,
+              // parseRequestBodyMetadata, adaptive context, toast, microcompact).
+              let _parsedBodyOnce = null;
+              if (typeof requestInit.body === "string") {
                 try {
-                  const bodyObj = JSON.parse(requestInit.body);
-                  const fileIds = extractFileIds(bodyObj);
-                  for (const fid of fileIds) {
-                    const pinnedIndex = fileAccountMap.get(fid);
-                    if (pinnedIndex !== undefined) {
-                      const candidates = accountManager.getEnabledAccounts();
-                      pinnedAccount = candidates.find((a) => a.index === pinnedIndex) ?? null;
-                      if (pinnedAccount) {
-                        debugLog("file-id pinning: routing to account", {
-                          fileId: fid,
-                          accountIndex: pinnedIndex,
-                          email: pinnedAccount.email,
-                        });
-                        break;
-                      }
+                  _parsedBodyOnce = JSON.parse(requestInit.body);
+                } catch {
+                  // Non-JSON body — downstream code handles gracefully
+                }
+              }
+
+              let pinnedAccount = null;
+              if (_parsedBodyOnce && fileAccountMap.size > 0) {
+                const fileIds = extractFileIds(_parsedBodyOnce);
+                for (const fid of fileIds) {
+                  const pinnedIndex = fileAccountMap.get(fid);
+                  if (pinnedIndex !== undefined) {
+                    const candidates = accountManager.getEnabledAccounts();
+                    pinnedAccount = candidates.find((a) => a.index === pinnedIndex) ?? null;
+                    if (pinnedAccount) {
+                      debugLog("file-id pinning: routing to account", {
+                        fileId: fid,
+                        accountIndex: pinnedIndex,
+                        email: pinnedAccount.email,
+                      });
+                      break;
                     }
                   }
-                } catch {
-                  // Non-JSON body or parse error — skip pinning
                 }
               }
 
@@ -2538,8 +2545,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 
                 // Pre-compute the beta header so it can be injected into both the
                 // request body (betas field) and the anthropic-beta header.
+                // Reuse _parsedBodyOnce to avoid redundant JSON.parse.
                 const { model: _reqModel, hasFileReferences: _reqHasFileRefs } = parseRequestBodyMetadata(
                   requestInit.body,
+                  _parsedBodyOnce,
                 );
                 const _reqProvider = detectProvider(requestUrl);
 
@@ -2555,12 +2564,15 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       escalation_threshold: 150_000,
                       deescalation_threshold: 100_000,
                     },
+                    _parsedBodyOnce,
                   );
                   // Emit visual cue on state transitions (only when adaptive mode is on)
                   if (config.adaptive_context?.enabled && _prevAdaptiveState !== adaptiveContextState.active) {
                     const label = adaptiveContextState.active ? "1M context ON" : "1M context OFF";
                     const variant = adaptiveContextState.active ? "info" : "success";
-                    const est = estimatePromptTokens(requestInit.body);
+                    const est = _parsedBodyOnce
+                      ? estimatePromptTokensFromParsed(_parsedBodyOnce)
+                      : estimatePromptTokens(requestInit.body);
                     toast(`⬡ ${label} (est. ${Math.round(est / 1000)}K tokens)`, variant, {
                       debounceKey: "adaptive-ctx",
                     }).catch(() => {});
@@ -2578,7 +2590,9 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 // Microcompact: inject clear betas at high context utilization
                 let _microcompactBetas = null;
                 if (requestInit.body) {
-                  const estimatedTokens = estimatePromptTokens(requestInit.body);
+                  const estimatedTokens = _parsedBodyOnce
+                    ? estimatePromptTokensFromParsed(_parsedBodyOnce)
+                    : estimatePromptTokens(requestInit.body);
                   if (shouldMicrocompact(estimatedTokens, config)) {
                     _microcompactBetas = buildMicrocompactBetas();
                     if (!microcompactState.active) {
@@ -3144,7 +3158,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       consecutive529Count = 0;
                     }
 
-                    const baseDelay = Math.min(0.5 * Math.pow(2, serviceWideRetryCount), 8);
+                    const baseDelay = Math.min(0.5 * Math.pow(2, serviceWideRetryCount), 3);
                     const jitter = 1 - Math.random() * 0.25;
                     const sleepMs = Math.round(baseDelay * jitter * 1000);
                     const retryLabel = response.status === 529 ? "overloaded" : "unavailable";
@@ -4120,48 +4134,59 @@ function estimatePromptTokens(bodyString) {
   if (!bodyString || typeof bodyString !== "string") return 0;
   try {
     const parsed = JSON.parse(bodyString);
-    let charCount = 0;
-
-    // Count system prompt text
-    if (Array.isArray(parsed.system)) {
-      for (const block of parsed.system) {
-        if (block.type === "text" && typeof block.text === "string") {
-          charCount += block.text.length;
-        }
-      }
-    } else if (typeof parsed.system === "string") {
-      charCount += parsed.system.length;
-    }
-
-    // Count messages content (text blocks, tool results) — skip tool definitions
-    if (Array.isArray(parsed.messages)) {
-      for (const msg of parsed.messages) {
-        if (typeof msg.content === "string") {
-          charCount += msg.content.length;
-        } else if (Array.isArray(msg.content)) {
-          for (const block of msg.content) {
-            if (block.type === "text" && typeof block.text === "string") {
-              charCount += block.text.length;
-            } else if (block.type === "tool_result" && typeof block.content === "string") {
-              charCount += block.content.length;
-            } else if (block.type === "tool_use") {
-              // Count serialized input as tokens
-              charCount += JSON.stringify(block.input || {}).length;
-            } else if (block.type === "image" || block.type === "image_url") {
-              // Images: ~2000 tokens per image (Anthropic tile-based counting)
-              charCount += 8000; // 2000 tokens * 4 chars/token
-            }
-          }
-        }
-      }
-    }
-
-    // 4 chars/token heuristic for text content (reasonable for English + code + JSON)
-    return Math.ceil(charCount / 4);
+    return estimatePromptTokensFromParsed(parsed);
   } catch {
     // Fallback: raw body length / 4 if JSON parsing fails
     return Math.ceil(bodyString.length / 4);
   }
+}
+
+/**
+ * Estimate prompt tokens from an already-parsed request body object.
+ * Avoids redundant JSON.parse when the caller already has the parsed object.
+ * @param {object} parsed - The parsed request body
+ * @returns {number} Estimated token count
+ */
+function estimatePromptTokensFromParsed(parsed) {
+  if (!parsed || typeof parsed !== "object") return 0;
+  let charCount = 0;
+
+  // Count system prompt text
+  if (Array.isArray(parsed.system)) {
+    for (const block of parsed.system) {
+      if (block.type === "text" && typeof block.text === "string") {
+        charCount += block.text.length;
+      }
+    }
+  } else if (typeof parsed.system === "string") {
+    charCount += parsed.system.length;
+  }
+
+  // Count messages content (text blocks, tool results) — skip tool definitions
+  if (Array.isArray(parsed.messages)) {
+    for (const msg of parsed.messages) {
+      if (typeof msg.content === "string") {
+        charCount += msg.content.length;
+      } else if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === "text" && typeof block.text === "string") {
+            charCount += block.text.length;
+          } else if (block.type === "tool_result" && typeof block.content === "string") {
+            charCount += block.content.length;
+          } else if (block.type === "tool_use") {
+            // Count serialized input as tokens
+            charCount += JSON.stringify(block.input || {}).length;
+          } else if (block.type === "image" || block.type === "image_url") {
+            // Images: ~2000 tokens per image (Anthropic tile-based counting)
+            charCount += 8000; // 2000 tokens * 4 chars/token
+          }
+        }
+      }
+    }
+  }
+
+  // 4 chars/token heuristic for text content (reasonable for English + code + JSON)
+  return Math.ceil(charCount / 4);
 }
 
 /**
@@ -4284,7 +4309,7 @@ function analyzeRequestContext(bodyStr) {
  * @param {import('./lib/config.mjs').AdaptiveContextConfig} adaptiveConfig
  * @returns {boolean}
  */
-function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
+function resolveAdaptiveContext(bodyString, model, adaptiveConfig, parsedBody) {
   // Non-adaptive: use static check (only explicit "1m" models)
   if (!adaptiveConfig.enabled) {
     return hasOneMillionContext(model);
@@ -4300,7 +4325,7 @@ function resolveAdaptiveContext(bodyString, model, adaptiveConfig) {
     return false;
   }
 
-  const estimatedTokens = estimatePromptTokens(bodyString);
+  const estimatedTokens = parsedBody ? estimatePromptTokensFromParsed(parsedBody) : estimatePromptTokens(bodyString);
   const turnsSinceTransition = sessionMetrics.turns - adaptiveContextState.lastTransitionTurn;
 
   if (adaptiveContextState.active) {
@@ -5231,21 +5256,27 @@ function detectProvider(requestUrl) {
  * @param {any} body
  * @returns {{model: string, tools: any[], messages: any[], hasFileReferences: boolean}}
  */
-function parseRequestBodyMetadata(body) {
-  if (!body || typeof body !== "string") {
+function parseRequestBodyMetadata(body, parsedBody) {
+  const parsed =
+    parsedBody ||
+    (typeof body === "string"
+      ? (() => {
+          try {
+            return JSON.parse(body);
+          } catch {
+            return null;
+          }
+        })()
+      : null);
+  if (!parsed) {
     return { model: "", tools: [], messages: [], hasFileReferences: false };
   }
 
-  try {
-    const parsed = JSON.parse(body);
-    const model = typeof parsed?.model === "string" ? parsed.model : "";
-    const tools = Array.isArray(parsed?.tools) ? parsed.tools : [];
-    const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
-    const hasFileReferences = extractFileIds(parsed).length > 0;
-    return { model, tools, messages, hasFileReferences };
-  } catch {
-    return { model: "", tools: [], messages: [], hasFileReferences: false };
-  }
+  const model = typeof parsed?.model === "string" ? parsed.model : "";
+  const tools = Array.isArray(parsed?.tools) ? parsed.tools : [];
+  const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
+  const hasFileReferences = extractFileIds(parsed).length > 0;
+  return { model, tools, messages, hasFileReferences };
 }
 
 /**
