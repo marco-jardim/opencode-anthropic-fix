@@ -15,6 +15,7 @@ import {
   parseRetryAfterHeader,
   parseRetryAfterMsHeader,
   parseShouldRetryHeader,
+  TRANSIENT_RETRY_THRESHOLD_MS,
 } from "./lib/backoff.mjs";
 
 // ---------------------------------------------------------------------------
@@ -3039,6 +3040,27 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   if (accountSpecific) {
                     const reason = parseRateLimitReason(response.status, errorBody);
                     const retryAfterMs = parseRetryAfterMsHeader(response) ?? parseRetryAfterHeader(response);
+
+                    // Transient 429: short retry-after (<=10s) is a burst throttle.
+                    // Retry on the SAME account instead of rotating — avoids wasting
+                    // the account pool on momentary rate spikes.
+                    if (
+                      response.status === 429 &&
+                      reason === "RATE_LIMIT_EXCEEDED" &&
+                      retryAfterMs != null &&
+                      retryAfterMs > 0 &&
+                      retryAfterMs <= TRANSIENT_RETRY_THRESHOLD_MS
+                    ) {
+                      debugLog("transient 429: sleeping before same-account retry", {
+                        retryAfterMs,
+                        account: account.email || `Account ${account.index + 1}`,
+                      });
+                      await new Promise((r) => setTimeout(r, retryAfterMs));
+                      // Decrement attempt so this transient retry doesn't consume an account slot
+                      attempt--;
+                      continue;
+                    }
+
                     accountManager.markRateLimited(account, reason, retryAfterMs);
 
                     // On auth failures, clear token so next selection forces refresh
@@ -4645,17 +4667,19 @@ process.once("beforeExit", () => {
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.88";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.90";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-03-30T21:59:52Z";
+const CLAUDE_CODE_BUILD_TIME = "2026-04-01T22:53:10Z";
 
-// The @anthropic-ai/sdk version bundled with Claude Code v2.1.88.
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.90.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .83-.88.
+// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .80-.90.
 const ANTHROPIC_SDK_VERSION = "0.208.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.90", "0.208.0"],
+  ["2.1.89", "0.208.0"],
   ["2.1.88", "0.208.0"],
   ["2.1.87", "0.208.0"],
   ["2.1.86", "0.208.0"],
@@ -4816,7 +4840,6 @@ const BEDROCK_UNSUPPORTED_BETAS = new Set([
   "interleaved-thinking-2025-05-14",
   "context-1m-2025-08-07",
   "tool-search-tool-2025-10-19",
-  "tool-examples-2025-10-29",
   "code-execution-2025-08-25",
   "files-api-2025-04-14",
   "fine-grained-tool-streaming-2025-05-14",
@@ -4835,9 +4858,6 @@ const EXPERIMENTAL_BETA_FLAGS = new Set([
   "prompt-caching-scope-2026-01-05",
   "redact-thinking-2026-02-12",
   "structured-outputs-2025-12-15",
-  "summarize-connector-text-2026-03-13",
-  "token-efficient-tools-2026-03-28",
-  "tool-examples-2025-10-29",
   "tool-search-tool-2025-10-19",
   "web-search-2025-03-05",
 ]);
@@ -4850,11 +4870,7 @@ const BETA_SHORTCUTS = new Map([
   ["opus-fast", "fast-mode-2026-02-01"],
   ["task-budgets", "task-budgets-2026-03-13"],
   ["budgets", "task-budgets-2026-03-13"],
-  ["efficient-tools", "token-efficient-tools-2026-03-28"],
-  ["token-efficient", "token-efficient-tools-2026-03-28"],
   ["redact-thinking", "redact-thinking-2026-02-12"],
-  ["connector-text", "summarize-connector-text-2026-03-13"],
-  ["anti-distill", "summarize-connector-text-2026-03-13"],
 ]);
 const STAINLESS_HELPER_KEYS = [
   "x_stainless_helper",
@@ -5371,12 +5387,11 @@ function normalizeSystemTextBlocks(system) {
       text: item.text,
     };
 
-    if (item.cache_control && typeof item.cache_control === "object" && !Array.isArray(item.cache_control)) {
-      normalized.cache_control = item.cache_control;
-    } else if (typeof item.cacheScope === "string" && item.cacheScope) {
-      // Backward compatibility for older shape used by this plugin.
-      normalized.cache_control = { type: "ephemeral" };
-    }
+    // Intentionally strip cache_control from incoming system blocks.
+    // The plugin controls cache placement: only the identity block and
+    // boundary-split blocks get cache_control (added in buildSystemPromptBlocks).
+    // Passing through upstream markers can cause "maximum of 4 blocks with
+    // cache_control" API errors when combined with our own markers.
 
     output.push(normalized);
   }
@@ -5439,14 +5454,21 @@ function buildSystemPromptBlocks(system, signature) {
   // TTL must be non-decreasing across tools → system → messages, so all cached
   // system blocks must share the same TTL to avoid "1h after 5m" API rejection.
   const effectiveCachePolicy = signature.cachePolicy || { ttl: "1h", ttl_supported: true };
-  const cacheControl =
-    effectiveCachePolicy.ttl !== "off" && effectiveCachePolicy.ttl_supported !== false
-      ? { type: "ephemeral", ttl: effectiveCachePolicy.ttl }
-      : { type: "ephemeral" };
+  const hasTtl = effectiveCachePolicy.ttl !== "off" && effectiveCachePolicy.ttl_supported !== false;
 
-  // Identity block: org-scope cached per RE doc §14.1, §15.17
-  // Uses same TTL as other cached blocks to satisfy API ordering constraint.
-  blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cache_control: cacheControl });
+  // CC v2.1.90 cache_control scoping (verified against bundle WQ() function):
+  // - scope "global" is only emitted for static pre-boundary blocks
+  // - scope "org" is internal-only, NEVER emitted on the wire
+  // - identity block gets no cache_control in boundary mode, or {type:"ephemeral"} in fallback
+  const baseCacheControl = hasTtl ? { type: "ephemeral", ttl: effectiveCachePolicy.ttl } : { type: "ephemeral" };
+  const globalCacheControl = hasTtl
+    ? { type: "ephemeral", scope: "global", ttl: effectiveCachePolicy.ttl }
+    : { type: "ephemeral", scope: "global" };
+
+  // Identity block: per CC v2.1.90, gets {type:"ephemeral"} with NO scope field.
+  // In boundary mode CC assigns cacheScope:null (no cache_control at all), but
+  // we always include it for better cache hit rates on the proxy side.
+  blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cache_control: baseCacheControl });
 
   // Filtered blocks: keep as-is, with optional static/dynamic boundary marker
   if (filtered.length > 0) {
@@ -5471,9 +5493,9 @@ function buildSystemPromptBlocks(system, signature) {
 
       const effectiveSplit = splitIndex > 0 ? splitIndex : Math.ceil(filtered.length / 2);
 
-      // Static blocks (before boundary) get cache_control
+      // Static blocks (before boundary) get global-scope cache_control
       for (let i = 0; i < effectiveSplit; i++) {
-        blocks.push({ ...filtered[i], cache_control: cacheControl });
+        blocks.push({ ...filtered[i], cache_control: globalCacheControl });
       }
 
       // Boundary marker
@@ -5493,7 +5515,7 @@ function buildSystemPromptBlocks(system, signature) {
         blocks.push(rest);
       }
       const lastFiltered = filtered[filtered.length - 1];
-      blocks.push({ ...lastFiltered, cache_control: cacheControl });
+      blocks.push({ ...lastFiltered, cache_control: baseCacheControl });
     }
   }
 
@@ -5552,15 +5574,15 @@ function buildAnthropicBetaHeader(
   const isRoundRobin = strategy === "round-robin";
   const te = tokenEconomy || {};
 
-  // === ALWAYS-ON BETAS (Claude Code v2.1.84 base set) ===
+  // === ALWAYS-ON BETAS (Claude Code v2.1.90 base set) ===
   // These are ALWAYS included regardless of env vars or feature flags.
   if (!haiku) {
     betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"
   }
 
   // Tool search: use provider-aware header.
-  // 1P/Foundry → advanced-tool-use-2025-11-20 (enables broader tool capabilities)
-  // Vertex/Bedrock → tool-search-tool-2025-10-19 (3P-compatible subset)
+  // 1P/Foundry u2192 advanced-tool-use-2025-11-20 (enables broader tool capabilities)
+  // Vertex/Bedrock u2192 tool-search-tool-2025-10-19 (3P-compatible subset)
   if (provider === "vertex" || provider === "bedrock") {
     betas.push("tool-search-tool-2025-10-19");
   } else {
@@ -5593,17 +5615,15 @@ function buildAnthropicBetaHeader(
 
   // === CONDITIONAL BETAS (model/context-dependent) ===
 
-  // Context management — always-on in Claude Code (not env-gated)
-  betas.push("context-management-2025-06-27");
+  // Context management — gated to Claude 4+ models in CC v2.1.90.
+  // Excluded for Claude 3.x (not supported). Always-on for Claude 4+ on 1P/Foundry.
+  if (!/claude-3-/i.test(model)) {
+    betas.push("context-management-2025-06-27");
+  }
 
-  // Structured outputs vs token-efficient-tools: mutually exclusive.
-  // token-efficient-tools gives ~4.5% output token reduction (JSON FC v3).
-  // When both are configured, token-efficient-tools wins (per CC source:
-  // "strict wins" internally, but we prefer token savings for proxy users).
-  if (te.token_efficient_tools && !disableExperimentalBetas) {
-    betas.push("token-efficient-tools-2026-03-28");
-    // Skip structured-outputs — API rejects both together
-  } else if (supportsStructuredOutputs(model)) {
+  // Structured outputs: only -2025-12-15 is active in v2.1.90 runtime.
+  // token-efficient-tools-2026-03-28 was fully removed from v90 bundle.
+  if (supportsStructuredOutputs(model)) {
     betas.push("structured-outputs-2025-12-15");
   }
 
@@ -5631,11 +5651,8 @@ function buildAnthropicBetaHeader(
     betas.push("redact-thinking-2026-02-12");
   }
 
-  // summarize-connector-text: API summarizes assistant text between tool calls.
-  // Anti-distillation measure — same mechanism as thinking blocks (summary + signature).
-  if (te.connector_text_summarization && !disableExperimentalBetas) {
-    betas.push("summarize-connector-text-2026-03-13");
-  }
+  // summarize-connector-text-2026-03-13 was removed in v2.1.90 (dead slot njq="").
+  // compact-2026-01-12 and mcp-client-2025-11-20 exist only in docs, not runtime.
 
   // afk-mode — NOT auto-included (requires user opt-in)
   // Available via: /anthropic betas add afk-mode-2026-01-31

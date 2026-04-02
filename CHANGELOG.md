@@ -2,6 +2,41 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.0.41] — 2026-04-01
+
+### Emulation Sync — v2.1.90
+
+- **Bumped to Claude Code v2.1.90** — `FALLBACK_CLAUDE_CLI_VERSION`, `CLAUDE_CODE_BUILD_TIME` (2026-04-01T22:53:10Z), SDK version map entry (SDK 0.208.0 — unchanged)
+- **3 betas removed from v90** (verified against actual bundle, not docs):
+  - `token-efficient-tools-2026-03-28` — fully absent from v90 bundle
+  - `summarize-connector-text-2026-03-13` — dead slot `njq=""` in bundle, no-op expression
+  - `cli-internal-2026-02-09` — fully absent, ant-internal feature graduated/retired
+- **3 betas initially claimed as new were DOCS ONLY** (exist in embedded SDK documentation examples, not runtime code):
+  - `compact-2026-01-12` — 5 matches, all in TS/PY/Go/C# code examples
+  - `mcp-client-2025-11-20` — 2 matches, Java/PHP examples only
+  - `structured-outputs-2025-11-13` — 1 match in Java example; only `-2025-12-15` is active
+
+### Mimicry Improvements (verified against v90 bundle)
+
+- **`cache_control` scope correctness** — identity block now emits `{type:"ephemeral"}` without `scope` field (matching CC behavior where `scope:"org"` is internal-only, never sent on wire). Static pre-boundary blocks correctly use `scope:"global"`.
+- **Incoming `cache_control` stripping** — `normalizeSystemTextBlocks()` no longer passes through upstream `cache_control` markers, preventing "maximum of 4 blocks with cache_control" API errors when combined with our own markers.
+- **`context-management-2025-06-27` model gate** — now excluded for Claude 3.x models (`/claude-3-/i` test), matching CC's `modelSupportsContextManagement()` function. Only Claude 4+ models support this beta.
+- **Removed stale `tool-examples-2025-10-29`** from `EXPERIMENTAL_BETA_FLAGS` and `BEDROCK_UNSUPPORTED_BETAS`.
+
+### Rate Limit Improvements (from sjawhar analysis, independently validated)
+
+- **Transient 429 retry-same-account** — when `retry-after` is ≤10s and reason is `RATE_LIMIT_EXCEEDED`, sleeps and retries on the SAME account instead of rotating. Prevents wasting the account pool on momentary burst throttles.
+- **`MAX_COOLDOWN_FROM_RESET` cap (5 minutes)** — cooldowns derived from `Retry-After` headers are now capped at 300,000ms. Prevents lock-out from buggy or far-future timestamps.
+
+### Config
+
+- `token_economy.token_efficient_tools` and `token_economy.connector_text_summarization` defaults changed to `false` (deprecated — betas removed in v90). Existing user configs with `true` are harmless but have no effect.
+
+### Tests
+
+- 683 tests across 26 files, all passing
+- Updated conformance tests for v2.1.90 beta set, version strings, and removed betas
+
 ## [0.0.40] — 2026-03-31
 
 ### Internal Improvements (Plan A)
@@ -99,6 +134,13 @@ New `/anthropic set` commands: `token-efficient-tools`, `redact-thinking`, `conn
 ### Tests
 
 - All 535 tests passing (533 original + 2 new adaptive context tests)
+
+### Emulation Sync
+
+- **Bumped to Claude Code v2.1.89** — updated `FALLBACK_CLAUDE_CLI_VERSION`, `CLAUDE_CODE_BUILD_TIME`, SDK version map entry for v2.1.89 (SDK 0.208.0 — unchanged)
+- v2.1.89 is a build optimization release: 28% smaller bundle (18.2 MB → 13.1 MB), no API-facing changes
+- Beta flags, system prompt, tool definitions, and API version all identical to v2.1.88
+- New model aliases added upstream (`claude-opus-4-5`, `claude-haiku-4-5`, etc.) — already handled by regex-based model detection
 
 ## [0.0.37] — 2026-03-31
 

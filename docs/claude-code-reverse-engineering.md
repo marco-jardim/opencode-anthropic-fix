@@ -1,11 +1,11 @@
 # Claude Code Reverse Engineering — Complete Analysis
 
-**Package:** `@anthropic-ai/claude-code` v2.1.88
-**Source:** `cli.js` (13.0 MB bundled/minified)
-**Build Time:** `2026-03-30T21:59:52Z`
+**Package:** `@anthropic-ai/claude-code` v2.1.90
+**Source:** `cli.js` (12.5 MB bundled/minified)
+**Build Time:** `2026-04-01T22:53:10Z`
 **Internal Codename:** `tengu`
 **Purpose:** Full reverse-engineering for OpenCode plugin mimicry of Claude Code authentication and API calls
-**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88
+**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90
 
 ---
 
@@ -1854,7 +1854,7 @@ task-budgets-2026-03-13       (if task budget present)
 
 ### 15.19 Version Staleness — TRACKING
 
-**Status:** Requires periodic updates. Latest analyzed: `2.1.88`.
+**Status:** Requires periodic updates. Latest analyzed: `2.1.89`.
 
 **History:**
 
@@ -1863,8 +1863,9 @@ task-budgets-2026-03-13       (if task budget present)
 - v0.0.34: Updated to `2.1.84`
 - v0.0.35: Updated to `2.1.87` (v2.1.85, v2.1.86 analyzed but no breaking changes)
 - v0.0.37: Updated to `2.1.88` (no mimesis-breaking changes)
+- v0.0.40: Updated to `2.1.89` (build optimization only — 28% smaller bundle, no API changes)
 
-**Claude Code actual:** `2.1.88` (updates regularly; startup version fetch available via `fetch_claude_code_version_on_startup`).
+**Claude Code actual:** `2.1.89` (updates regularly; startup version fetch available via `fetch_claude_code_version_on_startup`).
 
 ### 15.20 Summary: Priority Fixes
 
@@ -2032,6 +2033,57 @@ This change makes static `cch=00000` values detectable as non-genuine in v2.1.81
 **Beta headers:** `tool-examples-2025-10-29` removed from base set. `task-budgets-2026-03-13` remains conditional.
 **API request shape:** STABLE — `output_config` body field conditional on task-budgets beta.
 
+### 2026-04-01 — v2.1.90 Changes (Beta Cleanup + Model Aliases)
+
+**Type:** Beta flag cleanup, new model aliases, no structural API changes.
+
+**Key changes in v2.1.90 (from v2.1.89):**
+
+| Change                             | Detail                                                                                                                                                            | Mimicry Impact       |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| **3 betas removed**                | `token-efficient-tools-2026-03-28` (fully absent), `summarize-connector-text-2026-03-13` (dead slot `njq=""`), `cli-internal-2026-02-09` (ant-only, graduated)    | HIGH — must not send |
+| **New model aliases**              | `claude-sonnet-4-6`, `claude-opus-4-6` added to model registry. Default picker now resolves to Sonnet 4.6. UltraPlan pinned to Opus 4.6.                          | LOW — regex handles  |
+| **context-management model gate**  | `context-management-2025-06-27` now explicitly gated: `modelSupportsContextManagement()` blocks Claude 3.x, allows Claude 4+ only.                                | MEDIUM               |
+| **cache_control scope verified**   | `scope:"org"` is NEVER sent on wire (internal-only). `scope:"global"` only on static pre-boundary blocks. Identity block gets `{type:"ephemeral"}` without scope. | HIGH                 |
+| **3 doc-only betas (NOT runtime)** | `compact-2026-01-12`, `mcp-client-2025-11-20`, `structured-outputs-2025-11-13` exist in embedded SDK docs only.                                                   | NONE — must not add  |
+| **SDK version unchanged**          | Still `@anthropic-ai/sdk` v0.208.0                                                                                                                                | NONE                 |
+| **Bundle size**                    | 12.5 MB (from 13.1 MB)                                                                                                                                            | NONE                 |
+
+**Fixes implemented in plugin v0.0.41:**
+
+- Updated version constants and SDK map for v2.1.90
+- Removed 3 dead betas from composition; verified no docs-only betas were added
+- Added Claude 3.x gate for context-management beta
+- Fixed cache_control scope: identity block now `{type:"ephemeral"}` without scope
+- Stripped incoming cache_control in normalizeSystemTextBlocks
+- Added transient 429 retry-same-account and MAX_COOLDOWN_FROM_RESET cap
+
+### 2026-04-01 — v2.1.89 Changes (Build Optimization, No Mimesis Impact)
+
+**Type:** Build/bundling optimization only. No OAuth/auth, beta, header, body, or tool changes.
+
+**Key changes in v2.1.89 (from v2.1.88):**
+
+| Change                          | Detail                                                                                                           | Mimicry Impact |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------------- |
+| **Bundle size reduction (28%)** | `cli.js` dropped from 18.2 MB to 13.1 MB — improved tree-shaking and bundler optimization.                       | NONE           |
+| **Opus timeout map (NEW)**      | New internal map gives Opus 4.0/4.1 models 8192ms extended timeouts. Client-side only.                           | NONE           |
+| **Expanded model aliases**      | Adds `claude-opus-4-5`, `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-haiku-4`, `claude-haiku` short aliases. | NONE           |
+| **Beta flags unchanged**        | Identical set to v2.1.88. No new betas, no removed betas.                                                        | NONE           |
+| **SDK version unchanged**       | v2.1.89 still bundles `@anthropic-ai/sdk` v0.208.0.                                                              | NONE           |
+| **System prompt unchanged**     | Same identity blocks, modular architecture, billing headers as v2.1.88.                                          | NONE           |
+| **Tool definitions unchanged**  | Same 25 tools in `sdk-tools.d.ts` (2,723 lines).                                                                 | NONE           |
+
+**Fixes implemented in plugin v0.0.40:**
+
+- Updated `FALLBACK_CLAUDE_CLI_VERSION` to `"2.1.89"` and `CLAUDE_CODE_BUILD_TIME` to `"2026-03-31T22:55:14Z"`
+- Added v2.1.89 entry to `CLI_TO_SDK_VERSION` map (SDK 0.208.0)
+- No code changes needed — all v89 changes are build-level optimizations
+
+**OAuth/Auth:** STABLE — no changes.
+**Beta headers:** STABLE — identical set to v2.1.88.
+**API request shape:** STABLE — no new body fields.
+
 ### 2026-03-31 — v2.1.88 Changes (Internal Refactors, No Mimesis Impact)
 
 **Type:** Client-side changes only. No OAuth/auth, beta, header, or body changes.
@@ -2161,5 +2213,5 @@ REVIEW.md violations are treated as nit-level findings.
 ---
 
 _Generated by reverse-engineering `@anthropic-ai/claude-code` cli.js bundle._
-_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88_
-_Last updated: 2026-03-31_
+_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90_
+_Last updated: 2026-04-01_

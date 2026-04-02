@@ -730,7 +730,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.88");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.90");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.has("x-api-key")).toBe(false);

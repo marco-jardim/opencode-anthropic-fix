@@ -808,11 +808,11 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all required always-on betas for non-Haiku model (v2.1.88 set)", async () => {
+  it("contains all required always-on betas for non-Haiku model (v2.1.90 set)", async () => {
     const { headers } = await sendRequest(fetchFn);
     const beta = headers.get("anthropic-beta");
 
-    // RE doc §15.16 always-on set — synced to v2.1.88
+    // RE doc §15.16 always-on set — synced to v2.1.90
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
     expect(beta).toContain("advanced-tool-use-2025-11-20");
@@ -826,10 +826,10 @@ describe("E2E: Beta composition is complete and correct", () => {
     expect(beta).toContain("advanced-tool-use-2025-11-20");
 
     // Token economy betas (config-controlled, defaults in DEFAULT_CONFIG.token_economy)
-    // token-efficient-tools is on by default
-    expect(beta).toContain("token-efficient-tools-2026-03-28");
-    // connector-text is on by default
-    expect(beta).toContain("summarize-connector-text-2026-03-13");
+    // token-efficient-tools was removed in v2.1.90 (fully absent from bundle)
+    expect(beta).not.toContain("token-efficient-tools-2026-03-28");
+    // summarize-connector-text was removed in v2.1.90 (dead slot njq="")
+    expect(beta).not.toContain("summarize-connector-text-2026-03-13");
     // redact-thinking is off by default
     expect(beta).not.toContain("redact-thinking-2026-02-12");
 
@@ -915,7 +915,7 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
-describe("E2E: Version is 2.1.88", () => {
+describe("E2E: Version is 2.1.90", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -924,17 +924,17 @@ describe("E2E: Version is 2.1.88", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.88", async () => {
+  it("User-Agent contains 2.1.90", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.88");
+    expect(headers.get("user-agent")).toContain("2.1.90");
   });
 
-  it("billing header contains 2.1.88", async () => {
+  it("billing header contains 2.1.90", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.88");
+    expect(body.system[0].text).toContain("2.1.90");
   });
 });
 
