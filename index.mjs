@@ -145,19 +145,22 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
   /** @type {Set<string>} */
   const idleRefreshInFlight = new Set();
 
-  const IDLE_REFRESH_ENABLED = config.idle_refresh.enabled;
-  const IDLE_REFRESH_WINDOW_MS = config.idle_refresh.window_minutes * 60 * 1000;
-  const IDLE_REFRESH_MIN_INTERVAL_MS = config.idle_refresh.min_interval_minutes * 60 * 1000;
+  // QA fix H3: use getter functions so /anthropic set toggles take effect at runtime
+  // (same pattern as getSignatureEmulationEnabled at line 113).
+  const getIdleRefreshEnabled = () => config.idle_refresh.enabled;
+  const getIdleRefreshWindowMs = () => config.idle_refresh.window_minutes * 60 * 1000;
+  const getIdleRefreshMinIntervalMs = () => config.idle_refresh.min_interval_minutes * 60 * 1000;
 
   // Willow Mode: detect inactivity and suggest context reset.
   // Named after the willow tree — when idle, the session "droops" and a gentle
   // nudge suggests starting fresh rather than accumulating stale context.
-  const WILLOW_ENABLED = config.willow_mode?.enabled ?? true;
-  const WILLOW_IDLE_THRESHOLD_MS = (config.willow_mode?.idle_threshold_minutes ?? 30) * 60 * 1000;
-  const WILLOW_COOLDOWN_MS = (config.willow_mode?.cooldown_minutes ?? 60) * 60 * 1000;
-  const WILLOW_MIN_TURNS = config.willow_mode?.min_turns_before_suggest ?? 3;
+  const getWillowEnabled = () => config.willow_mode?.enabled ?? true;
+  const getWillowIdleThresholdMs = () => (config.willow_mode?.idle_threshold_minutes ?? 30) * 60 * 1000;
+  const getWillowCooldownMs = () => (config.willow_mode?.cooldown_minutes ?? 60) * 60 * 1000;
+  const getWillowMinTurns = () => config.willow_mode?.min_turns_before_suggest ?? 3;
   let willowLastRequestTime = Date.now();
   let willowLastSuggestionTime = 0;
+  let _lastOAuthPruneTime = 0; // QA fix L-oauthPrune: throttle for periodic prune
 
   // Beta header latching: once a beta is sent in a session, it stays on for
   // the rest of the session to prevent cache key churn (~50-70K tokens per flip).
@@ -645,8 +648,14 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           requests: 0,
           inputTokens: 0,
           updatedAt: 0,
-          fiveHour: { utilization: 0, resets_at: null },
-          sevenDay: { utilization: 0, resets_at: null },
+          fiveHour: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
+          sevenDay: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
+          overallStatus: null,
+          representativeClaim: null,
+          fallback: null,
+          fallbackPercentage: null,
+          overageStatus: null,
+          overageReason: null,
           lastPollAt: 0,
         };
         sessionMetrics.lastStopReason = null;
@@ -740,22 +749,25 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       // Quota info (if available from rate-limit headers)
       if (sessionMetrics.lastQuota.updatedAt > 0) {
         const q = sessionMetrics.lastQuota;
-        const quotaParts = [];
-        // QA fix L8: show 0% utilization too — valid data point meaning plenty of capacity
-        quotaParts.push(`tokens: ${(q.tokens * 100).toFixed(0)}%`);
-        quotaParts.push(`requests: ${(q.requests * 100).toFixed(0)}%`);
-        quotaParts.push(`input-tokens: ${(q.inputTokens * 100).toFixed(0)}%`);
-        lines.push("", `Rate limit utilization: ${quotaParts.join(", ")}`);
-      }
-
-      // Usage endpoint data (A6)
-      if (sessionMetrics.lastQuota.lastPollAt > 0) {
-        const q5h = sessionMetrics.lastQuota.fiveHour;
-        const q7d = sessionMetrics.lastQuota.sevenDay;
-        const pollAge = Math.round((Date.now() - sessionMetrics.lastQuota.lastPollAt) / 60_000);
-        lines.push("", `Usage endpoint (${pollAge}m ago):`);
-        lines.push(`  5-hour: ${q5h.utilization.toFixed(0)}% used${q5h.resets_at ? ` (resets ${q5h.resets_at})` : ""}`);
-        lines.push(`  7-day:  ${q7d.utilization.toFixed(0)}% used${q7d.resets_at ? ` (resets ${q7d.resets_at})` : ""}`);
+        const q5h = q.fiveHour;
+        const q7d = q.sevenDay;
+        lines.push("", `Rate limit utilization:`);
+        lines.push(
+          `  5-hour: ${q5h.utilization.toFixed(0)}% used${q5h.status ? ` [${q5h.status}]` : ""}${q5h.resets_at ? ` (resets ${q5h.resets_at})` : ""}`,
+        );
+        lines.push(
+          `  7-day:  ${q7d.utilization.toFixed(0)}% used${q7d.status ? ` [${q7d.status}]` : ""}${q7d.resets_at ? ` (resets ${q7d.resets_at})` : ""}`,
+        );
+        if (q.overallStatus)
+          lines.push(
+            `  Status: ${q.overallStatus}${q.representativeClaim ? ` (claim: ${q.representativeClaim})` : ""}`,
+          );
+        if (q.fallback)
+          lines.push(
+            `  Fallback: ${q.fallback}${q.fallbackPercentage != null ? ` (${(q.fallbackPercentage * 100).toFixed(0)}%)` : ""}`,
+          );
+        if (q.overageStatus)
+          lines.push(`  Overage: ${q.overageStatus}${q.overageReason ? ` (${q.overageReason})` : ""}`);
       }
 
       // Token budget display (A9)
@@ -789,16 +801,39 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
         const filled = Math.max(0, Math.min(20, Math.round(pct * 20)));
         return "[" + "█".repeat(filled) + "░".repeat(20 - filled) + "]";
       };
+      const q5h = q.fiveHour;
+      const q7d = q.sevenDay;
       const lines = [
         "▣ Anthropic Rate Limit Quota",
         "",
-        `Tokens:       ${bar(q.tokens)} ${(q.tokens * 100).toFixed(0)}%`,
-        `Requests:     ${bar(q.requests)} ${(q.requests * 100).toFixed(0)}%`,
-        `Input tokens: ${bar(q.inputTokens)} ${(q.inputTokens * 100).toFixed(0)}%`,
+        `5-hour window:`,
+        `  ${bar(q5h.utilization / 100)} ${q5h.utilization.toFixed(0)}%${q5h.status ? `  [${q5h.status}]` : ""}`,
+        q5h.resets_at ? `  Resets: ${q5h.resets_at}` : null,
+        q5h.surpassedThreshold != null ? `  Surpassed threshold: ${(q5h.surpassedThreshold * 100).toFixed(0)}%` : null,
         "",
-        `Last updated: ${agoStr}`,
-      ];
-      const maxUtil = Math.max(q.tokens, q.requests, q.inputTokens);
+        `7-day window:`,
+        `  ${bar(q7d.utilization / 100)} ${q7d.utilization.toFixed(0)}%${q7d.status ? `  [${q7d.status}]` : ""}`,
+        q7d.resets_at ? `  Resets: ${q7d.resets_at}` : null,
+        q7d.surpassedThreshold != null ? `  Surpassed threshold: ${(q7d.surpassedThreshold * 100).toFixed(0)}%` : null,
+        "",
+      ].filter(Boolean);
+
+      if (q.overallStatus) {
+        lines.push(
+          `Overall status: ${q.overallStatus}${q.representativeClaim ? ` (claim: ${q.representativeClaim})` : ""}`,
+        );
+      }
+      if (q.fallback) {
+        lines.push(
+          `Fallback: ${q.fallback}${q.fallbackPercentage != null ? ` (${(q.fallbackPercentage * 100).toFixed(0)}% capacity)` : ""}`,
+        );
+      }
+      if (q.overageStatus) {
+        lines.push(`Overage: ${q.overageStatus}${q.overageReason ? ` (${q.overageReason})` : ""}`);
+      }
+      lines.push("", `Last updated: ${agoStr}`);
+
+      const maxUtil = Math.max(q5h.utilization, q7d.utilization) / 100;
       if (maxUtil >= 0.9) {
         lines.push("", "⚠ High utilization — consider slowing request rate or rotating accounts");
       } else if (maxUtil >= 0.7) {
@@ -902,16 +937,38 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       const value = (args[2] || "").toLowerCase();
       /** @type {Record<string, () => void>} */
       const setters = {
-        emulation: () =>
-          saveConfig({ signature_emulation: { enabled: value === "on" || value === "1" || value === "true" } }),
-        compaction: () =>
-          saveConfig({ signature_emulation: { prompt_compaction: value === "off" ? "off" : "minimal" } }),
-        "1m-context": () =>
-          saveConfig({ override_model_limits: { enabled: value === "on" || value === "1" || value === "true" } }),
-        "idle-refresh": () =>
-          saveConfig({ idle_refresh: { enabled: value === "on" || value === "1" || value === "true" } }),
-        debug: () => saveConfig({ debug: value === "on" || value === "1" || value === "true" }),
-        quiet: () => saveConfig({ toasts: { quiet: value === "on" || value === "1" || value === "true" } }),
+        emulation: () => {
+          const enabled = value === "on" || value === "1" || value === "true";
+          saveConfig({ signature_emulation: { enabled } });
+          config.signature_emulation.enabled = enabled;
+        },
+        compaction: () => {
+          const mode = value === "off" ? "off" : "minimal";
+          saveConfig({ signature_emulation: { prompt_compaction: mode } });
+          config.signature_emulation.prompt_compaction = mode;
+        },
+        "1m-context": () => {
+          const enabled = value === "on" || value === "1" || value === "true";
+          saveConfig({ override_model_limits: { enabled } });
+          if (!config.override_model_limits) config.override_model_limits = { enabled: false };
+          config.override_model_limits.enabled = enabled;
+        },
+        "idle-refresh": () => {
+          const enabled = value === "on" || value === "1" || value === "true";
+          saveConfig({ idle_refresh: { enabled } });
+          if (!config.idle_refresh) config.idle_refresh = { enabled: false };
+          config.idle_refresh.enabled = enabled;
+        },
+        debug: () => {
+          const enabled = value === "on" || value === "1" || value === "true";
+          saveConfig({ debug: enabled });
+          config.debug = enabled;
+        },
+        quiet: () => {
+          const enabled = value === "on" || value === "1" || value === "true";
+          saveConfig({ toasts: { quiet: enabled } });
+          config.toasts.quiet = enabled;
+        },
         strategy: () => {
           const valid = ["sticky", "round-robin", "hybrid"];
           if (valid.includes(value)) {
@@ -920,12 +977,18 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
             strategyState.mode = "CONFIGURED";
           } else throw new Error(`Invalid strategy. Valid: ${valid.join(", ")}`);
         },
-        boundary: () =>
-          saveConfig({ cache_policy: { boundary_marker: value === "on" || value === "1" || value === "true" } }),
+        boundary: () => {
+          const enabled = value === "on" || value === "1" || value === "true";
+          saveConfig({ cache_policy: { boundary_marker: enabled } });
+          if (!config.cache_policy) config.cache_policy = {};
+          config.cache_policy.boundary_marker = enabled;
+        },
         "cache-ttl": () => {
           const valid = ["1h", "5m", "off"];
-          if (valid.includes(value)) saveConfig({ cache_policy: { ttl: value } });
-          else throw new Error(`Invalid TTL. Valid: ${valid.join(", ")}`);
+          if (!valid.includes(value)) throw new Error(`Invalid TTL. Valid: ${valid.join(", ")}`);
+          saveConfig({ cache_policy: { ttl: value } });
+          if (!config.cache_policy) config.cache_policy = {};
+          config.cache_policy.ttl = value;
         },
         fast: () => {
           const enabled = value === "on" || value === "true" || value === "1";
@@ -1876,8 +1939,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
         }
         debouncedToastTimestamps.set(options.debounceKey, now);
         // QA fix M2: prune stale entries to prevent unbounded growth
+        // QA fix L-debounce: use fixed 5-minute cutoff instead of config-dependent minGapMs*2
+        // to avoid entries surviving longer than intended if debounce_seconds changes at runtime
         if (debouncedToastTimestamps.size > 200) {
-          const cutoff = now - minGapMs * 2;
+          const cutoff = now - 300_000; // 5 minutes — generous for any realistic debounce window
           for (const [k, ts] of debouncedToastTimestamps) {
             if (ts < cutoff) debouncedToastTimestamps.delete(k);
           }
@@ -2133,16 +2198,16 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
    * @param {import('./lib/accounts.mjs').ManagedAccount} activeAccount
    */
   function maybeRefreshIdleAccounts(activeAccount) {
-    if (!IDLE_REFRESH_ENABLED || !accountManager) return;
+    if (!getIdleRefreshEnabled() || !accountManager) return;
 
     const now = Date.now();
     const excluded = new Set([activeAccount.index]);
     const candidates = accountManager
       .getEnabledAccounts(excluded)
-      .filter((acc) => !acc.expires || acc.expires <= now + IDLE_REFRESH_WINDOW_MS)
+      .filter((acc) => !acc.expires || acc.expires <= now + getIdleRefreshWindowMs())
       .filter((acc) => {
         const last = idleRefreshLastAttempt.get(acc.id) ?? 0;
-        return now - last >= IDLE_REFRESH_MIN_INTERVAL_MS;
+        return now - last >= getIdleRefreshMinIntervalMs();
       })
       .sort((a, b) => (a.expires ?? 0) - (b.expires ?? 0));
 
@@ -2324,14 +2389,24 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 await accountManager.syncActiveIndexFromDisk();
               }
 
+              // QA fix L-oauthPrune: periodically prune expired pending OAuth flows on API requests
+              // (throttled to at most once per 60 seconds) to avoid PKCE verifiers living in memory indefinitely.
+              {
+                const _now = Date.now();
+                if (_now - _lastOAuthPruneTime > 60_000) {
+                  _lastOAuthPruneTime = _now;
+                  pruneExpiredPendingOAuth();
+                }
+              }
+
               // Willow Mode: if the session has been idle for longer than the
               // configured threshold and has enough turns, show a gentle toast
               // suggesting the user consider starting a fresh context.
-              if (WILLOW_ENABLED && showUsageToast) {
+              if (getWillowEnabled() && showUsageToast) {
                 const now = Date.now();
                 const idleMs = now - willowLastRequestTime;
-                const cooldownOk = now - willowLastSuggestionTime >= WILLOW_COOLDOWN_MS;
-                if (idleMs >= WILLOW_IDLE_THRESHOLD_MS && cooldownOk && sessionMetrics.turns >= WILLOW_MIN_TURNS) {
+                const cooldownOk = now - willowLastSuggestionTime >= getWillowCooldownMs();
+                if (idleMs >= getWillowIdleThresholdMs() && cooldownOk && sessionMetrics.turns >= getWillowMinTurns()) {
                   const idleMin = Math.round(idleMs / 60_000);
                   willowLastSuggestionTime = now;
                   toast(
@@ -2401,6 +2476,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
               let _adaptiveDecisionMade = false; // Ensure adaptive context decision is made only once per logical request
               let _adaptiveOverrideForRequest; // Cached adaptive override for all retry attempts
               let _overloadRecoveryAttempted = false; // Guard: only one quota-aware switch per request
+              let _connectionResetRetries = 0; // Cap ECONNRESET/EPIPE retries to prevent infinite loop
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account — use pinned account on first attempt if available
                 const account =
@@ -2656,7 +2732,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 const effectiveCachePolicy = latchedCachePolicy ||
                   config.cache_policy || { ttl: "1h", ttl_supported: true };
 
-                let body = transformRequestBody(
+                const body = transformRequestBody(
                   requestInit.body,
                   {
                     enabled: getSignatureEmulationEnabled(),
@@ -2736,11 +2812,13 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     errMsg.includes("socket hang up") ||
                     errMsg.includes("network socket disconnected");
 
-                  if (isConnectionReset) {
+                  if (isConnectionReset && _connectionResetRetries < 3) {
+                    _connectionResetRetries++;
                     requestInit._disableKeepalive = true;
                     debugLog("connection reset detected, disabling keepalive for retry", {
                       code: errCode,
                       message: errMsg,
+                      retryCount: _connectionResetRetries,
                     });
                     // Don't mark the account as failed — this is a transport issue, not auth.
                     // Retry the same account with keepalive disabled.
@@ -2765,34 +2843,90 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   throw fetchError;
                 }
 
+                // Debug: log all response headers to file for diagnosis
+                // Placed BEFORE the response.ok guard so we capture headers on ALL responses
+                if (config.debug) {
+                  const rlHeaders = {};
+                  const allHeaders = {};
+                  response.headers.forEach((value, key) => {
+                    allHeaders[key] = value;
+                    if (key.includes("ratelimit") || key.includes("retry") || key.includes("x-should")) {
+                      rlHeaders[key] = value;
+                    }
+                  });
+                  debugLog(
+                    "response status:",
+                    response.status,
+                    "ok:",
+                    response.ok,
+                    "account:",
+                    !!account,
+                    "accountManager:",
+                    !!accountManager,
+                  );
+                  debugLog("ALL response headers:", allHeaders);
+                  // Write to file for reliable access
+                  try {
+                    const { writeFileSync } = await import("node:fs");
+                    const { join } = await import("node:path");
+                    const debugFile = join(getConfigDir(), "debug-headers.log");
+                    const ts = new Date().toISOString();
+                    const entry = [
+                      `\n=== ${ts} | status=${response.status} ok=${response.ok} account=${!!account} mgr=${!!accountManager} ===`,
+                      `Rate-limit headers: ${JSON.stringify(rlHeaders, null, 2)}`,
+                      `All headers: ${JSON.stringify(allHeaders, null, 2)}`,
+                      "",
+                    ].join("\n");
+                    writeFileSync(debugFile, entry, { flag: "a" });
+                  } catch (e) {
+                    debugLog("failed to write debug-headers.log", e);
+                  }
+                }
+
                 // Proactive rate limit detection from response headers
-                // Check all rate-limit subtypes: tokens, requests, input-tokens (RE doc §5.6)
+                // Anthropic sends window-based unified headers: 5h and 7d windows
                 if (response.ok && account && accountManager) {
-                  const RATE_LIMIT_SUBTYPES = ["tokens", "requests", "input-tokens"];
+                  const RATE_LIMIT_WINDOWS = [
+                    { key: "5h", field: "fiveHour", windowMs: 5 * 3600 * 1000 },
+                    { key: "7d", field: "sevenDay", windowMs: 7 * 24 * 3600 * 1000 },
+                  ];
                   let maxUtilization = 0;
-                  let maxUtilizationSubtype = "";
+                  let maxUtilizationWindow = "";
                   let anySurpassed = false;
                   let surpassedResetAt = null;
 
-                  for (const subtype of RATE_LIMIT_SUBTYPES) {
-                    const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${subtype}-utilization`);
+                  // Also capture overall status and fallback info
+                  const overallStatus = response.headers.get("anthropic-ratelimit-unified-status");
+                  const representativeClaim = response.headers.get("anthropic-ratelimit-unified-representative-claim");
+                  const fallbackStatus = response.headers.get("anthropic-ratelimit-unified-fallback");
+                  const fallbackPct = response.headers.get("anthropic-ratelimit-unified-fallback-percentage");
+                  const overageStatus = response.headers.get("anthropic-ratelimit-unified-overage-status");
+                  const overageReason = response.headers.get("anthropic-ratelimit-unified-overage-disabled-reason");
+
+                  for (const win of RATE_LIMIT_WINDOWS) {
+                    const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${win.key}-utilization`);
+                    const status = response.headers.get(`anthropic-ratelimit-unified-${win.key}-status`);
                     const surpassed = response.headers.get(
-                      `anthropic-ratelimit-unified-${subtype}-surpassed-threshold`,
+                      `anthropic-ratelimit-unified-${win.key}-surpassed-threshold`,
                     );
-                    const resetAt = response.headers.get(`anthropic-ratelimit-unified-${subtype}-reset`);
+                    const resetAt = response.headers.get(`anthropic-ratelimit-unified-${win.key}-reset`);
 
                     if (utilizationStr) {
                       const utilization = parseFloat(utilizationStr);
                       if (!isNaN(utilization)) {
-                        // Store per-subtype quota for user display
-                        if (subtype === "tokens") sessionMetrics.lastQuota.tokens = utilization;
-                        else if (subtype === "requests") sessionMetrics.lastQuota.requests = utilization;
-                        else if (subtype === "input-tokens") sessionMetrics.lastQuota.inputTokens = utilization;
+                        // Store per-window quota for user display
+                        const resetDate = resetAt ? new Date(parseInt(resetAt) * 1000).toISOString() : null;
+                        sessionMetrics.lastQuota[win.field] = {
+                          utilization: utilization * 100, // store as percentage 0-100
+                          resets_at: resetDate,
+                          status: status || null,
+                          surpassedThreshold: surpassed ? parseFloat(surpassed) : null,
+                        };
                         sessionMetrics.lastQuota.updatedAt = Date.now();
 
                         if (utilization > maxUtilization) {
                           maxUtilization = utilization;
-                          maxUtilizationSubtype = subtype;
+                          maxUtilizationWindow = win.key;
                         }
                       }
                     }
@@ -2803,12 +2937,30 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     }
                   }
 
+                  // Store overall/fallback/overage info
+                  if (overallStatus) {
+                    sessionMetrics.lastQuota.overallStatus = overallStatus;
+                    sessionMetrics.lastQuota.representativeClaim = representativeClaim;
+                    sessionMetrics.lastQuota.fallback = fallbackStatus;
+                    sessionMetrics.lastQuota.fallbackPercentage = fallbackPct ? parseFloat(fallbackPct) : null;
+                    sessionMetrics.lastQuota.overageStatus = overageStatus;
+                    sessionMetrics.lastQuota.overageReason = overageReason;
+                  }
+
+                  // Back-compat: also update tokens/requests/inputTokens from the highest window
+                  // so existing code that reads these fields still works
+                  if (maxUtilization > 0) {
+                    sessionMetrics.lastQuota.tokens = maxUtilization;
+                    sessionMetrics.lastQuota.requests = maxUtilization;
+                    sessionMetrics.lastQuota.inputTokens = maxUtilization;
+                  }
+
                   if (maxUtilization > 0.8) {
                     const penalty = Math.round((maxUtilization - 0.8) * 50); // 0-10 points
                     accountManager.applyUtilizationPenalty(account, penalty);
                     debugLog("high rate limit utilization", {
                       accountIndex: account.index,
-                      subtype: maxUtilizationSubtype,
+                      window: maxUtilizationWindow,
                       utilization: (maxUtilization * 100).toFixed(1) + "%",
                       penalty,
                     });
@@ -2825,7 +2977,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   // Toast at 90%+ utilization to warn user before rate limit hits
                   if (maxUtilization >= 0.9 && !config.toasts?.quiet) {
                     toast(
-                      `Rate limit ${maxUtilizationSubtype}: ${(maxUtilization * 100).toFixed(0)}% utilized`,
+                      `Rate limit ${maxUtilizationWindow} window: ${(maxUtilization * 100).toFixed(0)}% utilized`,
                       "warning",
                       { debounceKey: "quota-warn" },
                     ).catch(() => {});
@@ -2835,21 +2987,19 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   // Parse reset timestamps to compute time-weighted risk
                   if (maxUtilization > 0.6 && accountManager.getAccountCount() > 1) {
                     let highestRisk = 0;
-                    for (const subtype of RATE_LIMIT_SUBTYPES) {
-                      const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${subtype}-utilization`);
-                      const resetAtStr = response.headers.get(`anthropic-ratelimit-unified-${subtype}-reset`);
+                    for (const win of RATE_LIMIT_WINDOWS) {
+                      const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${win.key}-utilization`);
+                      const resetAtStr = response.headers.get(`anthropic-ratelimit-unified-${win.key}-reset`);
                       if (!utilizationStr || !resetAtStr) continue;
 
                       const utilization = parseFloat(utilizationStr);
-                      const resetAt = new Date(resetAtStr).getTime();
-                      if (isNaN(utilization) || isNaN(resetAt)) continue;
+                      const resetEpoch = parseInt(resetAtStr) * 1000; // unix epoch seconds → ms
+                      if (isNaN(utilization) || isNaN(resetEpoch)) continue;
 
-                      // Estimate window duration from reset time
-                      // 5h window = 18000s, 7d window = 604800s
-                      const timeUntilReset = Math.max(0, resetAt - Date.now());
+                      const timeUntilReset = Math.max(0, resetEpoch - Date.now());
                       // Risk formula: how fast we're burning through the quota
                       // Higher utilization + less time remaining = higher risk
-                      const timeRemainingFraction = Math.max(0.01, timeUntilReset / (5 * 3600 * 1000)); // assume 5h window
+                      const timeRemainingFraction = Math.max(0.01, timeUntilReset / win.windowMs);
                       const risk = utilization / timeRemainingFraction;
                       if (risk > highestRisk) highestRisk = risk;
                     }
@@ -2859,7 +3009,9 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       const currentName = account.email || `Account ${account.index + 1}`;
                       const nextAccount = accountManager.peekNextAccount?.();
                       const nextName = nextAccount?.email || "next account";
-                      accountManager.markRateLimited(account, "RATE_LIMIT_EXCEEDED", null);
+                      // QA fix L-predictive: use markPreemptiveSwitch instead of markRateLimited
+                      // — the request succeeded (200), so don't penalise consecutiveFailures or health.
+                      accountManager.markPreemptiveSwitch(account);
                       toast(
                         `Predictive switch: ${currentName} at high burn rate, switching to ${nextName}`,
                         "warning",
@@ -2877,7 +3029,28 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 if (!response.ok && accountManager && account) {
                   let errorBody = null;
                   try {
-                    errorBody = await response.clone().text();
+                    // QA fix L-errorBody: size-bound the read (16 KB) to avoid OOM on large error responses,
+                    // and add a 5s timeout so streaming error bodies don't stall the retry logic.
+                    const cloned = response.clone();
+                    const reader = cloned.body?.getReader();
+                    if (reader) {
+                      const chunks = [];
+                      let totalLen = 0;
+                      const maxLen = 16_384;
+                      const deadline = Date.now() + 5_000;
+                      while (totalLen < maxLen && Date.now() < deadline) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value);
+                        totalLen += value.byteLength;
+                      }
+                      reader.cancel().catch(() => {});
+                      errorBody = new TextDecoder()
+                        .decode(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks))
+                        .slice(0, maxLen);
+                    } else {
+                      errorBody = await cloned.text();
+                    }
                   } catch {
                     // Ignore read errors in debug logging path.
                   }
@@ -2909,11 +3082,12 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                             margin,
                           });
                           try {
-                            const recoveryBody = JSON.parse(body);
+                            // QA fix: parse from requestInit.body (pre-transform) to avoid
+                            // double-transformation (mcp_ prefix, system blocks, metadata).
+                            const recoveryBody = JSON.parse(requestInit.body);
                             recoveryBody.max_tokens = safeMaxTokens;
                             requestInit.body = JSON.stringify(recoveryBody);
-                            // Update `body` variable for subsequent iterations
-                            body = requestInit.body;
+                            _parsedBodyOnce = null; // Invalidate stale parsed cache
                             requestInit._overflowRecoveryAttempted = true;
                             attempt--;
                             toast(
@@ -2943,7 +3117,9 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       }
                     }
                     try {
-                      const parsedBody = JSON.parse(body);
+                      // QA fix: parse from requestInit.body (pre-transform) to avoid
+                      // double-transformation (mcp_ prefix, system blocks, metadata).
+                      const parsedBody = JSON.parse(requestInit.body);
                       if (Array.isArray(parsedBody.messages) && parsedBody.messages.length > 4) {
                         // Keep first 2 messages (initial context) and last 2 messages (recent work).
                         // Ensure the trimmed array never ends with an assistant message (prefill),
@@ -2992,6 +3168,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                         // tool_result was in a trimmed middle message).
                         parsedBody.messages = repairOrphanedToolUseBlocks(trimmed);
                         requestInit.body = JSON.stringify(parsedBody);
+                        _parsedBodyOnce = null; // Invalidate stale parsed cache
                         requestInit._reactiveCompactAttempted = true;
                         // Retry with trimmed messages (decrement attempt to not consume account slot)
                         attempt--;
@@ -3125,9 +3302,11 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     // Track consecutive 529s for model fallback
                     if (response.status === 529) {
                       consecutive529Count++;
-                      if (consecutive529Count >= 3 && body) {
+                      if (consecutive529Count >= 3 && requestInit.body) {
                         try {
-                          const parsedForFallback = JSON.parse(body);
+                          // QA fix: parse from requestInit.body (pre-transform) to avoid
+                          // double-transformation (mcp_ prefix, system blocks, metadata).
+                          const parsedForFallback = JSON.parse(requestInit.body);
                           const currentModel = parsedForFallback.model || "";
                           let fallbackModel = null;
                           if (/opus-4-6|opus-4/i.test(currentModel))
@@ -3138,7 +3317,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                           if (fallbackModel) {
                             parsedForFallback.model = fallbackModel;
                             requestInit.body = JSON.stringify(parsedForFallback);
-                            body = requestInit.body;
+                            _parsedBodyOnce = null; // Invalidate stale parsed cache
                             toast(
                               `Model fallback: ${currentModel} → ${fallbackModel} after ${consecutive529Count} overloads`,
                               "warning",
@@ -3580,7 +3759,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 // Session-level cache & cost tracking (Phase 4)
 // ---------------------------------------------------------------------------
 
-/** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, totalWebSearchRequests: number, recentCacheRates: number[], sessionCostUsd: number, costBreakdown: {input: number, output: number, cacheRead: number, cacheWrite: number}, sessionStartTime: number, lastQuota: {tokens: number, requests: number, inputTokens: number, updatedAt: number, fiveHour: {utilization: number, resets_at: string|null}, sevenDay: {utilization: number, resets_at: string|null}, lastPollAt: number}, lastStopReason: string | null, perModel: Record<string, {input: number, output: number, cacheRead: number, cacheWrite: number, costUsd: number, turns: number}>, lastModelId: string | null, lastRequestBody: string | null, tokenBudget: {limit: number, used: number, continuations: number, outputHistory: number[]}}} */
+/** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, totalWebSearchRequests: number, recentCacheRates: number[], sessionCostUsd: number, costBreakdown: {input: number, output: number, cacheRead: number, cacheWrite: number}, sessionStartTime: number, lastQuota: {tokens: number, requests: number, inputTokens: number, updatedAt: number, fiveHour: {utilization: number, resets_at: string|null, status: string|null, surpassedThreshold: number|null}, sevenDay: {utilization: number, resets_at: string|null, status: string|null, surpassedThreshold: number|null}, overallStatus: string|null, representativeClaim: string|null, fallback: string|null, fallbackPercentage: number|null, overageStatus: string|null, overageReason: string|null, lastPollAt: number}, lastStopReason: string | null, perModel: Record<string, {input: number, output: number, cacheRead: number, cacheWrite: number, costUsd: number, turns: number}>, lastModelId: string | null, lastRequestBody: string | null, tokenBudget: {limit: number, used: number, continuations: number, outputHistory: number[]}}} */
 const sessionMetrics = {
   turns: 0,
   totalInput: 0,
@@ -3597,9 +3776,17 @@ const sessionMetrics = {
     requests: 0,
     inputTokens: 0,
     updatedAt: 0,
+    // Window-based unified headers from response
+    fiveHour: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
+    sevenDay: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
+    // Overall/fallback/overage from response headers
+    overallStatus: null,
+    representativeClaim: null,
+    fallback: null,
+    fallbackPercentage: null,
+    overageStatus: null,
+    overageReason: null,
     // Usage endpoint polling (A6)
-    fiveHour: { utilization: 0, resets_at: null },
-    sevenDay: { utilization: 0, resets_at: null },
     lastPollAt: 0,
   },
   lastStopReason: null, // tracks most recent stop_reason for output cap escalation
@@ -3725,12 +3912,14 @@ async function pollOAuthUsage(config, accessToken) {
     const data = await resp.json();
     if (data.five_hour) {
       sessionMetrics.lastQuota.fiveHour = {
+        ...sessionMetrics.lastQuota.fiveHour,
         utilization: data.five_hour.utilization ?? 0,
         resets_at: data.five_hour.resets_at ?? null,
       };
     }
     if (data.seven_day) {
       sessionMetrics.lastQuota.sevenDay = {
+        ...sessionMetrics.lastQuota.sevenDay,
         utilization: data.seven_day.utilization ?? 0,
         resets_at: data.seven_day.resets_at ?? null,
       };
@@ -3878,10 +4067,10 @@ function tryQuotaAwareAccountSwitch(account, accountManager, config) {
  * @param {string} bodyStr - JSON request body
  * @returns {Map<string, string>} source_id → hash
  */
-function extractCacheSourceHashes(bodyStr) {
+function extractCacheSourceHashes(bodyStr, parsedBody = undefined) {
   const hashes = new Map();
   try {
-    const parsed = JSON.parse(bodyStr);
+    const parsed = parsedBody ?? JSON.parse(bodyStr);
 
     // Hash system prompt (excluding token budget blocks injected by injectTokenBudgetBlock)
     if (Array.isArray(parsed.system)) {
@@ -4686,10 +4875,12 @@ const SESSION_START_TIME = Date.now();
 const liveTokenRef = { token: "" };
 
 // Best-effort exit telemetry (QA fix M10: use 'once' to prevent listener stacking on re-import)
-process.once("beforeExit", () => {
+// QA fix L-beforeExit: store handler reference for cleanup; prevents leaked refs to telemetryEmitter
+const _beforeExitHandler = () => {
   const duration = Date.now() - SESSION_START_TIME;
   telemetryEmitter.sendExitEvent(liveTokenRef.token, duration).catch(() => {});
-});
+};
+process.once("beforeExit", _beforeExitHandler);
 
 // ---------------------------------------------------------------------------
 // Request building helpers (extracted from original fetch interceptor)
@@ -6003,20 +6194,19 @@ function buildRequestHeaders(
     );
     // x-stainless-timeout: sent only for non-streaming requests.
     // Claude Code sends 600 (10 minutes) as the default timeout in seconds.
-    // We detect streaming from the request body.
-    let xStainlessTimeout = "600";
+    // For streaming requests, the SDK omits this header entirely.
     if (requestBody) {
       try {
         const parsed = JSON.parse(requestBody);
-        const isStreaming = parsed.stream !== false;
-        if (!isStreaming) {
-          xStainlessTimeout = "600";
+        // stream defaults to true in Claude Code; only explicitly false means non-streaming
+        if (parsed.stream === false) {
+          requestHeaders.set("x-stainless-timeout", "600");
         }
+        // Streaming requests: omit x-stainless-timeout (real SDK behavior)
       } catch {
-        // Non-JSON body or parse error — assume streaming
+        // Non-JSON body or parse error — omit header (safe default)
       }
     }
-    requestHeaders.set("x-stainless-timeout", xStainlessTimeout);
     const stainlessHelpers = buildStainlessHelperHeader(tools, messages);
     if (stainlessHelpers) {
       requestHeaders.set("x-stainless-helper", stainlessHelpers);
@@ -6058,6 +6248,10 @@ function buildRequestHeaders(
 function resolveMaxTokens(body, config) {
   if (!config.output_cap?.enabled) return body.max_tokens; // passthrough
   if (body.max_tokens != null) return body.max_tokens; // caller-specified wins
+  // QA note L-escalation: lastStopReason is set by extractUsageFromSSEEvent AFTER the stream
+  // completes. The timing works correctly for "escalate for one turn" because this function runs
+  // BEFORE the next request's stream starts. If the response pipeline changes to update stop
+  // reason mid-stream or before response completion, this ordering assumption would break.
   const escalated = sessionMetrics.lastStopReason === "max_tokens";
   const result = escalated
     ? (config.output_cap.escalated_max_tokens ?? 64_000)
@@ -6887,18 +7081,21 @@ function parseCommandArgs(raw) {
 function extractFileIds(body) {
   const ids = [];
   if (!body || typeof body !== "object") return ids;
-  function walk(obj) {
+  // QA fix L-depth: cap recursion depth to prevent stack overflow on pathological payloads
+  const MAX_DEPTH = 20;
+  function walk(obj, depth) {
+    if (depth > MAX_DEPTH) return;
     if (Array.isArray(obj)) {
-      for (const item of obj) walk(item);
+      for (const item of obj) walk(item, depth + 1);
     } else if (obj && typeof obj === "object") {
       if (obj.source?.file_id) ids.push(obj.source.file_id);
       for (const val of Object.values(obj)) {
-        if (val && typeof val === "object") walk(val);
+        if (val && typeof val === "object") walk(val, depth + 1);
       }
     }
   }
-  walk(body.messages);
-  walk(body.system);
+  walk(body.messages, 0);
+  walk(body.system, 0);
   return ids;
 }
 
