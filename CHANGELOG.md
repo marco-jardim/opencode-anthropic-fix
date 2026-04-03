@@ -2,6 +2,20 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.0.45] — 2026-04-03
+
+### Emulation Sync — v2.1.91
+
+- **Bumped to Claude Code v2.1.91** — `FALLBACK_CLAUDE_CLI_VERSION`, `CLAUDE_CODE_BUILD_TIME` (2026-04-02T21:58:41Z), SDK version map entry (SDK 0.208.0 — unchanged)
+- **No mimese-critical changes** — beta set, OAuth module, system prompt, identity strings, and SDK token all identical to v2.1.90
+- **`CLAUDE_CODE_MCP_INSTR_DELTA` env var removed** — feature flag `tengu_basalt_3kr` was retired; MCP instruction delta graduated to default behavior. No action needed in our codebase.
+- **Bundle size**: +34KB / +55 lines vs v2.1.90 (internal refinements, no API-facing changes)
+
+### Tests
+
+- Updated version conformance tests: `v2.1.90` → `v2.1.91` in user-agent and billing header assertions
+- All tests passing
+
 ## [0.0.41] — 2026-04-01
 
 ### Emulation Sync — v2.1.90

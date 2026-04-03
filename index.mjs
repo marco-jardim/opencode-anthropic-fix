@@ -4886,17 +4886,18 @@ process.once("beforeExit", _beforeExitHandler);
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.90";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.91";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-04-01T22:53:10Z";
+const CLAUDE_CODE_BUILD_TIME = "2026-04-02T21:58:41Z";
 
-// The @anthropic-ai/sdk version bundled with Claude Code v2.1.90.
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.91.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .80-.90.
+// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .80-.91.
 const ANTHROPIC_SDK_VERSION = "0.208.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.91", "0.208.0"],
   ["2.1.90", "0.208.0"],
   ["2.1.89", "0.208.0"],
   ["2.1.88", "0.208.0"],
