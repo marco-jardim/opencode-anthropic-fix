@@ -67,6 +67,6 @@ export default [
     },
   },
   {
-    ignores: ["dist/", "node_modules/", ".mitm/", "_tmp_*/", "tmp/", ".opencode/"],
+    ignores: ["dist/", "node_modules/", ".mitm/", "_tmp_*/", "tmp/", ".opencode/", "**/fixtures/**"],
   },
 ];
