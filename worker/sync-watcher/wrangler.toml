@@ -1,0 +1,23 @@
+name = "sync-watcher"
+main = "src/index.mjs"
+compatibility_date = "2025-09-01"
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[kv_namespaces]]
+binding = "UPSTREAM_KV"
+id = "bfc51187f2014042a882e6d6764c9cc7"
+preview_id = "52ba223f45f54354b50b2e5247c2f1a6"
+
+[ai]
+binding = "AI"
+
+[vars]
+GITHUB_REPO = "marco-jardim/opencode-anthropic-fix"
+NPM_PACKAGE = "@anthropic-ai/claude-code"
+AI_MODEL = "@cf/moonshotai/kimi-k2.5"
+LOG_LEVEL = "info"
+
+# Secrets (set via wrangler secret put):
+# GITHUB_TOKEN
