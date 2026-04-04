@@ -7,6 +7,11 @@ on:
         description: "Version bump type"
         required: false
         default: "patch"
+  push:
+    branches:
+      - master
+    paths:
+      - package.json
 
 permissions:
   id-token: write
@@ -17,15 +22,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if version changed
+        id: version_check
+        run: |
+          PREV=$(git show HEAD~1:package.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).version" 2>/dev/null || echo "")
+          CURR=$(node -p "require('./package.json').version")
+          echo "prev=$PREV"
+          echo "curr=$CURR"
+          if [ "$PREV" = "$CURR" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
 
       - uses: actions/setup-node@v4
+        if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - run: npm install
+        if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
 
       - run: npm publish --access public
+        if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: false
