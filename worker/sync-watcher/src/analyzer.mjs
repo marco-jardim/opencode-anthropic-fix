@@ -1,15 +1,20 @@
 /**
- * Analysis orchestrator: diff → prompt → LLM → structured result.
+ * Analysis orchestrator: diff → LLM → structured result.
  *
- * Decides whether to auto-PR or create an issue based on the contract diff
- * and LLM analysis. Falls back gracefully when LLM is unavailable.
+ * Every diff, no matter how small, goes through the LLM. Heuristic pre-filtering
+ * was removed because it misclassified diffs (e.g. SDK/beta changes treated as
+ * mechanical when they require careful review). The LLM is cheap relative to the
+ * cost of a wrong auto-PR or a missed critical change.
+ *
+ * Decision logic:
+ *   - LLM says safe_for_auto_pr AND confidence >= 0.85 → auto-pr
+ *   - Otherwise (including LLM failure) → create-issue
  *
  * @module analyzer
  */
 
 import { buildSystemPrompt, buildUserPrompt, ANALYSIS_SCHEMA } from "./prompts.mjs";
 import { invokeLLM } from "./llm.mjs";
-import { isTrivialDiff, isAutoPatchableDiff } from "./differ.mjs";
 
 /**
  * @typedef {import('./types.mjs').ExtractedContract} ExtractedContract
@@ -20,22 +25,18 @@ import { isTrivialDiff, isAutoPatchableDiff } from "./differ.mjs";
 /**
  * @typedef {Object} AnalysisResult
  * @property {"auto-pr"|"create-issue"} action - Recommended action
- * @property {LLMResponse|null} llmAnalysis - LLM output (null if not invoked or failed)
- * @property {boolean} llmInvoked - Whether LLM was called
+ * @property {LLMResponse|null} llmAnalysis - LLM output (null only if not invoked)
+ * @property {boolean} llmInvoked - Always true for changed diffs
  * @property {string|null} llmError - Error message if LLM failed
  * @property {ContractDiff} diff - The underlying diff
  */
 
+/** Minimum confidence required for the LLM to green-light an auto-PR */
+const AUTO_PR_CONFIDENCE_THRESHOLD = 0.85;
+
 /**
  * Analyze a contract diff and determine the recommended action.
- *
- * Decision logic:
- * 1. No change → should not reach here, but handled
- * 2. Trivial (version/buildTime only) → auto-pr without LLM
- * 3. Non-trivial → invoke LLM
- *    - LLM says safe + confidence >= 0.8 → auto-pr
- *    - LLM says not safe, or confidence < 0.8 → create-issue
- *    - LLM fails → create-issue with raw diff (fallback)
+ * Always invokes the LLM — no heuristic bypass.
  *
  * @param {object} env - Worker environment
  * @param {ExtractedContract} baseline
@@ -44,7 +45,7 @@ import { isTrivialDiff, isAutoPatchableDiff } from "./differ.mjs";
  * @returns {Promise<AnalysisResult>}
  */
 export async function analyzeContractDiff(env, baseline, extracted, diff) {
-  // No change — shouldn't be called but handle defensively
+  // No change — shouldn't reach here but handled defensively
   if (!diff.changed) {
     return {
       action: "auto-pr",
@@ -55,29 +56,6 @@ export async function analyzeContractDiff(env, baseline, extracted, diff) {
     };
   }
 
-  // Trivial diffs (version + buildTime only) — no LLM needed
-  if (isTrivialDiff(diff)) {
-    return {
-      action: "auto-pr",
-      llmAnalysis: null,
-      llmInvoked: false,
-      llmError: null,
-      diff,
-    };
-  }
-
-  // Auto-patchable diffs (version, buildTime, sdkVersion, beta flag sets) — no LLM needed
-  if (isAutoPatchableDiff(diff)) {
-    return {
-      action: "auto-pr",
-      llmAnalysis: null,
-      llmInvoked: false,
-      llmError: null,
-      diff,
-    };
-  }
-
-  // Non-trivial — invoke LLM
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(baseline, extracted, diff);
 
@@ -90,14 +68,14 @@ export async function analyzeContractDiff(env, baseline, extracted, diff) {
     llmError = err.message;
   }
 
-  // Determine action based on LLM result
-  let action;
-  if (llmAnalysis && llmAnalysis.safe_for_auto_pr && llmAnalysis.confidence >= 0.8) {
-    action = "auto-pr";
-  } else {
-    // LLM failed, not safe, or low confidence → create issue
-    action = "create-issue";
-  }
+  // Auto-PR only when LLM explicitly says safe AND confidence is high
+  const action =
+    llmAnalysis &&
+    llmAnalysis.safe_for_auto_pr === true &&
+    typeof llmAnalysis.confidence === "number" &&
+    llmAnalysis.confidence >= AUTO_PR_CONFIDENCE_THRESHOLD
+      ? "auto-pr"
+      : "create-issue";
 
   return {
     action,

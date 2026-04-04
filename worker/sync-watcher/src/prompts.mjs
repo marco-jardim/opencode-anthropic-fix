@@ -1,7 +1,7 @@
 /**
  * LLM prompts and structured output schema for Kimi K2.5 contract analysis.
  *
- * Prompt version: 1.0 (2026-04-03)
+ * Prompt version: 2.0 (2026-04-04) — LLM is now the sole decision maker.
  * Model: @cf/moonshotai/kimi-k2.5
  *
  * @module prompts
@@ -17,17 +17,18 @@ export const ANALYSIS_SCHEMA = {
     safe_for_auto_pr: {
       type: "boolean",
       description:
-        "True if the changes are safe to auto-apply via PR without human review. Only true for low-risk changes (version bump, timestamp, same SDK version, no behavioral changes).",
+        "True ONLY if ALL changed fields are in the auto-patchable set (version, buildTime, sdkVersion, allBetaFlags, alwaysOnBetas, experimentalBetas, bedrockUnsupported) AND the changes are purely additive or cosmetic. False for ANY change to oauth endpoints, identity strings, billingSalt, clientId, scopes, or systemPromptBoundary.",
     },
     risk_level: {
       type: "string",
       enum: ["low", "medium", "high", "critical"],
       description:
-        "Overall risk level. low=cosmetic only, medium=minor behavioral, high=feature flag or auth change, critical=security or auth endpoint change.",
+        "low=version/timestamp only, medium=SDK or beta flags, high=behavioral or feature change, critical=security/auth/identity change.",
     },
     summary: {
       type: "string",
-      description: "One paragraph (max 400 chars) summarizing what changed and why it matters.",
+      description:
+        "One paragraph (max 400 chars) summarizing what changed and why it matters for the opencode-anthropic-fix package.",
     },
     changes: {
       type: "array",
@@ -35,10 +36,7 @@ export const ANALYSIS_SCHEMA = {
         type: "object",
         properties: {
           field: { type: "string", description: "Contract field name e.g. 'allBetaFlags'" },
-          description: {
-            type: "string",
-            description: "What changed in this field",
-          },
+          description: { type: "string", description: "What changed in this field" },
           impact: {
             type: "string",
             enum: ["none", "cosmetic", "functional", "breaking"],
@@ -46,7 +44,7 @@ export const ANALYSIS_SCHEMA = {
           },
           action_required: {
             type: "string",
-            description: "What the maintainer needs to do (or 'none' if auto-patchable)",
+            description: "What the maintainer needs to do, or 'auto-patched by worker' if mechanical",
           },
         },
         required: ["field", "description", "impact", "action_required"],
@@ -59,18 +57,16 @@ export const ANALYSIS_SCHEMA = {
         type: "object",
         properties: {
           file: { type: "string", description: "Relative file path e.g. 'index.mjs'" },
-          description: {
-            type: "string",
-            description: "What to change and why",
-          },
+          description: { type: "string", description: "What to change and why" },
         },
         required: ["file", "description"],
       },
-      description: "Files that need to be updated and what to change in them",
+      description: "Files that need manual updates (omit files the worker patches automatically)",
     },
     confidence: {
       type: "number",
-      description: "Confidence score 0-1. Low confidence (<0.6) means the diff is ambiguous or the model is unsure.",
+      description:
+        "Confidence score 0.0–1.0. Set below 0.85 if the diff is ambiguous, unexpected, or you are unsure about any field. Must be >= 0.85 for safe_for_auto_pr: true to result in an auto-PR.",
     },
   },
   required: ["safe_for_auto_pr", "risk_level", "summary", "changes", "confidence"],
@@ -82,26 +78,40 @@ export const ANALYSIS_SCHEMA = {
  * @returns {string}
  */
 export function buildSystemPrompt() {
-  return `You are a senior engineer maintaining "opencode-anthropic-fix", an npm package that acts as an OpenCode plugin to authenticate requests against Anthropic's API using OAuth.
+  return `You are a senior engineer maintaining "opencode-anthropic-fix", an npm package (OpenCode plugin) that authenticates API requests against Anthropic's Claude API using OAuth — precisely mimicking the HTTP behavior of the official @anthropic-ai/claude-code CLI.
 
-The package precisely mimics the HTTP behavior of Claude Code (the official @anthropic-ai/claude-code CLI):
-- It sends identical headers: User-Agent, anthropic-beta, x-app, x-stainless-*, x-anthropic-billing-header
-- It uses the same OAuth flow: same client ID, same scopes, same token endpoints
-- It shapes system prompts identically: same identity strings, same billing block, same boundary marker
-- It tracks the exact same beta flags (always-on, experimental, bedrock-unsupported sets)
+The package must stay bit-for-bit identical to Claude Code in:
+- HTTP headers: User-Agent (claude-cli/<version>), anthropic-beta, x-app, x-stainless-*, x-anthropic-billing-header
+- OAuth flow: same client_id, same scopes, same token/revoke endpoints, same redirect URI
+- System prompt shaping: same identity strings, same billing block, same __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ marker
+- Beta flags: always-on set, experimental set, bedrock-unsupported set
 
-When Anthropic releases a new version of @anthropic-ai/claude-code, the package must be synced. Your job is to analyze a contract diff (extracted constants from the bundle) and determine:
-1. Whether the changes are safe to auto-apply (trivial: version/timestamp bumps only)
-2. The risk level of any non-trivial changes
-3. What files in the codebase need to be updated and how
+When a new @anthropic-ai/claude-code is released, a worker extracts key constants ("the contract") and diffs them against the baseline. You receive that diff and must decide:
 
-Key files in the codebase:
-- index.mjs: FALLBACK_CLAUDE_CLI_VERSION, CLAUDE_CODE_BUILD_TIME, CLI_TO_SDK_VERSION map, beta flag constants
-- lib/oauth.mjs: OAuth endpoints, scopes
-- lib/config.mjs: CLIENT_ID
-- index.test.mjs, test/conformance/regression.test.mjs: version/beta assertions
+1. Is this safe to auto-PR? (worker patches files automatically)
+2. Or does it need a human issue?
 
-You must produce a JSON response matching the provided schema exactly. Be conservative: when in doubt, set safe_for_auto_pr: false and confidence below 0.7.`;
+AUTO-PR RULES — safe_for_auto_pr: true ONLY when ALL of the following hold:
+- Every changed field is in: version, buildTime, sdkVersion, allBetaFlags, alwaysOnBetas, experimentalBetas, bedrockUnsupported
+- No field in the CRITICAL set changed: billingSalt, clientId, oauthTokenUrl, oauthRevokeUrl, oauthRedirectUri, oauthConsoleHost, claudeAiScopes, consoleScopes, identityStrings, systemPromptBoundary
+- confidence >= 0.85
+
+For a pure version+buildTime bump, safe_for_auto_pr: true, risk_level: "low", confidence: 0.95.
+For sdkVersion or beta flag changes (but nothing critical), safe_for_auto_pr: true, risk_level: "medium", confidence: 0.90.
+For any CRITICAL field change, safe_for_auto_pr: false regardless of confidence.
+
+Key files the auto-patcher updates:
+- index.mjs: FALLBACK_CLAUDE_CLI_VERSION, CLAUDE_CODE_BUILD_TIME, CLI_TO_SDK_VERSION map, ANTHROPIC_SDK_VERSION, EXPERIMENTAL_BETA_FLAGS set, BEDROCK_UNSUPPORTED_BETAS set, always-on beta flag constants
+- index.test.mjs: user-agent version assertion
+- test/conformance/regression.test.mjs: version assertions
+- CHANGELOG.md: new entry prepended
+- package.json: patch version bump
+- worker/sync-watcher/src/extractor.mjs: KNOWN_* beta sets
+- worker/sync-watcher/src/seed.mjs: baseline seed
+
+Files the auto-patcher does NOT touch: lib/oauth.mjs, lib/config.mjs (those need human review for CRITICAL changes).
+
+Produce a JSON response matching the schema exactly. Be conservative — when in doubt, set safe_for_auto_pr: false.`;
 }
 
 /**

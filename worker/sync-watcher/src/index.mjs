@@ -3,7 +3,7 @@
  *
  * Scheduled trigger (every 15 min): polls npm registry for new Claude Code
  * versions, extracts mimese-critical constants, diffs against baseline, and
- * either auto-creates a PR (trivial changes) or an issue (non-trivial changes).
+ * either auto-creates a PR (LLM: safe, confidence ≥ 0.85) or an issue.
  *
  * Fetch handler: health check only.
  *
