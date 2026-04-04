@@ -105,6 +105,7 @@ async function createOrUpdateAutoPR(token, repo, version, baseline, extracted, d
     body: prBody,
     head: branchName,
     base: "master",
+    assignees: ["marco-jardim"],
   });
 
   return { type: "pr", number, url: html_url, created: true };
@@ -138,6 +139,7 @@ async function createOrUpdateIssue(token, repo, version, baseline, extracted, an
     title,
     body,
     labels: ["upstream-sync", "needs-review"],
+    assignees: ["marco-jardim"],
   });
 
   return { type: "issue", number, url: html_url, created: true };

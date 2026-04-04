@@ -224,16 +224,14 @@ export async function updateFile(token, repo, filePath, branch, content, fileSha
  * @param {string} opts.body
  * @param {string} opts.head - Head branch
  * @param {string} opts.base - Base branch (e.g. "master")
+ * @param {string[]} [opts.assignees] - GitHub usernames to assign
  * @returns {Promise<{number: number, html_url: string}>}
  */
-export async function createPR(token, repo, { title, body, head, base }) {
+export async function createPR(token, repo, { title, body, head, base, assignees }) {
   const [owner, repoName] = repo.split("/");
-  const { data } = await githubRequest(token, "POST", `/repos/${owner}/${repoName}/pulls`, {
-    title,
-    body,
-    head,
-    base,
-  });
+  const payload = { title, body, head, base };
+  if (assignees?.length) payload.assignees = assignees;
+  const { data } = await githubRequest(token, "POST", `/repos/${owner}/${repoName}/pulls`, payload);
   return { number: data.number, html_url: data.html_url };
 }
 
@@ -260,15 +258,14 @@ export async function updatePRBody(token, repo, prNumber, body) {
  * @param {string} opts.title
  * @param {string} opts.body
  * @param {string[]} opts.labels
+ * @param {string[]} [opts.assignees] - GitHub usernames to assign
  * @returns {Promise<{number: number, html_url: string}>}
  */
-export async function createIssue(token, repo, { title, body, labels }) {
+export async function createIssue(token, repo, { title, body, labels, assignees }) {
   const [owner, repoName] = repo.split("/");
-  const { data } = await githubRequest(token, "POST", `/repos/${owner}/${repoName}/issues`, {
-    title,
-    body,
-    labels,
-  });
+  const payload = { title, body, labels };
+  if (assignees?.length) payload.assignees = assignees;
+  const { data } = await githubRequest(token, "POST", `/repos/${owner}/${repoName}/issues`, payload);
   return { number: data.number, html_url: data.html_url };
 }
 

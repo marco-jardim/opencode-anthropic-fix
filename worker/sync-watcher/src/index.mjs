@@ -199,6 +199,7 @@ async function runPipeline(env, log) {
   }
 
   // ── Download & extract ────────────────────────────────────────────────────
+  log("info", "stage:tarball:url", { version: upstreamVersion, tarballUrl: registryMeta.tarballUrl });
   let cliText;
   try {
     const { result, duration_ms } = await timed(() => downloadAndExtractCli(registryMeta.tarballUrl));
@@ -211,6 +212,21 @@ async function runPipeline(env, log) {
   }
 
   const extracted = extractContract(cliText);
+
+  // ── Version mismatch guard ────────────────────────────────────────────────
+  // If the version embedded in the bundle doesn't match what the registry reported,
+  // the tarball is stale or malformed. Skip delivery to avoid creating phantom issues.
+  if (extracted.version && extracted.version !== upstreamVersion) {
+    log("error", "version mismatch: extracted version does not match registry version", {
+      registryVersion: upstreamVersion,
+      extractedVersion: extracted.version,
+      tarballUrl: registryMeta.tarballUrl,
+    });
+    await transition(kv, upstreamVersion, STATES.FAILED_RETRYABLE, {
+      error: `version mismatch: registry=${upstreamVersion} extracted=${extracted.version}`,
+    });
+    return;
+  }
   const extractedHash = await computeHash(extracted);
 
   // ── Diff against baseline ─────────────────────────────────────────────────
