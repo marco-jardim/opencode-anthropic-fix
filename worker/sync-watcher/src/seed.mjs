@@ -1,9 +1,9 @@
 /**
- * Baseline seed — initial contract for v2.1.91.
+ * Baseline seed — initial contract for v2.1.92.
  *
- * This is the "known good" contract derived from the current state of
- * `index.mjs` (v2.1.91). The Worker seeds KV with this contract on first
- * run so we have a baseline to compare against.
+ * This is the "known good" contract derived from extractor output against
+ * the Claude Code v2.1.92 bundle. The Worker seeds KV with this contract
+ * on first run so we have a baseline to compare against.
  *
  * Update this object whenever a sync is performed and merged.
  *
@@ -15,13 +15,13 @@
  */
 
 /**
- * The seeded baseline contract matching Claude Code v2.1.91.
+ * The seeded baseline contract matching Claude Code v2.1.92.
  *
  * @type {ExtractedContract}
  */
 export const SEED_CONTRACT = {
-  version: "2.1.91",
-  buildTime: "2026-04-02T21:58:41Z",
+  version: "2.1.92",
+  buildTime: "2026-04-03T23:25:15Z",
   sdkVersion: "0.208.0",
   sdkToken: "sdk-zAZezfDKGoZuXXKe",
   billingSalt: "59cf53e54c78",

@@ -14,6 +14,7 @@ import { SEED_CONTRACT } from "../src/seed.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const v91 = readFileSync(join(__dirname, "../fixtures/v2.1.91.snippet.js"), "utf-8");
 const v90 = readFileSync(join(__dirname, "../fixtures/v2.1.90.snippet.js"), "utf-8");
+const v92r = readFileSync(join(__dirname, "../fixtures/v2.1.92-realistic.snippet.js"), "utf-8");
 
 // ---------------------------------------------------------------------------
 // Scalar extraction
@@ -248,10 +249,12 @@ describe("seed contract consistency with extractor", () => {
     expect([...bedrockUnsupported].sort()).toEqual([...SEED_CONTRACT.bedrockUnsupported].sort());
   });
 
-  it("SEED_CONTRACT scalar fields match extractScalars output from v2.1.91 fixture", () => {
+  it("SEED_CONTRACT version-independent scalar fields match extractScalars output from v2.1.91 fixture", () => {
+    // version and buildTime are inherently version-specific — they won't match
+    // the seed (which tracks the latest synced version). The other scalars
+    // (sdkVersion, sdkToken, billingSalt, clientId) should be stable across
+    // minor version bumps.
     const scalars = extractScalars(v91);
-    expect(scalars.version).toBe(SEED_CONTRACT.version);
-    expect(scalars.buildTime).toBe(SEED_CONTRACT.buildTime);
     expect(scalars.sdkVersion).toBe(SEED_CONTRACT.sdkVersion);
     expect(scalars.sdkToken).toBe(SEED_CONTRACT.sdkToken);
     expect(scalars.billingSalt).toBe(SEED_CONTRACT.billingSalt);
@@ -272,5 +275,84 @@ describe("seed contract consistency with extractor", () => {
     const identity = extractIdentity(v91);
     expect([...identity.identityStrings].sort()).toEqual([...SEED_CONTRACT.identityStrings].sort());
     expect(identity.systemPromptBoundary).toBe(SEED_CONTRACT.systemPromptBoundary);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Realistic bundle extraction (v2.1.92 fixture with real-world pitfalls)
+// ---------------------------------------------------------------------------
+
+describe("extractContract — realistic v2.1.92 fixture", () => {
+  it("extracts correct CLI version despite AWS SDK version appearing first", () => {
+    const c = extractContract(v92r);
+    expect(c.version).toBe("2.1.92");
+  });
+
+  it("extracts correct SDK version (0.208.0) despite misleading 0.80.0 appearing first", () => {
+    const c = extractContract(v92r);
+    expect(c.sdkVersion).toBe("0.208.0");
+  });
+
+  it("extracts real CLIENT_ID despite uuid template UUID appearing first", () => {
+    const c = extractContract(v92r);
+    expect(c.clientId).toBe("9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+    // Must NOT grab the uuid library template
+    expect(c.clientId).not.toBe("10000000-1000-4000-8000-100000000000");
+  });
+
+  it("extracts console scopes from standalone variables (no array literal)", () => {
+    const c = extractContract(v92r);
+    expect(c.consoleScopes).toContain("org:create_api_key");
+    expect(c.consoleScopes).toContain("user:profile");
+    expect(c.consoleScopes).toHaveLength(2);
+  });
+
+  it("derives revoke URL from token URL when not present in bundle", () => {
+    const c = extractContract(v92r);
+    expect(c.oauthRevokeUrl).toBe("https://platform.claude.com/v1/oauth/revoke");
+    expect(c.oauthTokenUrl).toBe("https://platform.claude.com/v1/oauth/token");
+  });
+
+  it("extracts only 3 real identity strings (filters out SDK docs/UI strings)", () => {
+    const c = extractContract(v92r);
+    expect(c.identityStrings).toHaveLength(3);
+    expect(c.identityStrings).toContain("You are Claude Code, Anthropic's official CLI for Claude.");
+    expect(c.identityStrings).toContain(
+      "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
+    );
+    expect(c.identityStrings).toContain("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
+    // Must NOT contain non-identity strings
+    expect(c.identityStrings).not.toContain("You are a helpful assistant that answers questions.");
+    expect(c.identityStrings).not.toContain("You are currently using your free plan subscription.");
+  });
+
+  it("extracts all other fields correctly", () => {
+    const c = extractContract(v92r);
+    expect(c.buildTime).toBe("2026-04-03T23:25:15Z");
+    expect(c.sdkToken).toBe("sdk-zAZezfDKGoZuXXKe");
+    expect(c.billingSalt).toBe("59cf53e54c78");
+    expect(c.oauthRedirectUri).toBe("https://platform.claude.com/oauth/code/callback");
+    expect(c.oauthConsoleHost).toBe("platform.claude.com");
+    expect(c.systemPromptBoundary).toBe("__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
+    expect(c.claudeAiScopes).toHaveLength(5);
+    expect(c.allBetaFlags.length).toBeGreaterThan(0);
+  });
+
+  it("realistic fixture produces identical contract to simple fixture (except version/buildTime)", () => {
+    const c91 = extractContract(v91);
+    const c92 = extractContract(v92r);
+    // These SHOULD differ (version bump):
+    expect(c92.version).not.toBe(c91.version);
+    expect(c92.buildTime).not.toBe(c91.buildTime);
+    // These SHOULD be identical (no real change):
+    expect(c92.sdkVersion).toBe(c91.sdkVersion);
+    expect(c92.clientId).toBe(c91.clientId);
+    expect(c92.billingSalt).toBe(c91.billingSalt);
+    expect(c92.sdkToken).toBe(c91.sdkToken);
+    expect(c92.oauthTokenUrl).toBe(c91.oauthTokenUrl);
+    expect(c92.oauthRevokeUrl).toBe(c91.oauthRevokeUrl);
+    expect(c92.oauthRedirectUri).toBe(c91.oauthRedirectUri);
+    expect([...c92.identityStrings].sort()).toEqual([...c91.identityStrings].sort());
+    expect([...c92.consoleScopes].sort()).toEqual([...c91.consoleScopes].sort());
   });
 });

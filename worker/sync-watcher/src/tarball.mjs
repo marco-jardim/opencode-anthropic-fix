@@ -16,6 +16,27 @@ const FETCH_TIMEOUT_MS = 30_000;
 const CLI_PATHS = ["package/cli.js", "package/cli.mjs", "package/dist/cli.js", "package/dist/cli.mjs"];
 
 /**
+ * Build the npm tarball URL for a given scoped package and version.
+ *
+ * npm tarballs for scoped packages follow the pattern:
+ *   https://registry.npmjs.org/@scope/name/-/name-version.tgz
+ *
+ * @param {string} packageName - e.g. "@anthropic-ai/claude-code"
+ * @param {string} version - e.g. "2.1.92"
+ * @returns {string}
+ */
+export function buildTarballUrl(packageName, version) {
+  // Extract the unscoped name: "@anthropic-ai/claude-code" → "claude-code"
+  const slashIdx = packageName.indexOf("/");
+  const unscopedName = slashIdx !== -1 ? packageName.slice(slashIdx + 1) : packageName;
+  // Encode the scoped package name for the URL path: "@anthropic-ai/claude-code" → "@anthropic-ai%2fclaude-code"
+  const encodedScope = packageName.startsWith("@")
+    ? packageName.slice(0, slashIdx) + "%2f" + unscopedName
+    : packageName;
+  return `https://registry.npmjs.org/${encodedScope}/-/${unscopedName}-${version}.tgz`;
+}
+
+/**
  * Download a tarball and extract the cli.js content.
  *
  * @param {string} tarballUrl - URL to the .tgz tarball

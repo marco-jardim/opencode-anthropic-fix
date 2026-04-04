@@ -20,6 +20,9 @@ vi.mock("../src/registry.mjs", () => ({
 
 vi.mock("../src/tarball.mjs", () => ({
   downloadAndExtractCli: vi.fn(),
+  buildTarballUrl: vi.fn(
+    (pkg, ver) => `https://registry.npmjs.org/@anthropic-ai%2fclaude-code/-/claude-code-${ver}.tgz`,
+  ),
 }));
 
 vi.mock("../src/extractor.mjs", () => ({

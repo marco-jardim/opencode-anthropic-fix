@@ -11,7 +11,7 @@
  */
 
 import { fetchRegistryMetadata } from "./registry.mjs";
-import { downloadAndExtractCli } from "./tarball.mjs";
+import { downloadAndExtractCli, buildTarballUrl } from "./tarball.mjs";
 import { extractContract } from "./extractor.mjs";
 import { diffContracts } from "./differ.mjs";
 import { getBaseline, setBaseline, getEtag, setEtag } from "./baseline.mjs";
@@ -126,7 +126,7 @@ async function runPipeline(env, log) {
   // ── Ensure baseline exists (seed on first run) ────────────────────────────
   let baselineData = await getBaseline(kv);
   if (!baselineData) {
-    log("info", "no baseline found, seeding from v2.1.91");
+    log("info", "no baseline found, seeding from v2.1.92");
     const seedHash = await computeHash(SEED_CONTRACT);
     await setBaseline(kv, SEED_CONTRACT, seedHash);
     baselineData = { contract: SEED_CONTRACT, hash: seedHash };
@@ -198,13 +198,13 @@ async function runPipeline(env, log) {
     }
   }
 
-  // ── Download & extract ────────────────────────────────────────────────────
+  // ── Download & extract NEW tarball ─────────────────────────────────────────
   log("info", "stage:tarball:url", { version: upstreamVersion, tarballUrl: registryMeta.tarballUrl });
   let cliText;
   try {
     const { result, duration_ms } = await timed(() => downloadAndExtractCli(registryMeta.tarballUrl));
     cliText = result;
-    log("info", "stage:tarball", { version: upstreamVersion, duration_ms });
+    log("info", "stage:tarball:new", { version: upstreamVersion, duration_ms });
   } catch (err) {
     log("error", "tarball extraction failed", { version: upstreamVersion, error: err.message, stack: err.stack });
     await transition(kv, upstreamVersion, STATES.FAILED_RETRYABLE, { error: err.message });
@@ -229,8 +229,40 @@ async function runPipeline(env, log) {
   }
   const extractedHash = await computeHash(extracted);
 
+  // ── Download & extract OLD tarball (A/B comparison) ───────────────────────
+  // To avoid false positives from extractor bugs, we re-extract the baseline
+  // version's contract from its tarball using the same extractor logic.
+  // This way, any extractor quirks cancel out — both contracts pass through
+  // the same extraction pipeline.
+  const baselineVersion = baselineData.contract.version;
+  let baselineContract = baselineData.contract; // fallback to KV baseline
+  if (baselineVersion && baselineVersion !== upstreamVersion) {
+    const oldTarballUrl = buildTarballUrl(packageName, baselineVersion);
+    try {
+      const { result: oldCliText, duration_ms } = await timed(() => downloadAndExtractCli(oldTarballUrl));
+      const freshBaseline = extractContract(oldCliText);
+      // Verify the re-extracted baseline version matches
+      if (freshBaseline.version === baselineVersion) {
+        baselineContract = freshBaseline;
+        log("info", "stage:tarball:old", { version: baselineVersion, duration_ms, source: "re-extracted" });
+      } else {
+        log("warn", "old tarball version mismatch, using KV baseline", {
+          expected: baselineVersion,
+          got: freshBaseline.version,
+        });
+      }
+    } catch (err) {
+      // Old tarball may be unavailable (unpublished, CDN purged, etc.)
+      // Fall back to KV baseline — this is the pre-existing behavior.
+      log("warn", "old tarball download failed, using KV baseline", {
+        version: baselineVersion,
+        error: err.message,
+      });
+    }
+  }
+
   // ── Diff against baseline ─────────────────────────────────────────────────
-  const diff = diffContracts(baselineData.contract, extracted);
+  const diff = diffContracts(baselineContract, extracted);
   if (!diff.changed) {
     log("info", "contract unchanged", { version: upstreamVersion, duration_ms: Date.now() - pipelineStart });
     // Only write baseline when the upstream version advanced (avoids a no-op KV write
@@ -241,10 +273,13 @@ async function runPipeline(env, log) {
     return;
   }
 
+  const baselineSource = baselineContract === baselineData.contract ? "kv" : "re-extracted";
   log("info", "contract diff detected", {
     version: upstreamVersion,
     severity: diff.severity,
     fields: Object.keys(diff.fields),
+    baseline_source: baselineSource,
+    baseline_version: baselineContract.version,
   });
 
   // ── Transition to DETECTED (idempotent if already there from retry) ────────
@@ -253,7 +288,9 @@ async function runPipeline(env, log) {
   // ── Analyze ───────────────────────────────────────────────────────────────
   let analysis;
   try {
-    const { result, duration_ms } = await timed(() => analyzeContractDiff(env, baselineData.contract, extracted, diff));
+    const { result, duration_ms } = await timed(() =>
+      analyzeContractDiff(env, baselineContract, extracted, diff, { baselineSource }),
+    );
     analysis = result;
 
     // Estimate LLM cost when the LLM was invoked
@@ -261,7 +298,8 @@ async function runPipeline(env, log) {
     // (~4 chars per token is a rough heuristic)
     if (analysis.llmInvoked) {
       const approxInputTokens = Math.ceil(
-        (buildSystemPrompt().length + buildUserPrompt(baselineData.contract, extracted, diff).length) / 4,
+        (buildSystemPrompt().length + buildUserPrompt(baselineContract, extracted, diff, { baselineSource }).length) /
+          4,
       );
       const approxOutputTokens = 500; // typical structured response
       const cost_usd = estimateCost({ input: approxInputTokens, output: approxOutputTokens });
@@ -290,7 +328,7 @@ async function runPipeline(env, log) {
   // ── Deliver ───────────────────────────────────────────────────────────────
   let deliveryResult;
   try {
-    const { result, duration_ms } = await timed(() => deliver(env, baselineData.contract, extracted, analysis));
+    const { result, duration_ms } = await timed(() => deliver(env, baselineContract, extracted, analysis));
     deliveryResult = result;
     log("info", "stage:deliver", { version: upstreamVersion, duration_ms, action: analysis.action });
   } catch (err) {

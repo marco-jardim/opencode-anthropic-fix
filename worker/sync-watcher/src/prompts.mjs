@@ -86,21 +86,34 @@ The package must stay bit-for-bit identical to Claude Code in:
 - System prompt shaping: same identity strings, same billing block, same __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__ marker
 - Beta flags: always-on set, experimental set, bedrock-unsupported set
 
-When a new @anthropic-ai/claude-code is released, a worker extracts key constants ("the contract") and diffs them against the baseline. You receive that diff and must decide:
+## HOW THIS PIPELINE WORKS
 
-1. Is this safe to auto-PR? (worker patches files automatically)
-2. Or does it need a human issue?
+A worker monitors the npm registry for new @anthropic-ai/claude-code releases. When a new version is detected, it downloads BOTH the old and new tarballs, extracts their cli.js bundles (~13 MB minified JavaScript), and runs regex-based extraction on each to produce a structured "contract" of key constants.
+
+You receive the diff between the TWO EXTRACTED contracts. Both contracts were produced by the SAME extractor running on different bundle versions, so extractor quirks cancel out — any difference you see is a REAL change between the two bundle versions.
+
+## YOUR ANALYSIS METHODOLOGY
+
+For each changed field, answer these questions:
+1. **Is the change real?** Both contracts were extracted by the same code. If both old and new values look reasonable, the change is real.
+2. **Is the change meaningful for mimesis?** Version/buildTime bumps are expected. Beta flag additions/removals affect the anthropic-beta header. OAuth/identity changes affect authentication.
+3. **What is the wire impact?** Does this change affect HTTP headers, request bodies, OAuth flow, or system prompt construction?
+
+## DECISION RULES
 
 AUTO-PR RULES — safe_for_auto_pr: true ONLY when ALL of the following hold:
-- Every changed field is in: version, buildTime, sdkVersion, allBetaFlags, alwaysOnBetas, experimentalBetas, bedrockUnsupported
+- Every changed field is in the AUTO-PATCHABLE set: version, buildTime, sdkVersion, allBetaFlags, alwaysOnBetas, experimentalBetas, bedrockUnsupported
 - No field in the CRITICAL set changed: billingSalt, clientId, oauthTokenUrl, oauthRevokeUrl, oauthRedirectUri, oauthConsoleHost, claudeAiScopes, consoleScopes, identityStrings, systemPromptBoundary
 - confidence >= 0.85
 
-For a pure version+buildTime bump, safe_for_auto_pr: true, risk_level: "low", confidence: 0.95.
-For sdkVersion or beta flag changes (but nothing critical), safe_for_auto_pr: true, risk_level: "medium", confidence: 0.90.
-For any CRITICAL field change, safe_for_auto_pr: false regardless of confidence.
+Confidence calibration:
+- version+buildTime only → safe_for_auto_pr: true, risk_level: "low", confidence: 0.95
+- sdkVersion or beta flag changes (but nothing critical) → safe_for_auto_pr: true, risk_level: "medium", confidence: 0.90
+- Any CRITICAL field change → safe_for_auto_pr: false regardless of confidence
 
-Key files the auto-patcher updates:
+## AUTO-PATCHER FILE MAP
+
+Files the auto-patcher updates (for auto-PR):
 - index.mjs: FALLBACK_CLAUDE_CLI_VERSION, CLAUDE_CODE_BUILD_TIME, CLI_TO_SDK_VERSION map, ANTHROPIC_SDK_VERSION, EXPERIMENTAL_BETA_FLAGS set, BEDROCK_UNSUPPORTED_BETAS set, always-on beta flag constants
 - index.test.mjs: user-agent version assertion
 - test/conformance/regression.test.mjs: version assertions
@@ -109,7 +122,7 @@ Key files the auto-patcher updates:
 - worker/sync-watcher/src/extractor.mjs: KNOWN_* beta sets
 - worker/sync-watcher/src/seed.mjs: baseline seed
 
-Files the auto-patcher does NOT touch: lib/oauth.mjs, lib/config.mjs (those need human review for CRITICAL changes).
+Files requiring human review (for CRITICAL changes): lib/oauth.mjs, lib/config.mjs
 
 Produce a JSON response matching the schema exactly. Be conservative — when in doubt, set safe_for_auto_pr: false.`;
 }
@@ -120,30 +133,40 @@ Produce a JSON response matching the schema exactly. Be conservative — when in
  * @param {import('./types.mjs').ExtractedContract} baseline - Current known contract
  * @param {import('./types.mjs').ExtractedContract} extracted - Newly extracted contract
  * @param {import('./types.mjs').ContractDiff} diff - Structured diff object
+ * @param {object} [options]
+ * @param {string} [options.baselineSource] - "re-extracted" or "kv" — how baseline was obtained
  * @returns {string}
  */
-export function buildUserPrompt(baseline, extracted, diff) {
+export function buildUserPrompt(baseline, extracted, diff, options = {}) {
   const diffLines = [];
   for (const [field, { from, to }] of Object.entries(diff.fields)) {
     diffLines.push(`  ${field}: ${JSON.stringify(from)} → ${JSON.stringify(to)}`);
   }
 
+  const sourceNote =
+    options.baselineSource === "re-extracted"
+      ? "Both contracts were extracted from their respective npm tarballs using the same extractor. Differences are real bundle changes."
+      : "Baseline is from KV storage (old tarball was unavailable). Differences MAY include extractor improvements — exercise extra caution.";
+
   return `A new version of @anthropic-ai/claude-code has been detected.
+
+## Extraction Method
+${sourceNote}
 
 ## Diff Summary
 Severity: ${diff.severity}
 Changed fields (${Object.keys(diff.fields).length}):
 ${diffLines.length > 0 ? diffLines.join("\n") : "  (none)"}
 
-## Baseline Contract (current v${baseline.version})
+## Baseline Contract (v${baseline.version})
 \`\`\`json
 ${JSON.stringify(baseline, null, 2)}
 \`\`\`
 
-## Extracted Contract (new v${extracted.version ?? "unknown"})
+## New Contract (v${extracted.version ?? "unknown"})
 \`\`\`json
 ${JSON.stringify(extracted, null, 2)}
 \`\`\`
 
-Analyze this diff and return a structured JSON response. Focus on what the maintainer needs to do to keep opencode-anthropic-fix in sync.`;
+Analyze the diff between v${baseline.version} and v${extracted.version ?? "unknown"}. Focus on wire-level impact for HTTP mimesis and what the maintainer needs to do.`;
 }

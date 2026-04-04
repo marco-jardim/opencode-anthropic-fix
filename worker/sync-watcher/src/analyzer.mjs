@@ -42,9 +42,11 @@ const AUTO_PR_CONFIDENCE_THRESHOLD = 0.85;
  * @param {ExtractedContract} baseline
  * @param {ExtractedContract} extracted
  * @param {ContractDiff} diff
+ * @param {object} [options]
+ * @param {string} [options.baselineSource] - "re-extracted" or "kv"
  * @returns {Promise<AnalysisResult>}
  */
-export async function analyzeContractDiff(env, baseline, extracted, diff) {
+export async function analyzeContractDiff(env, baseline, extracted, diff, options = {}) {
   // No change — shouldn't reach here but handled defensively
   if (!diff.changed) {
     return {
@@ -57,7 +59,7 @@ export async function analyzeContractDiff(env, baseline, extracted, diff) {
   }
 
   const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildUserPrompt(baseline, extracted, diff);
+  const userPrompt = buildUserPrompt(baseline, extracted, diff, options);
 
   let llmAnalysis = null;
   let llmError = null;

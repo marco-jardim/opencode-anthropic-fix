@@ -117,15 +117,26 @@ export function extractBetas(cliText) {
 /**
  * Extract OAuth configuration: endpoints and scopes.
  *
+ * Note: oauthRevokeUrl is NOT present as a full URL in the bundle since v2.1.91+.
+ * The CLI uses MCP server metadata discovery (revocation_endpoint) or constructs
+ * it from TOKEN_URL by replacing the path. We derive it from oauthTokenUrl.
+ *
  * @param {string} cliText
  * @returns {{ oauthTokenUrl: string|null, oauthRevokeUrl: string|null,
  *             oauthRedirectUri: string|null, oauthConsoleHost: string|null,
  *             claudeAiScopes: string[], consoleScopes: string[] }}
  */
 export function extractOAuthConfig(cliText) {
+  const tokenUrl = extractOAuthUrl(cliText, "/v1/oauth/token");
+  // Try extracting revoke URL directly; if not found, derive from token URL
+  let revokeUrl = extractOAuthUrl(cliText, "/v1/oauth/revoke");
+  if (!revokeUrl && tokenUrl) {
+    revokeUrl = tokenUrl.replace("/v1/oauth/token", "/v1/oauth/revoke");
+  }
+
   return {
-    oauthTokenUrl: extractOAuthUrl(cliText, "/v1/oauth/token"),
-    oauthRevokeUrl: extractOAuthUrl(cliText, "/v1/oauth/revoke"),
+    oauthTokenUrl: tokenUrl,
+    oauthRevokeUrl: revokeUrl,
     oauthRedirectUri: extractOAuthUrl(cliText, "/oauth/code/callback"),
     oauthConsoleHost: extractOAuthHost(cliText),
     claudeAiScopes: extractClaudeAiScopes(cliText),
@@ -162,7 +173,8 @@ function extractCliVersion(text) {
   try {
     // Primary: VERSION field adjacent to the @anthropic-ai/claude-code package name
     // e.g. PACKAGE_URL:"@anthropic-ai/claude-code",...,VERSION:"2.1.92"
-    const anchored = text.match(/@anthropic-ai\/claude-code[^}]{0,200}VERSION:["']([^"']+)["']/s);
+    // Allow optional whitespace after VERSION: (fixtures may have spaces)
+    const anchored = text.match(/@anthropic-ai\/claude-code[^}]{0,200}VERSION:\s*["']([^"']+)["']/s);
     if (anchored) return anchored[1];
 
     // Secondary: VERSION:"x.y.z" field anywhere (avoids unanchored first-match)
@@ -200,16 +212,30 @@ function extractBuildTime(text) {
  * Extract the SDK version string (e.g. "0.208.0").
  * SDK versions are always "0.x.x" format.
  *
+ * Real bundle pattern: `.VERSION="0.208.0"` (SDK class export at ~7.4M offset).
+ * Bug fix: the old regex grabbed the first 0.x.x string (e.g. "0.80.0" from
+ * Stainless platform-detection code at offset ~53K). Now we anchor to the
+ * `.VERSION=` export pattern which is how the SDK exposes its version.
+ *
  * @param {string} text
  * @returns {string|null}
  */
 function extractSdkVersion(text) {
   try {
-    // Prefer the version near "@anthropic-ai/sdk" to avoid matching other 0.x.x deps.
-    // The /s flag allows . to match newlines in case of multi-line minification.
+    // Primary: .VERSION="0.x.x" — SDK class prototype exports version this way.
+    // e.g. En4.VERSION="0.208.0" or Anthropic.VERSION="0.208.0"
+    const versionExport = text.match(/\.VERSION\s*=\s*["'](0\.\d+\.\d+)["']/);
+    if (versionExport) return versionExport[1];
+
+    // Secondary: near "@anthropic-ai/sdk" package name
     const nearSdk = text.match(/@anthropic-ai\/sdk[^"']{0,100}["'](0\.\d+\.\d+)["']/s);
     if (nearSdk) return nearSdk[1];
-    // Fallback: first 0.x.x string in the bundle
+
+    // Tertiary: VERSION:"0.x.x" field pattern (fixtures use this)
+    const versionField = text.match(/\bVERSION\s*[:=]\s*["'](0\.\d+\.\d+)["']/);
+    if (versionField) return versionField[1];
+
+    // Last resort: first 0.x.x (unreliable in real bundles — may grab wrong dep)
     const m = text.match(/["'](0\.\d+\.\d+)["']/);
     return m ? m[1] : null;
   } catch {
@@ -271,11 +297,23 @@ function extractBillingSalt(text) {
 /**
  * Extract the OAuth client ID (UUID format).
  *
+ * Real bundle pattern: `CLIENT_ID:"9d1c250a-e61b-44d9-88ed-5944d1962f5e"`
+ * Bug fix: the old regex grabbed the FIRST UUID in the bundle, which was
+ * the uuid library's v4 template ("10000000-1000-4000-8000-100000000000").
+ * Now we anchor to `CLIENT_ID:` or `CLIENT_ID=` to get the actual OAuth client ID.
+ *
  * @param {string} text
  * @returns {string|null}
  */
 function extractClientId(text) {
   try {
+    // Primary: CLIENT_ID:"<uuid>" — the OAuth config object field
+    const anchored = text.match(
+      /CLIENT_ID\s*[:=]\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/,
+    );
+    if (anchored) return anchored[1];
+
+    // Fallback: first UUID (less reliable — may grab uuid lib template)
     const m = text.match(/["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/);
     return m ? m[1] : null;
   } catch {
@@ -341,17 +379,22 @@ function extractClaudeAiScopes(text) {
 /**
  * Extract console OAuth scopes.
  * Console scopes always contain at least one "org:*" scope.
- * We find the array literal containing "org:create_api_key" and extract all strings from it.
+ *
+ * Real bundle pattern: scopes are standalone variables (`ZS5="org:create_api_key"`)
+ * assembled into arrays via variable refs (`Lh7=[ZS5,jz6]`). The old regex
+ * searched for array literals containing quoted "org:..." strings, which never
+ * matched in real bundles. Now we extract all "org:*" scope strings individually
+ * and pair them with any "user:profile" scope that appears near the OAuth config.
  *
  * @param {string} text
  * @returns {string[]}
  */
 function extractConsoleScopes(text) {
   try {
-    // Find an array literal that contains an org: scope
-    // e.g. ["org:create_api_key","user:profile"]
-    const arrayPattern = /\[([^\]]*"org:[a-z_]+"[^\]]*)\]/g;
     const found = new Set();
+
+    // Strategy 1: array literal with quoted org: scopes (works in fixtures)
+    const arrayPattern = /\[([^\]]*["']org:[a-z_]+["'][^\]]*)\]/g;
     let m;
     while ((m = arrayPattern.exec(text)) !== null) {
       const inner = m[1];
@@ -361,6 +404,21 @@ function extractConsoleScopes(text) {
         found.add(s[1]);
       }
     }
+    if (found.size > 0) return [...found].sort();
+
+    // Strategy 2: extract standalone "org:*" scope strings (real bundles)
+    // In minified bundles, scopes are assigned to variables: ZS5="org:create_api_key"
+    const orgPattern = /["'](org:[a-z_]+)["']/g;
+    while ((m = orgPattern.exec(text)) !== null) {
+      found.add(m[1]);
+    }
+
+    // Also grab "user:profile" since it's always in consoleScopes alongside org scopes.
+    // We differentiate from claudeAiScopes by only including user:profile (not other user:* scopes).
+    if (found.size > 0 && text.includes('"user:profile"')) {
+      found.add("user:profile");
+    }
+
     return [...found].sort();
   } catch {
     return [];
@@ -368,7 +426,19 @@ function extractConsoleScopes(text) {
 }
 
 /**
- * Extract identity strings ("You are Claude..." patterns).
+ * Known identity string prefixes used by the Claude Code CLI.
+ * Only strings matching these prefixes are actual system prompt identity strings.
+ * The bundle also contains "You are ..." strings in SDK docs, UI messages,
+ * tool prompts, and billing info — those are NOT identity strings.
+ */
+const IDENTITY_PREFIXES = ["You are Claude Code", "You are a Claude agent"];
+
+/**
+ * Extract identity strings ("You are Claude Code..." / "You are a Claude agent..." patterns).
+ *
+ * Bug fix: the old regex matched ALL "You are ..." strings (17+ matches in real bundles),
+ * including SDK examples ("You are a helpful assistant"), UI messages ("You are currently
+ * using your subscription"), and tool prompts. Now we filter to known identity prefixes.
  *
  * @param {string} text
  * @returns {string[]}
@@ -380,12 +450,16 @@ function extractIdentityStrings(text) {
     const dq = /["](You are [^"]{10,300})["]/g;
     let m;
     while ((m = dq.exec(text)) !== null) {
-      found.add(m[1]);
+      if (IDENTITY_PREFIXES.some((p) => m[1].startsWith(p))) {
+        found.add(m[1]);
+      }
     }
     // Match single-quoted identity strings (content may not contain single quotes)
     const sq = /['](You are [^']{10,300})[']/g;
     while ((m = sq.exec(text)) !== null) {
-      found.add(m[1]);
+      if (IDENTITY_PREFIXES.some((p) => m[1].startsWith(p))) {
+        found.add(m[1]);
+      }
     }
     return [...found].sort();
   } catch {
