@@ -72,8 +72,11 @@ async function runModel(ai, modelId, messages, schema) {
     throw new Error(`Workers AI model error: ${err.message}`, { cause: err });
   }
 
-  // Workers AI returns { response: string } for chat completions
-  const raw = response?.response ?? response;
+  // Workers AI may return either:
+  //   - Old format: { response: string }
+  //   - OpenAI-compatible: { choices: [{ message: { content: string } }] }
+  //   - Already a string
+  const raw = response?.choices?.[0]?.message?.content ?? response?.response ?? response;
   if (typeof raw !== "string") {
     throw new Error(`Unexpected Workers AI response shape: ${JSON.stringify(raw).slice(0, 200)}`);
   }

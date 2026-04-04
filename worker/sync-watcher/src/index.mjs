@@ -69,16 +69,42 @@ export default {
   },
 
   /**
-   * HTTP fetch handler — health check only.
+   * HTTP fetch handler — health check and manual trigger.
    *
    * @param {Request} request
    * @param {Env} env
+   * @param {ExecutionContext} ctx
    * @returns {Response}
    */
-  async fetch(request, _env) {
+  async fetch(request, env, _ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
       return new Response(JSON.stringify({ status: "ok", ts: Date.now() }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.pathname === "/run") {
+      const runId = crypto.randomUUID().slice(0, 8);
+      const log = makeLogger(env, runId);
+      const logs = [];
+      const capturingLog = (severity, message, data = {}) => {
+        log(severity, message, data);
+        logs.push({ severity, message, ...data, ts: new Date().toISOString() });
+      };
+      const locked = await acquireLock(env.UPSTREAM_KV, CRON_LOCK_NAME);
+      if (!locked) {
+        return new Response(JSON.stringify({ status: "locked", runId }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      try {
+        await runPipeline(env, capturingLog);
+      } catch (err) {
+        capturingLog("error", "unhandled pipeline error", { error: err.message, stack: err.stack });
+      } finally {
+        await releaseLock(env.UPSTREAM_KV, CRON_LOCK_NAME);
+      }
+      return new Response(JSON.stringify({ status: "done", runId, logs }, null, 2), {
         headers: { "content-type": "application/json" },
       });
     }

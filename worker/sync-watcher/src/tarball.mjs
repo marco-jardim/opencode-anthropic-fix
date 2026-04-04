@@ -7,7 +7,7 @@
  * @module tarball
  */
 
-const MAX_BUNDLE_SIZE = 10 * 1024 * 1024; // 10 MB
+const MAX_BUNDLE_SIZE = 25 * 1024 * 1024; // 25 MB
 const FETCH_TIMEOUT_MS = 30_000;
 
 /**

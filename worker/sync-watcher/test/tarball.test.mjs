@@ -205,7 +205,7 @@ describe("downloadAndExtractCli", () => {
   });
 
   it("throws when content-length header exceeds MAX_BUNDLE_SIZE", async () => {
-    const oversizeBytes = (11 * 1024 * 1024).toString(); // 11 MB
+    const oversizeBytes = (26 * 1024 * 1024).toString(); // 26 MB (exceeds 25 MB limit)
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({

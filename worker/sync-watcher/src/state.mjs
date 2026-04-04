@@ -7,6 +7,7 @@
  *
  * State transitions:
  *   IDLE            → DETECTED          (new version found)
+ *   IDLE            → FAILED_RETRYABLE  (error before DETECTED transition)
  *   DETECTED        → ANALYZING         (non-trivial diff, LLM invoked)
  *   DETECTED        → PR_CREATED        (trivial diff, auto-PR)
  *   ANALYZING       → ISSUE_CREATED     (LLM done, issue created)
@@ -31,7 +32,7 @@ import { STATES, MAX_RETRIES } from "./types.mjs";
 
 /** Valid transitions: Map<fromState, Set<toState>> */
 const VALID_TRANSITIONS = new Map([
-  [STATES.IDLE, new Set([STATES.DETECTED])],
+  [STATES.IDLE, new Set([STATES.DETECTED, STATES.FAILED_RETRYABLE])],
   [STATES.DETECTED, new Set([STATES.ANALYZING, STATES.PR_CREATED, STATES.FAILED_RETRYABLE])],
   [STATES.ANALYZING, new Set([STATES.ISSUE_CREATED, STATES.PR_CREATED, STATES.FAILED_RETRYABLE])],
   [STATES.PR_CREATED, new Set([STATES.DELIVERED, STATES.FAILED_RETRYABLE])],
