@@ -46,7 +46,7 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **OAuth endpoint fingerprint parity** &mdash; matches the real CLI's bundled axios 1.13.6 HTTP client signature (`Accept`, `User-Agent`, `Content-Type`) on all OAuth token endpoint calls, required since 2026-03-21 server-side enforcement
 - **Dynamic billing cache hash** &mdash; computes the `cch` field in the billing header using the real CLI's `NP1()` algorithm (SHA-256 of salt + first user message chars + version), replacing the static `00000` placeholder
 - **Adaptive thinking for Opus/Sonnet 4.6** &mdash; automatically normalizes thinking to `{type: "adaptive"}` for supported models, with `effort-2025-11-24` beta
-- **Upstream-aligned auto betas** &mdash; 13+ always-on betas matching Claude Code 2.1.81 (`redact-thinking-2026-02-12` available as opt-in to preserve thinking block visibility)
+- **Upstream-aligned auto betas** &mdash; 13+ always-on betas matching Claude Code 2.1.92 (`redact-thinking-2026-02-12` available as opt-in to preserve thinking block visibility)
 - **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
 - **Runtime config + custom betas** &mdash; `/anthropic set`, `/anthropic config`, and `/anthropic betas` slash commands for live feature toggling without restarting OpenCode
 - **Files API integration** &mdash; upload, list, download, and manage files via `/anthropic files` with endpoint/content-scoped `files-api-2025-04-14` beta injection

@@ -535,7 +535,42 @@ The `cache_policy` config is latched at the first API request. Subsequent reques
 
 Requests detected as title generators (system prompt contains "Generate a short title") do not receive `cache_control` breakpoints. These fire-and-forget queries have unique prompts that are never reused, so caching wastes write tokens.
 
-## 12) Quick verification checklist
+## 12) Claude Code v2.1.92 changelog (no mimicry impact)
+
+v2.1.92 (build 2026-04-03T23:25:15Z) introduced three new environment variables and a new vendor binary. None affect the HTTP wire protocol, so **zero fingerprinting risk** for this plugin.
+
+### 12.1 New env vars
+
+| Variable                               | Purpose                                                                                                                                                                             | Wire impact                                                         |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK` | Bypasses org-level fast mode eligibility check (gate for `speed: "fast"` body field). Also has companion `CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS` for network-error-only bypass. | None — client-side gate only                                        |
+| `CLAUDE_CODE_EXECPATH`                 | Set to `process.execPath` in spawned shell environments so wrapper functions can locate the Claude binary.                                                                          | None — local shell plumbing                                         |
+| `CLAUDE_CODE_SIMULATE_PROXY_USAGE`     | Strips all beta headers from API requests to simulate proxy-gateway behavior. Confirms Anthropic's proxy strips betas.                                                              | None — debugging tool. We send betas (correct for direct 1P calls). |
+
+### 12.2 New sandbox binary: `vendor/seccomp/apply-seccomp`
+
+v2.1.91 had sandbox code in `cli.js` but did not ship the `vendor/seccomp/` directory. v2.1.92 ships pre-compiled Linux ELF binaries:
+
+- `vendor/seccomp/x64/apply-seccomp` (751 KB, ELF 64-bit x86_64, statically linked)
+- `vendor/seccomp/arm64/apply-seccomp` (603 KB, ELF 64-bit aarch64)
+
+This is a **seccomp-bpf filter applicator** that blocks `socket(AF_UNIX, ...)` syscalls in sandboxed tool processes. It adds a third layer to the Linux sandbox stack:
+
+| Layer | Tool               | Controls                                         |
+| ----- | ------------------ | ------------------------------------------------ |
+| 1     | bubblewrap (bwrap) | Filesystem isolation, mount namespaces           |
+| 2     | socat              | Network proxy — TCP bridged through Unix sockets |
+| 3     | apply-seccomp      | Syscall filter — blocks AF_UNIX socket creation  |
+
+32-bit x86 is explicitly unsupported (code logs error about `socketcall()` bypass). This is entirely local runtime sandboxing with no API surface.
+
+### 12.3 Other changes
+
+- `package.json`: adds `vendor/seccomp/` to files list (+59 KB tarball)
+- SDK version unchanged: `0.208.0`
+- OAuth config, identity strings, billing header construction: all identical to v2.1.91
+
+## 13) Quick verification checklist
 
 To audit whether mimicry is active at runtime:
 
