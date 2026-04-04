@@ -1,7 +1,13 @@
 // Synthetic fixture representing a minified Claude Code v2.1.91 cli.js bundle.
 // Variable names are intentionally obfuscated to simulate real minified output.
 // Regex patterns in extractor.mjs must match by VALUE, not by variable name.
-var aB1 = "2.1.91";
+var aC1 = {
+  PACKAGE_URL: "@anthropic-ai/claude-code",
+  README_URL: "https://code.claude.com/docs/en/overview",
+  VERSION: "2.1.91",
+  FEEDBACK_CHANNEL: "https://github.com/anthropics/claude-code/issues",
+  BUILD_TIME: "2026-04-02T21:58:41Z",
+};
 var cD2 = "2026-04-02T21:58:41Z";
 var eF3 = { name: "@anthropic-ai/sdk", VERSION: "0.208.0" };
 var gH4 = "sdk-zAZezfDKGoZuXXKe";

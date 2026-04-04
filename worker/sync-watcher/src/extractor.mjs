@@ -152,15 +152,28 @@ export function extractIdentity(cliText) {
 
 /**
  * Extract the CLI version string (e.g. "2.1.91").
- * The CLI version is always a "2.x.x" semver. We look for the FIRST match
- * of a "2.x.x" pattern to avoid confusing it with "0.x.x" SDK versions.
+ * Anchored to known context to avoid matching bundled dependency versions
+ * (e.g. @aws-sdk/nested-clients "3.936.0" appears before "2.1.92" in the bundle).
  *
  * @param {string} text
  * @returns {string|null}
  */
 function extractCliVersion(text) {
   try {
-    // CLI version is a semver with major >= 2 (handles future 3.x, 4.x, etc.)
+    // Primary: VERSION field adjacent to the @anthropic-ai/claude-code package name
+    // e.g. PACKAGE_URL:"@anthropic-ai/claude-code",...,VERSION:"2.1.92"
+    const anchored = text.match(/@anthropic-ai\/claude-code[^}]{0,200}VERSION:["']([^"']+)["']/s);
+    if (anchored) return anchored[1];
+
+    // Secondary: VERSION:"x.y.z" field anywhere (avoids unanchored first-match)
+    const versionField = text.match(/\bVERSION:["']([2-9]\.\d+\.\d+)["']/);
+    if (versionField) return versionField[1];
+
+    // Tertiary: unquoted version comment "// Version: x.y.z"
+    const comment = text.match(/\/\/ Version:\s*([2-9]\.\d+\.\d+)/);
+    if (comment) return comment[1];
+
+    // Fallback (synthetic fixtures / future formats): first quoted 2-9.x.x string
     const m = text.match(/["']([2-9]\.\d+\.\d+)["']/);
     return m ? m[1] : null;
   } catch {

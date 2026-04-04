@@ -3,7 +3,13 @@
 //   - VERSION: "2.1.90"
 //   - BUILD_TIME: "2026-04-01T22:53:10Z"
 //   - One experimental flag is ABSENT (it was added in v2.1.91)
-var aB1 = "2.1.90";
+var aC1 = {
+  PACKAGE_URL: "@anthropic-ai/claude-code",
+  README_URL: "https://code.claude.com/docs/en/overview",
+  VERSION: "2.1.90",
+  FEEDBACK_CHANNEL: "https://github.com/anthropics/claude-code/issues",
+  BUILD_TIME: "2026-04-01T22:53:10Z",
+};
 var cD2 = "2026-04-01T22:53:10Z";
 var eF3 = { name: "@anthropic-ai/sdk", VERSION: "0.208.0" };
 var gH4 = "sdk-zAZezfDKGoZuXXKe";

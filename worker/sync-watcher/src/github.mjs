@@ -204,8 +204,15 @@ export async function getFileContent(token, repo, filePath, branch) {
 export async function updateFile(token, repo, filePath, branch, content, fileSha, commitMessage) {
   const [owner, repoName] = repo.split("/");
   // Encode UTF-8 text → base64 via TextEncoder → Uint8Array → btoa
+  // Do NOT spread large Uint8Arrays into String.fromCharCode — stack overflow for files > ~64KB.
+  // Instead, process in 8KB chunks.
   const encBytes = new TextEncoder().encode(content);
-  const encodedContent = btoa(String.fromCharCode(...encBytes));
+  const CHUNK = 8192;
+  let binary = "";
+  for (let i = 0; i < encBytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...encBytes.subarray(i, i + CHUNK));
+  }
+  const encodedContent = btoa(binary);
   await githubRequest(token, "PUT", `/repos/${owner}/${repoName}/contents/${filePath}`, {
     message: commitMessage,
     content: encodedContent,
@@ -229,9 +236,17 @@ export async function updateFile(token, repo, filePath, branch, content, fileSha
  */
 export async function createPR(token, repo, { title, body, head, base, assignees }) {
   const [owner, repoName] = repo.split("/");
-  const payload = { title, body, head, base };
-  if (assignees?.length) payload.assignees = assignees;
-  const { data } = await githubRequest(token, "POST", `/repos/${owner}/${repoName}/pulls`, payload);
+  const { data } = await githubRequest(token, "POST", `/repos/${owner}/${repoName}/pulls`, {
+    title,
+    body,
+    head,
+    base,
+  });
+  // GitHub's PR creation endpoint does not support assignees — add via issues API
+  // (PRs are issues in GitHub's data model, so the issues assignees endpoint works)
+  if (assignees?.length) {
+    await githubRequest(token, "POST", `/repos/${owner}/${repoName}/issues/${data.number}/assignees`, { assignees });
+  }
   return { number: data.number, html_url: data.html_url };
 }
 

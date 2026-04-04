@@ -51,10 +51,20 @@ describe("extractScalars — v2.1.91", () => {
   });
 
   it("T1.12: distinguishes CLI version (2.x.x) from SDK version (0.x.x)", () => {
-    const text = `var a="2.1.91";var b="0.208.0";`;
+    const text = `var aC1={PACKAGE_URL:"@anthropic-ai/claude-code",VERSION:"2.1.91"};var b="0.208.0";`;
     const s = extractScalars(text);
     expect(s.version).toBe("2.1.91");
     expect(s.sdkVersion).toBe("0.208.0");
+  });
+
+  it("T1.16: ignores AWS SDK bundled dependency version before CLI version", () => {
+    // Simulates real bundle layout: @aws-sdk package appears before @anthropic-ai/claude-code
+    const text = [
+      `var x={name:"@aws-sdk/nested-clients",version:"3.936.0"};`,
+      `var aC1={PACKAGE_URL:"@anthropic-ai/claude-code",VERSION:"2.1.92",BUILD_TIME:"2026-04-03T00:00:00Z"};`,
+    ].join("\n");
+    const s = extractScalars(text);
+    expect(s.version).toBe("2.1.92");
   });
 
   it("T1.14: extracts UUID clientId", () => {
