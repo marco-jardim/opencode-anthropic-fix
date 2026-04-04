@@ -50,5 +50,4 @@ jobs:
       - run: npm publish --access public
         if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: false
+          NPM_CONFIG_PROVENANCE: true
