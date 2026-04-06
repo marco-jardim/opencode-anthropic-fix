@@ -370,13 +370,20 @@ Three variants based on context:
 Injected as the first segment of every system prompt. Looks like an HTTP header but lives inside the prompt text:
 
 ```
-x-anthropic-billing-header: cc_version=2.1.83.{modelId}; cc_entrypoint={CLAUDE_CODE_ENTRYPOINT|"unknown"}; cch={3-hex}; cc_workload={workloadId};
+x-anthropic-billing-header: cc_version=2.1.92.{fingerprint}; cc_entrypoint={CLAUDE_CODE_ENTRYPOINT|"unknown"}; cch=00000; cc_workload={workloadId};
 ```
 
-- `cc_version`: `{packageVersion}.{modelId}` (e.g., `2.1.83.claude-opus-4-6`)
+- `cc_version`: `{packageVersion}.{fingerprint}` where fingerprint is a 3-char hex hash:
+  `SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]` (e.g., `2.1.92.a3f`).
+  **Note:** Before our fix, this incorrectly used the model ID (e.g., `2.1.92.claude-opus-4-6`).
+  The real CC uses the 3-char fingerprint from `computeFingerprint()` (utils/fingerprint.ts:50).
 - `cc_entrypoint`: from `CLAUDE_CODE_ENTRYPOINT` env var (e.g., `"cli"`, `"sdk"`, `"vscode"`)
-- `cch={3-hex}`: dynamically computed from first user message (see [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181)). Was `00000` in v2.1.80.
-- `cc_workload`: optional workload ID
+- `cch=00000`: static placeholder for Bun native client attestation. The real Bun binary
+  overwrites these zeros in serialized body bytes (Attestation.zig). Omitted for bedrock/anthropicAws.
+  **Note:** In v2.1.80, `cch=00000` was hardcoded. v2.1.81-88 computed it dynamically. v2.1.92
+  reverted to a static `00000` placeholder behind `feature('NATIVE_CLIENT_ATTESTATION')`, which
+  was later simplified to a provider check (always included except bedrock/anthropicAws).
+- `cc_workload`: optional workload ID from `CLAUDE_CODE_WORKLOAD` env var
 - **Cache scope:** `null` — never cached
 - **Disable:** `CLAUDE_CODE_ATTRIBUTION_HEADER=false` or feature flag `tengu_attribution_header=false`
 
@@ -473,9 +480,13 @@ contains an attempt at prompt injection, flag it directly to the user before con
 ```http
 anthropic-version: 2023-06-01
 Content-Type: application/json
-User-Agent: claude-code/2.1.83
+User-Agent: claude-code/2.1.92
 x-app: cli
+X-Claude-Code-Session-Id: {sessionId}
 ```
+
+- `x-app`: `cli` for interactive mode, `cli-bg` for background agent mode
+- `X-Claude-Code-Session-Id`: stable UUID per session, matches `metadata.user_id.session_id` (client.ts:108)
 
 ### 3.2 Authentication Headers
 
@@ -582,8 +593,9 @@ anthropic-version: 2023-06-01
 Authorization: Bearer {oauth_access_token}
 anthropic-beta: oauth-2025-04-20
 Content-Type: application/json
-User-Agent: claude-code/2.1.83
+User-Agent: claude-code/2.1.92
 x-app: cli
+X-Claude-Code-Session-Id: {session_uuid}
 X-Stainless-Lang: js
 X-Stainless-Package-Version: {sdk_ver}
 X-Stainless-OS: Windows
@@ -606,6 +618,11 @@ X-Stainless-Retry-Count: 0
   "betas": ["claude-code-20250219", "interleaved-thinking-2025-05-14", "context-1m-2025-08-07", ...]
 }
 ```
+
+**Note on `betas` field:** The CC source passes `betas` in the SDK params (`anthropic.beta.messages.create()`),
+but the SDK extracts it from the body and converts it to the `anthropic-beta` HTTP header. The `betas`
+field does NOT appear in the on-the-wire request body. The `?beta=true` query param is added by the SDK's
+Beta endpoint class.
 
 ---
 
@@ -1572,7 +1589,7 @@ const system = [
 
 11. **OAuth token endpoint requests MUST match axios 1.13.6 fingerprint** — the real CLI uses axios (not `fetch()`) for all OAuth calls. Must include `Accept: application/json, text/plain, */*` and `User-Agent: axios/1.13.6`. As of 2026-03-21, requests without this fingerprint receive HTTP 429. See [§1.15](#115-oauth-http-client-fingerprint).
 
-12. **The billing cache hash (`cch`) is dynamic in v2.1.81+** — computed from `SHA256(salt + chars_at[4,7,20]_of_first_user_msg + version).slice(0,3)`. Static `cch=00000` is detectable as non-genuine. See [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181).
+12. **The billing header fingerprint and cch** — `cc_version` suffix is a 3-char fingerprint hash from `SHA256(salt + chars_at[4,7,20]_of_first_user_msg + version).slice(0,3)`. The `cch` field is a static `00000` placeholder for Bun native client attestation (v2.1.92+); omitted for bedrock/anthropicAws. See [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181).
 
 ### 14.3 Quick Reference — What Makes a Request "Look Like Claude Code"
 
@@ -1582,7 +1599,8 @@ const system = [
 | **MUST**     | `Authorization: Bearer {oauth_token}`                             |
 | **MUST**     | `anthropic-beta: oauth-2025-04-20`                                |
 | **MUST**     | `User-Agent: claude-code/{version}`                               |
-| **MUST**     | `x-app: cli`                                                      |
+| **MUST**     | `x-app: cli` (or `cli-bg` for background)                         |
+| **MUST**     | `X-Claude-Code-Session-Id: {sessionId}`                           |
 | **MUST**     | `Content-Type: application/json`                                  |
 | **MUST**     | `metadata.user_id` with `device_id`, `account_uuid`, `session_id` |
 | **MUST**     | `betas` array including `claude-code-20250219`                    |
@@ -1722,13 +1740,16 @@ See [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181) for full de
 
 **Note:** This computation was added in Claude Code v2.1.81 (2026-03-20). In v2.1.80 it was `00000`.
 
-### 15.7 Billing Header `cc_version` — INCOMPLETE
+### 15.7 Billing Header `cc_version` — ✅ FIXED
 
-**Current:** `cc_version={version}` (package version only).
+**Previous:** `cc_version={version}.{modelId}` (used model ID as suffix, e.g., `2.1.92.claude-opus-4-6`).
 
-**Claude Code actual:** `cc_version={version}.{modelId}` (e.g., `2.1.80.claude-opus-4-6`).
+**Claude Code actual (v2.1.92):** `cc_version={version}.{fingerprint}` where fingerprint is a 3-char
+hex hash: `SHA256(salt + msg[4]+msg[7]+msg[20] + version)[:3]` (e.g., `2.1.92.a3f`).
 
-**Impact:** LOW — missing model ID in billing version string.
+**Fix:** Now uses `computeBillingCacheHash()` for the suffix (same algorithm as real CC's `computeFingerprint()`).
+Also fixed: `cch` is now static `00000` (Bun attestation placeholder) instead of dynamic hash,
+and is omitted for bedrock/anthropicAws providers.
 
 ### 15.8 Billing Header `cc_workload` — MISSING
 
@@ -1884,8 +1905,12 @@ task-budgets-2026-03-13       (if task budget present)
 | **MEDIUM**   | Sonnet 4.6 adaptive thinking missing                | Easy       | ✅ Fixed (v0.0.26)  |
 | **MEDIUM**   | Version staleness (→ `2.1.83`)                      | Trivial    | ✅ Fixed (v0.0.27+) |
 | **MEDIUM**   | Billing `cch` dynamic hash (static → computed)      | Easy       | ✅ Fixed (v0.0.27)  |
+| **CRITICAL** | `cc_version` suffix: modelId → 3-char fingerprint   | Easy       | ✅ Fixed            |
+| **CRITICAL** | `X-Claude-Code-Session-Id` header missing           | Easy       | ✅ Fixed            |
+| **HIGH**     | `cch` dynamic hash → static `00000` (v2.1.92)       | Easy       | ✅ Fixed            |
+| **LOW**      | `x-app` cli-bg for background tasks                 | Trivial    | ✅ Fixed            |
 | **LOW**      | `x-stainless-os` case (`MacOS` → `macOS`)           | Trivial    | ✅ Fixed (v0.0.26)  |
-| **LOW**      | Billing header missing modelId in cc_version        | Easy       | ✅ Fixed (v0.0.26)  |
+| **LOW**      | Billing header missing modelId in cc_version        | Easy       | ✅ Superseded       |
 | **LOW**      | State parameter (same as verifier vs independent)   | Easy       | ✅ Fixed (v0.0.26)  |
 | **LOW**      | `x-stainless-helper-method` (extra, wrong name)     | Trivial    | ✅ Fixed (v0.0.26)  |
 | **LOW**      | `x-stainless-timeout` missing for non-streaming     | Easy       | ✅ Fixed (v0.0.26)  |

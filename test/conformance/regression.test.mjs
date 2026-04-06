@@ -788,14 +788,17 @@ describe("E2E: System prompt block ordering invariants", () => {
     expect(body.system[2].text).toContain("User instructions here");
   });
 
-  it("billing cc_version includes model ID", async () => {
+  it("billing cc_version includes 3-char fingerprint hash (not model ID)", async () => {
     const { body } = await sendRequest(fetchFn, {
       model: "claude-opus-4-6",
+      messages: [{ role: "user", content: "hello world" }],
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("claude-opus-4-6");
-    expect(body.system[0].text).toMatch(/cc_version=\d+\.\d+\.\d+\.claude-opus-4-6/);
+    // cc_version suffix is a 3-char fingerprint hash, NOT the model ID.
+    // Real CC (utils/fingerprint.ts): SHA256(salt + msg[4]+msg[7]+msg[20] + version)[:3]
+    expect(body.system[0].text).toMatch(/cc_version=\d+\.\d+\.\d+\.[0-9a-f]{3}/);
+    expect(body.system[0].text).not.toContain("claude-opus-4-6");
   });
 });
 

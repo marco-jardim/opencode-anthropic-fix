@@ -732,6 +732,9 @@ describe("fetch interceptor", () => {
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
     expect(headers.get("user-agent")).toContain("claude-cli/2.1.92");
     expect(headers.get("x-app")).toBe("cli");
+    expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.has("x-api-key")).toBe(false);
   });
@@ -3332,6 +3335,30 @@ describe("header handling", () => {
     expect(userId.session_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     // First-party API rejects "betas" in body — betas are header-only
     expect(parsed.betas).toBeUndefined();
+  });
+
+  it("sends X-Claude-Code-Session-Id header matching metadata.user_id.session_id", async () => {
+    delete process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID;
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4",
+        messages: [{ role: "user", content: "hello" }],
+        system: [],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const headers = init.headers;
+    const parsed = JSON.parse(init.body);
+    const userId = JSON.parse(parsed.metadata.user_id);
+    // Header must be a valid UUID and must match the session_id in the body metadata
+    const sessionHeader = headers.get("X-Claude-Code-Session-Id");
+    expect(sessionHeader).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(sessionHeader).toBe(userId.session_id);
   });
 
   it("adds metadata fields from CLAUDE_CODE_* env vars", async () => {

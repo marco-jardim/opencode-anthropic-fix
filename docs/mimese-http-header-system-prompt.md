@@ -123,7 +123,8 @@ sequenceDiagram
 With `signature.enabled=true`, it adds:
 
 - `anthropic-version: 2023-06-01`
-- `x-app: cli`
+- `x-app: cli` (or `cli-bg` when `CLAUDE_CODE_BACKGROUND=1`)
+- `X-Claude-Code-Session-Id: <sessionId>` (same UUID as `metadata.user_id.session_id`)
 - `x-stainless-arch: <x64|arm64|...>`
 - `x-stainless-lang: js`
 - `x-stainless-os: <macOS|Windows|Linux|...>`
@@ -325,17 +326,27 @@ Canonical identity string:
 
 ### 6.4 Billing header generation
 
-`buildAnthropicBillingHeader(claudeCliVersion)`:
+`buildAnthropicBillingHeader(version, firstUserMessage, provider)`:
 
 - can be disabled by `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
-- generates a random 5-hex-char `cch` value per request (`randomBytes(3).toString("hex").slice(0, 5)`)
+- `cc_version` suffix is a 3-char fingerprint hash computed from the first user message:
+  `SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]` (matching real CC `computeFingerprint()`)
+- `cch` is a static `00000` placeholder for Bun native client attestation (real CC's Bun binary
+  overwrites these zeros in serialized body bytes). Omitted for bedrock/anthropicAws providers.
 - builds:
 
 ```text
-x-anthropic-billing-header: cc_version=<claudeCliVersion>; cc_entrypoint=<entrypoint>; cch=<5-hex>;
+x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>; cch=00000;
 ```
 
-Detail: `cc_entrypoint` uses `CLAUDE_CODE_ENTRYPOINT` or `cli` (matching upstream default). The `cch` is non-deterministic per request, matching upstream Claude Code behavior.
+For bedrock/anthropicAws providers, `cch` is omitted:
+
+```text
+x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>;
+```
+
+Detail: `cc_entrypoint` uses `CLAUDE_CODE_ENTRYPOINT` or `unknown` (matching upstream default).
+Optional `cc_workload` is appended when `CLAUDE_CODE_WORKLOAD` is set.
 
 ## 7) Body fields related to mimicry
 

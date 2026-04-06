@@ -2780,6 +2780,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     claudeCliVersion,
                     customBetas: config.custom_betas,
                     strategy: getEffectiveStrategy(),
+                    sessionId: signatureSessionId,
                   },
                   _adaptiveOverride,
                   _tokenEconomy,
@@ -5553,19 +5554,34 @@ function buildRequestMetadata(input) {
 
 /**
  * Build the billing header block for Claude Code system prompt injection.
- * Claude Code v2.1.84: cch computed via NP1() from first user message, cc_version includes model ID.
+ * Claude Code v2.1.92: cc_version includes 3-char fingerprint hash (not model ID).
+ * cch is a static "00000" placeholder for Bun native client attestation.
  *
- * @param {string} version - CLI version (e.g., "2.1.84")
- * @param {string} [modelId] - Model ID to append (e.g., "claude-opus-4-6")
- * @param {string} [firstUserMessage] - First user message text for cch hash computation
+ * Real CC (system.ts:78): version = `${MACRO.VERSION}.${fingerprint}`
+ * Real CC (system.ts:82): cch = feature('NATIVE_CLIENT_ATTESTATION') ? ' cch=00000;' : ''
+ *
+ * @param {string} version - CLI version (e.g., "2.1.92")
+ * @param {string} [firstUserMessage] - First user message text for fingerprint computation
+ * @param {string} [provider] - API provider ("anthropic" | "bedrock" | "vertex" | "foundry")
  * @returns {string}
  */
-function buildAnthropicBillingHeader(version, modelId, firstUserMessage) {
+function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
   const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "unknown";
-  const ccVersion = modelId ? `${version}.${modelId}` : version;
-  const cch = firstUserMessage ? computeBillingCacheHash(firstUserMessage, version) : "00000";
-  let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint}; cch=${cch};`;
+  // Fix #1: cc_version suffix is the 3-char fingerprint hash, NOT the model ID.
+  // computeBillingCacheHash() computes SHA256(salt + msg[4]+msg[7]+msg[20] + version)[:3]
+  // which matches computeFingerprint() in the real CC source (utils/fingerprint.ts).
+  // Always call the hash function — even for empty messages the real CC computes
+  // the hash from "000" chars (indices 4,7,20 all missing → fallback "0").
+  const fingerprint = computeBillingCacheHash(firstUserMessage || "", version);
+  const ccVersion = `${version}.${fingerprint}`;
+  // Fix #4: cch is a static "00000" placeholder for Bun's native client attestation.
+  // Real CC v92: cch is included for all providers EXCEPT bedrock/anthropicAws.
+  // The real Bun binary overwrites these zeros in the serialized body bytes.
+  // For non-Bun runtimes, the server sees "00000" and skips attestation verification.
+  const isBedrock = provider === "bedrock" || provider === "anthropicAws";
+  const cchPart = isBedrock ? "" : " cch=00000;";
+  let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}`;
   const workload = process.env.CLAUDE_CODE_WORKLOAD;
   if (workload) {
     // QA fix M5: sanitize workload value to prevent header injection
@@ -5757,8 +5773,8 @@ function buildSystemPromptBlocks(system, signature) {
   const blocks = [];
   const billingHeader = buildAnthropicBillingHeader(
     signature.claudeCliVersion,
-    signature.modelId,
     signature.firstUserMessage,
+    signature.provider,
   );
   if (billingHeader) {
     // Billing header: no cache_control (null scope — never cached)
@@ -6118,7 +6134,7 @@ async function fetchLatestClaudeCodeVersion(timeoutMs = 1200) {
  * @param {string} accessToken
  * @param {string | undefined} requestBody
  * @param {URL | null} requestUrl
- * @param {{enabled: boolean, claudeCliVersion: string, strategy?: import('./lib/config.mjs').AccountSelectionStrategy, customBetas?: string[]}} signature
+ * @param {{enabled: boolean, claudeCliVersion: string, strategy?: import('./lib/config.mjs').AccountSelectionStrategy, customBetas?: string[], sessionId?: string}} signature
  * @returns {Headers}
  */
 function buildRequestHeaders(
@@ -6182,7 +6198,14 @@ function buildRequestHeaders(
   requestHeaders.set("user-agent", buildExtendedUserAgent(signature.claudeCliVersion));
   if (signature.enabled) {
     requestHeaders.set("anthropic-version", "2023-06-01");
-    requestHeaders.set("x-app", "cli");
+    // Fix #6: x-app is "cli" for interactive mode, "cli-bg" for background tasks.
+    // Real CC (client.ts:106): 'x-app': 'cli' (foreground) or 'cli-bg' (background agent).
+    requestHeaders.set("x-app", isTruthyEnv(process.env.CLAUDE_CODE_BACKGROUND) ? "cli-bg" : "cli");
+    // Fix #3: X-Claude-Code-Session-Id — sent in ALL requests by real CC (client.ts:108).
+    // Value matches metadata.user_id.session_id for server-side correlation.
+    if (signature.sessionId) {
+      requestHeaders.set("X-Claude-Code-Session-Id", signature.sessionId);
+    }
     requestHeaders.set("x-stainless-arch", getStainlessArch(process.arch));
     requestHeaders.set("x-stainless-lang", "js");
     requestHeaders.set("x-stainless-os", getStainlessOs(process.platform));
