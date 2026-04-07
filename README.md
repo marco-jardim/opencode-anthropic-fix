@@ -42,7 +42,7 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Health scoring** &mdash; tracks account reliability and prefers healthy accounts
 - **Standalone CLI** &mdash; manage accounts without opening OpenCode
 - **Configurable strategies** &mdash; sticky, round-robin, or hybrid account selection
-- **Claude Code signature emulation** &mdash; full HTTP header, system prompt, beta flag, and metadata mimicry derived from Claude Code's open source code
+- **Claude Code signature emulation** &mdash; full HTTP header, system prompt, beta flag, and metadata mimicry derived from Claude Code's open source code. System prompt cache scoping follows the real CC's three-path `splitSysPromptPrefix()` architecture (boundary/global/org) with exact marker detection and scope-aware `cache_control` generation
 - **OAuth endpoint fingerprint parity** &mdash; matches the real CLI's bundled axios 1.13.6 HTTP client signature (`Accept`, `User-Agent`, `Content-Type`) on all OAuth token endpoint calls, required since 2026-03-21 server-side enforcement
 - **Billing header fingerprint parity** &mdash; `cc_version` suffix uses the real CLI's 3-char fingerprint hash (SHA-256 of salt + first user message chars + version), `cch` matches the Bun native client attestation placeholder, and `X-Claude-Code-Session-Id` header is sent on all requests
 - **Adaptive thinking for Opus/Sonnet 4.6** &mdash; automatically normalizes thinking to `{type: "adaptive"}` for supported models, with `effort-2025-11-24` beta
@@ -52,7 +52,7 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Files API integration** &mdash; upload, list, download, and manage files via `/anthropic files` with endpoint/content-scoped `files-api-2025-04-14` beta injection
 - **Code execution support** &mdash; available via explicit custom beta opt-in (`code-execution-2025-08-25`), not auto-enabled
 - **Deep QA conformance** &mdash; 680+ tests across 26 test files, including 40 regression tests validating every header, body field, OAuth parameter, beta flag, system prompt block, response handling path, and telemetry schema against the [reverse-engineering doc](docs/claude-code-reverse-engineering.md)
-- **Prompt caching with 1h TTL** &mdash; extended cache TTL on system prompt blocks, auto-disabled if API rejects; cache hit rate tracking with configurable warning threshold
+- **Prompt caching with 1h TTL** &mdash; extended cache TTL on system prompt blocks using scope-correct `cache_control` (`'org'` for default path, `'global'` for boundary path), auto-disabled if API rejects; cache hit rate tracking with configurable warning threshold
 - **API preconnect** &mdash; fire-and-forget HEAD request on init to pre-warm TCP+TLS connection, skipped when proxy/mTLS detected
 - **8K default output cap** &mdash; limits `max_tokens` to 8K by default, auto-escalates to 64K after output truncation, resets after one turn
 - **Context overflow auto-recovery** &mdash; parses structured `prompt_too_long` errors to auto-reduce `max_tokens` before falling back to message trimming

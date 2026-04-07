@@ -151,6 +151,14 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
   const getIdleRefreshWindowMs = () => config.idle_refresh.window_minutes * 60 * 1000;
   const getIdleRefreshMinIntervalMs = () => config.idle_refresh.min_interval_minutes * 60 * 1000;
 
+  /**
+   * Previous state of all anthropic-ratelimit-unified-* headers.
+   * Used to detect changes and emit toasts when status values transition.
+   * Keys mirror the header names (minus the "anthropic-ratelimit-unified-" prefix).
+   * @type {Record<string, string | null>}
+   */
+  const previousUnifiedStatus = {};
+
   // Willow Mode: detect inactivity and suggest context reset.
   // Named after the willow tree — when idle, the session "droops" and a gentle
   // nudge suggests starting fresh rather than accumulating stale context.
@@ -2946,6 +2954,40 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     sessionMetrics.lastQuota.fallbackPercentage = fallbackPct ? parseFloat(fallbackPct) : null;
                     sessionMetrics.lastQuota.overageStatus = overageStatus;
                     sessionMetrics.lastQuota.overageReason = overageReason;
+                  }
+
+                  // Detect changes in any anthropic-ratelimit-unified-* status headers and toast
+                  if (!config.toasts?.quiet) {
+                    /** @type {Array<[string, string | null]>} header-suffix → current value */
+                    const unifiedStatusHeaders = [
+                      ["status", overallStatus],
+                      ["representative-claim", representativeClaim],
+                      ["fallback", fallbackStatus],
+                      ["fallback-percentage", fallbackPct],
+                      ["overage-status", overageStatus],
+                      ["overage-disabled-reason", overageReason],
+                    ];
+                    // Add per-window status headers
+                    for (const win of RATE_LIMIT_WINDOWS) {
+                      unifiedStatusHeaders.push([
+                        `${win.key}-status`,
+                        response.headers.get(`anthropic-ratelimit-unified-${win.key}-status`),
+                      ]);
+                    }
+
+                    for (const [key, current] of unifiedStatusHeaders) {
+                      if (current == null) continue; // header absent — skip
+                      const prev = previousUnifiedStatus[key];
+                      if (prev !== undefined && prev !== current) {
+                        // Value changed — emit a toast
+                        const label = key.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+                        toast(`Quota ${label}: ${prev ?? "—"} → ${current}`, "info", {
+                          debounceKey: `unified-status-${key}`,
+                        }).catch(() => {});
+                        debugLog("anthropic-ratelimit-unified status change", { key, prev, current });
+                      }
+                      previousUnifiedStatus[key] = current;
+                    }
                   }
 
                   // Back-compat: also update tokens/requests/inputTokens from the highest window
@@ -5744,6 +5786,147 @@ function getCacheControlForPolicy(cachePolicy) {
 }
 
 /**
+ * Determine the identity string prefix, matching real CC's getCLISyspromptPrefix().
+ * Real CC selects based on isNonInteractive + hasAppendSystemPrompt flags.
+ * OpenCode is always interactive CLI, so DEFAULT_PREFIX is almost always correct.
+ * We check for Agent SDK signals from the environment to match non-interactive cases.
+ *
+ * @returns {string}
+ */
+function getCLISyspromptPrefix() {
+  // Agent SDK preset: when running within the Claude Agent SDK with CC preset
+  if (isTruthyEnv(process.env.CLAUDE_AGENT_SDK_VERSION) && isTruthyEnv(process.env.CLAUDE_CODE_ENTRYPOINT)) {
+    const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "";
+    if (entrypoint === "agent-sdk" || entrypoint === "sdk") {
+      return "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.";
+    }
+  }
+  // Non-interactive agent without CC preset
+  if (isTruthyEnv(process.env.CLAUDE_AGENT_SDK_VERSION) && !isTruthyEnv(process.env.CLAUDE_CODE_ENTRYPOINT)) {
+    return "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+  }
+  return CLAUDE_CODE_IDENTITY_STRING;
+}
+
+/**
+ * Compute the cache_control object for a given cache scope and policy.
+ * Mirrors real CC getCacheControl() (src/services/api/claude.ts:358-374).
+ *
+ * Real CC behavior:
+ * - scope 'global' → {type: 'ephemeral', scope: 'global', ttl?: '1h'}
+ * - scope 'org'    → {type: 'ephemeral', ttl?: '1h'} (org is internal, NOT on wire)
+ * - scope null     → block gets NO cache_control at all (caller should omit it)
+ *
+ * @param {'global' | 'org' | null} cacheScope
+ * @param {{ttl: string, ttl_supported: boolean}} cachePolicy
+ * @returns {{type: string, ttl?: string, scope?: string} | null} null means "no cache_control"
+ */
+function getCacheControlForScope(cacheScope, cachePolicy) {
+  if (cacheScope === null) return null; // no cache_control for this block
+
+  const hasTtl = cachePolicy.ttl !== "off" && cachePolicy.ttl_supported !== false;
+  const result = { type: "ephemeral" };
+  if (hasTtl) result.ttl = cachePolicy.ttl;
+  // Only 'global' scope is emitted on the wire; 'org' is internal-only
+  if (cacheScope === "global") result.scope = "global";
+  return result;
+}
+
+/**
+ * Split system prompt blocks into structured blocks with cache scoping,
+ * matching real CC splitSysPromptPrefix() (src/utils/api.ts:321-435).
+ *
+ * Real CC has 3 paths that produce 2 distinct wire formats:
+ *
+ * Path A (tool-based cache): skipGlobalCacheForSystemPrompt=true
+ *   - billing → cacheScope: null
+ *   - identity → cacheScope: 'org'
+ *   - rest (joined) → cacheScope: 'org'
+ *   Wire result: identical to Path C (org → ephemeral without scope field)
+ *
+ * Path B (boundary mode): shouldUseGlobalCacheScope() && boundary marker found
+ *   - billing → cacheScope: null
+ *   - identity → cacheScope: null (NO cache_control in boundary mode!)
+ *   - static blocks (before boundary, joined) → cacheScope: 'global'
+ *   - dynamic blocks (after boundary, joined) → cacheScope: null
+ *
+ * Path C (fallback): no global cache feature or no boundary
+ *   - billing → cacheScope: null
+ *   - identity → cacheScope: 'org'
+ *   - rest (joined) → cacheScope: 'org'
+ *
+ * @param {Array<{text: string}>} blocks - Already sanitized/filtered text blocks
+ * @param {string | undefined} attributionHeader - The billing header text (or undefined)
+ * @param {string} identityString - The identity prefix string
+ * @param {boolean} useBoundaryMode - Whether to use Path B (global cache with boundary)
+ * @returns {Array<{text: string, cacheScope: 'global' | 'org' | null}>}
+ */
+function splitSysPromptPrefix(blocks, attributionHeader, identityString, useBoundaryMode) {
+  // Separate known blocks from rest, matching real CC's parsing loop
+  const rest = [];
+  for (const block of blocks) {
+    if (!block.text) continue;
+    // Skip if it's a billing header or identity string (already extracted)
+    if (block.text.startsWith("x-anthropic-billing-header:")) continue;
+    if (KNOWN_IDENTITY_STRINGS.has(block.text)) continue;
+    // Skip the boundary marker itself (real CC skips it in Path A, processes it in Path B)
+    if (block.text === SYSTEM_PROMPT_DYNAMIC_BOUNDARY) continue;
+    rest.push(block.text);
+  }
+
+  // ====================================================================
+  // Path B: Global cache with boundary marker
+  // Real CC (utils/api.ts:219-262): when shouldUseGlobalCacheScope() &&
+  // boundary marker is found in the system prompt array.
+  // ====================================================================
+  if (useBoundaryMode) {
+    // Find boundary marker in the ORIGINAL block array (before filtering)
+    const boundaryIndex = blocks.findIndex((b) => b.text === SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+
+    if (boundaryIndex !== -1) {
+      // Classify blocks as static (before boundary) or dynamic (after boundary)
+      const staticBlocks = [];
+      const dynamicBlocks = [];
+      for (let i = 0; i < blocks.length; i++) {
+        const text = blocks[i].text;
+        if (!text) continue;
+        if (text === SYSTEM_PROMPT_DYNAMIC_BOUNDARY) continue;
+        if (text.startsWith("x-anthropic-billing-header:")) continue;
+        if (KNOWN_IDENTITY_STRINGS.has(text)) continue;
+        if (i < boundaryIndex) {
+          staticBlocks.push(text);
+        } else {
+          dynamicBlocks.push(text);
+        }
+      }
+
+      const result = [];
+      if (attributionHeader) result.push({ text: attributionHeader, cacheScope: null });
+      // Identity: cacheScope null in boundary mode (real CC behavior)
+      result.push({ text: identityString, cacheScope: null });
+      const staticJoined = staticBlocks.join("\n\n");
+      if (staticJoined) result.push({ text: staticJoined, cacheScope: "global" });
+      const dynamicJoined = dynamicBlocks.join("\n\n");
+      if (dynamicJoined) result.push({ text: dynamicJoined, cacheScope: null });
+      return result;
+    }
+    // Boundary marker not found — fall through to Path C
+  }
+
+  // ====================================================================
+  // Path C (fallback) / Path A (tool-based): no boundary or no global cache
+  // Real CC (utils/api.ts:264-289): identity and rest get cacheScope 'org'
+  // Path A produces identical wire output to Path C.
+  // ====================================================================
+  const result = [];
+  if (attributionHeader) result.push({ text: attributionHeader, cacheScope: null });
+  result.push({ text: identityString, cacheScope: "org" });
+  const restJoined = rest.join("\n\n");
+  if (restJoined) result.push({ text: restJoined, cacheScope: "org" });
+  return result;
+}
+
+/**
  * @param {Array<{type: string, text: string, cache_control?: {type: string}}>} system
  * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off', cachePolicy?: {ttl: string, ttl_supported: boolean, boundary_marker?: boolean}}} signature
  * @returns {Array<{type: string, text: string, cache_control?: {type: string}}>}
@@ -5766,95 +5949,38 @@ function buildSystemPromptBlocks(system, signature) {
     return sanitized;
   }
 
-  const filtered = sanitized.filter(
-    (item) => !item.text.startsWith("x-anthropic-billing-header:") && !KNOWN_IDENTITY_STRINGS.has(item.text),
-  );
-
-  const blocks = [];
+  // Build attribution header
   const billingHeader = buildAnthropicBillingHeader(
     signature.claudeCliVersion,
     signature.firstUserMessage,
     signature.provider,
   );
-  if (billingHeader) {
-    // Billing header: no cache_control (null scope — never cached)
-    blocks.push({ type: "text", text: billingHeader });
-  }
 
-  // Compute cache_control once — used for identity block AND filtered blocks.
-  // TTL must be non-decreasing across tools → system → messages, so all cached
-  // system blocks must share the same TTL to avoid "1h after 5m" API rejection.
+  // Select the identity string (matches real CC getCLISyspromptPrefix())
+  const identityString = getCLISyspromptPrefix();
+
+  // Determine cache policy
   const effectiveCachePolicy = signature.cachePolicy || { ttl: "1h", ttl_supported: true };
-  const hasTtl = effectiveCachePolicy.ttl !== "off" && effectiveCachePolicy.ttl_supported !== false;
 
-  // CC v2.1.90 cache_control scoping (verified against bundle WQ() function):
-  // - scope "global" is only emitted for static pre-boundary blocks
-  // - scope "org" is internal-only, NEVER emitted on the wire
-  // - identity block gets no cache_control in boundary mode, or {type:"ephemeral"} in fallback
-  const baseCacheControl = hasTtl ? { type: "ephemeral", ttl: effectiveCachePolicy.ttl } : { type: "ephemeral" };
-  const globalCacheControl = hasTtl
-    ? { type: "ephemeral", scope: "global", ttl: effectiveCachePolicy.ttl }
-    : { type: "ephemeral", scope: "global" };
+  // Determine if we should use boundary mode (Path B)
+  // Real CC: shouldUseGlobalCacheScope() is a GrowthBook feature flag.
+  // We simulate it via config: boundary_marker=true or CLAUDE_CODE_FORCE_GLOBAL_CACHE=1.
+  const useBoundaryMode =
+    effectiveCachePolicy.boundary_marker || isTruthyEnv(process.env.CLAUDE_CODE_FORCE_GLOBAL_CACHE);
 
-  // Identity block: per CC v2.1.90, gets {type:"ephemeral"} with NO scope field.
-  // In boundary mode CC assigns cacheScope:null (no cache_control at all), but
-  // we always include it for better cache hit rates on the proxy side.
-  blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cache_control: baseCacheControl });
+  // Run the real CC splitSysPromptPrefix algorithm to get blocks with cacheScope
+  const scopedBlocks = splitSysPromptPrefix(sanitized, billingHeader || undefined, identityString, useBoundaryMode);
 
-  // Real CC (utils/api.ts splitSysPromptPrefix): ALL user system blocks are joined
-  // with '\n\n' into a SINGLE text block. This is true in ALL modes (default, MCP, boundary).
-  // Wire format: [billing (no cache), identity (ephemeral), ONE_JOINED_BLOCK (ephemeral)]
-  // Sending separate blocks is a detectable fingerprinting signal.
-  if (filtered.length > 0) {
-    const useBoundary =
-      signature.cachePolicy?.boundary_marker || isTruthyEnv(process.env.CLAUDE_CODE_FORCE_GLOBAL_CACHE);
-
-    if (useBoundary) {
-      // Global cache mode: split blocks into static (pre-boundary) and dynamic (post-boundary).
-      // Real CC (splitSysPromptPrefix boundary path):
-      //   static blocks → joined + cacheScope:'global' → cache_control:{type:'ephemeral',scope:'global',ttl:'1h'}
-      //   dynamic blocks → joined + cacheScope:null → NO cache_control
-      // We use a heuristic to find the split point (environment/date/CWD info = dynamic).
-      const splitIndex = filtered.findIndex((block) => {
-        const text = block.text.toLowerCase();
-        return (
-          text.includes("working directory") ||
-          text.includes("today's date") ||
-          text.includes("current date") ||
-          text.includes("environment") ||
-          text.includes("platform:")
-        );
-      });
-
-      const effectiveSplit = splitIndex > 0 ? splitIndex : Math.ceil(filtered.length / 2);
-
-      // Static blocks (before boundary): joined into ONE block with global cache
-      const staticText = filtered
-        .slice(0, effectiveSplit)
-        .map((b) => b.text)
-        .join("\n\n");
-      if (staticText) {
-        blocks.push({ type: "text", text: staticText, cache_control: globalCacheControl });
-      }
-
-      // Dynamic blocks (after boundary): joined into ONE block with NO cache
-      const dynamicText = filtered
-        .slice(effectiveSplit)
-        .map((b) => b.text)
-        .join("\n\n");
-      if (dynamicText) {
-        blocks.push({ type: "text", text: dynamicText });
-      }
-    } else {
-      // Default mode (and MCP tools mode): ALL filtered blocks joined into ONE block.
-      // Real CC (splitSysPromptPrefix default/MCP path):
-      //   rest.join('\n\n') → cacheScope:'org' → cache_control:{type:'ephemeral',ttl:'1h'}
-      const joinedText = filtered.map((b) => b.text).join("\n\n");
-      blocks.push({ type: "text", text: joinedText, cache_control: baseCacheControl });
-    }
-  }
-
-  return blocks;
+  // Convert scoped blocks to wire format using getCacheControlForScope
+  // (mirrors real CC buildSystemPromptBlocks → map + getCacheControl)
+  return scopedBlocks.map((block) => {
+    const cc = getCacheControlForScope(block.cacheScope, effectiveCachePolicy);
+    return {
+      type: "text",
+      text: block.text,
+      ...(cc !== null && { cache_control: cc }),
+    };
+  });
 }
 
 /**

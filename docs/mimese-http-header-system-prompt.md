@@ -307,24 +307,70 @@ This plugin no longer auto-includes `fine-grained-tool-streaming-2025-05-14` in 
 - `opencode`/`OpenCode` variants => `Claude`
   - except when preceded by `/` (path-like occurrence preserved)
 
-### 6.3 Injected blocks when mimicry is enabled
+### 6.3 Identity string selection
 
-`buildSystemPromptBlocks(...)`:
+`getCLISyspromptPrefix()` selects the identity string dynamically, matching the real CC's `getCLISyspromptPrefix()` (src/constants/system.ts:24-40):
 
-1. sanitizes all blocks
-2. removes pre-existing blocks that are already:
-   - `x-anthropic-billing-header: ...`
-   - known identity strings (`KNOWN_IDENTITY_STRINGS`)
-3. builds final ordered list:
-   - (optional) billing header block
-   - canonical identity block with `cache_control: { type: "ephemeral" }`
-   - original filtered/sanitized blocks
+| Condition                                                                                                   | Identity string                                                                                  |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Default (interactive CLI)                                                                                   | `You are Claude Code, Anthropic's official CLI for Claude.`                                      |
+| Agent SDK with CC preset (`CLAUDE_AGENT_SDK_VERSION` set + `CLAUDE_CODE_ENTRYPOINT` = `agent-sdk` or `sdk`) | `You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` |
+| Agent SDK without CC entrypoint (`CLAUDE_AGENT_SDK_VERSION` set, no `CLAUDE_CODE_ENTRYPOINT`)               | `You are a Claude agent, built on Anthropic's Claude Agent SDK.`                                 |
 
-Canonical identity string:
+All three values are tracked in `KNOWN_IDENTITY_STRINGS` for deduplication during block filtering.
 
-- `You are Claude Code, Anthropic's official CLI for Claude.`
+### 6.4 Cache scoping architecture
 
-### 6.4 Billing header generation
+`buildSystemPromptBlocks(...)` now mirrors the real CC's three-path cache scoping strategy (src/utils/api.ts `splitSysPromptPrefix()`):
+
+1. Sanitizes and filters all blocks (removes pre-existing billing headers and identity strings)
+2. Delegates to `splitSysPromptPrefix()` which assigns a `cacheScope` to each block
+3. Converts scoped blocks to wire format via `getCacheControlForScope()`
+
+#### Cache scope to wire format (`getCacheControlForScope`)
+
+Mirrors real CC `getCacheControl()` (src/services/api/claude.ts:358-374):
+
+| `cacheScope` | Wire `cache_control`                              | Notes                                      |
+| ------------ | ------------------------------------------------- | ------------------------------------------ |
+| `null`       | _(field omitted)_                                 | Block is never cached                      |
+| `'org'`      | `{type: "ephemeral", ttl: "1h"}`                  | Internal scope — `scope` field NOT on wire |
+| `'global'`   | `{type: "ephemeral", scope: "global", ttl: "1h"}` | Only scope that appears on wire            |
+
+TTL is controlled by `cache_policy.ttl` config (default `"1h"`). When `ttl: "off"` or `ttl_supported: false`, the `ttl` field is omitted.
+
+#### Path selection (`splitSysPromptPrefix`)
+
+The real CC has 3 code paths. Paths A and C produce identical wire output, so the plugin implements 2 effective paths:
+
+**Path B — Boundary mode** (when `cache_policy.boundary_marker=true` or `CLAUDE_CODE_FORCE_GLOBAL_CACHE=1`):
+
+Activated when the boundary marker `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` is found in the system prompt array.
+
+| Block                                               | `cacheScope` | Wire `cache_control`                              |
+| --------------------------------------------------- | ------------ | ------------------------------------------------- |
+| Attribution header                                  | `null`       | _(omitted)_                                       |
+| Identity string                                     | `null`       | _(omitted)_                                       |
+| Static blocks (before boundary, joined with `\n\n`) | `'global'`   | `{type: "ephemeral", scope: "global", ttl: "1h"}` |
+| Dynamic blocks (after boundary, joined with `\n\n`) | `null`       | _(omitted)_                                       |
+
+Boundary detection uses **exact marker match** (`block.text === SYSTEM_PROMPT_DYNAMIC_BOUNDARY`), not heuristic string search. If the marker is not found, falls through to default mode.
+
+**Path C — Default mode** (no boundary marker, or boundary mode disabled):
+
+Covers both the real CC's "fallback" path and "tool-based cache" path, which produce identical wire formats.
+
+| Block                            | `cacheScope` | Wire `cache_control`             |
+| -------------------------------- | ------------ | -------------------------------- |
+| Attribution header               | `null`       | _(omitted)_                      |
+| Identity string                  | `'org'`      | `{type: "ephemeral", ttl: "1h"}` |
+| Rest blocks (joined with `\n\n`) | `'org'`      | `{type: "ephemeral", ttl: "1h"}` |
+
+#### Block joining
+
+In both paths, user system blocks are joined with `\n\n` into a single text block. This matches the real CC behavior where `rest.join('\n\n')` / `staticBlocks.join('\n\n')` / `dynamicBlocks.join('\n\n')` produce at most one block per scope. Sending separate blocks per original input would be a detectable fingerprinting signal.
+
+### 6.5 Billing header generation
 
 `buildAnthropicBillingHeader(version, firstUserMessage, provider)`:
 
