@@ -5801,16 +5801,20 @@ function buildSystemPromptBlocks(system, signature) {
   // we always include it for better cache hit rates on the proxy side.
   blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY_STRING, cache_control: baseCacheControl });
 
-  // Filtered blocks: keep as-is, with optional static/dynamic boundary marker
+  // Real CC (utils/api.ts splitSysPromptPrefix): ALL user system blocks are joined
+  // with '\n\n' into a SINGLE text block. This is true in ALL modes (default, MCP, boundary).
+  // Wire format: [billing (no cache), identity (ephemeral), ONE_JOINED_BLOCK (ephemeral)]
+  // Sending separate blocks is a detectable fingerprinting signal.
   if (filtered.length > 0) {
     const useBoundary =
       signature.cachePolicy?.boundary_marker || isTruthyEnv(process.env.CLAUDE_CODE_FORCE_GLOBAL_CACHE);
 
     if (useBoundary) {
-      // Heuristic: treat first half as "static" (tool defs, instructions)
-      // and second half as "dynamic" (env info, memory, etc.)
-      // Find a split point: look for blocks containing environment/date/CWD info
-      // as the boundary between static and dynamic.
+      // Global cache mode: split blocks into static (pre-boundary) and dynamic (post-boundary).
+      // Real CC (splitSysPromptPrefix boundary path):
+      //   static blocks → joined + cacheScope:'global' → cache_control:{type:'ephemeral',scope:'global',ttl:'1h'}
+      //   dynamic blocks → joined + cacheScope:null → NO cache_control
+      // We use a heuristic to find the split point (environment/date/CWD info = dynamic).
       const splitIndex = filtered.findIndex((block) => {
         const text = block.text.toLowerCase();
         return (
@@ -5824,29 +5828,29 @@ function buildSystemPromptBlocks(system, signature) {
 
       const effectiveSplit = splitIndex > 0 ? splitIndex : Math.ceil(filtered.length / 2);
 
-      // Static blocks (before boundary) get global-scope cache_control
-      for (let i = 0; i < effectiveSplit; i++) {
-        blocks.push({ ...filtered[i], cache_control: globalCacheControl });
+      // Static blocks (before boundary): joined into ONE block with global cache
+      const staticText = filtered
+        .slice(0, effectiveSplit)
+        .map((b) => b.text)
+        .join("\n\n");
+      if (staticText) {
+        blocks.push({ type: "text", text: staticText, cache_control: globalCacheControl });
       }
 
-      // Boundary marker
-      blocks.push({ type: "text", text: SYSTEM_PROMPT_DYNAMIC_BOUNDARY });
-
-      // Dynamic blocks (after boundary) get NO cache_control
-      for (let i = effectiveSplit; i < filtered.length; i++) {
-        const { cache_control: _cc, ...rest } = filtered[i];
-        blocks.push(rest);
+      // Dynamic blocks (after boundary): joined into ONE block with NO cache
+      const dynamicText = filtered
+        .slice(effectiveSplit)
+        .map((b) => b.text)
+        .join("\n\n");
+      if (dynamicText) {
+        blocks.push({ type: "text", text: dynamicText });
       }
     } else {
-      // Original behavior: only last block gets cache_control.
-      // Strip any upstream cache_control from intermediate blocks to prevent
-      // TTL ordering violations (e.g., upstream 5m followed by our 1h).
-      for (let i = 0; i < filtered.length - 1; i++) {
-        const { cache_control: _cc, ...rest } = filtered[i];
-        blocks.push(rest);
-      }
-      const lastFiltered = filtered[filtered.length - 1];
-      blocks.push({ ...lastFiltered, cache_control: baseCacheControl });
+      // Default mode (and MCP tools mode): ALL filtered blocks joined into ONE block.
+      // Real CC (splitSysPromptPrefix default/MCP path):
+      //   rest.join('\n\n') → cacheScope:'org' → cache_control:{type:'ephemeral',ttl:'1h'}
+      const joinedText = filtered.map((b) => b.text).join("\n\n");
+      blocks.push({ type: "text", text: joinedText, cache_control: baseCacheControl });
     }
   }
 
