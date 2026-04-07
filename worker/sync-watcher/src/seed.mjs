@@ -20,8 +20,8 @@
  * @type {ExtractedContract}
  */
 export const SEED_CONTRACT = {
-  version: "2.1.92",
-  buildTime: "2026-04-03T23:25:15Z",
+  version: "2.1.94",
+  buildTime: "2026-04-07T20:19:20Z",
   sdkVersion: "0.208.0",
   sdkToken: "sdk-zAZezfDKGoZuXXKe",
   billingSalt: "59cf53e54c78",
