@@ -4933,13 +4933,14 @@ const FALLBACK_CLAUDE_CLI_VERSION = "2.1.92";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CLAUDE_CODE_BUILD_TIME = "2026-04-03T23:25:15Z";
 
-// The @anthropic-ai/sdk version bundled with Claude Code v2.1.92.
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.96.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .80-.92.
+// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .94-.96.
 const ANTHROPIC_SDK_VERSION = "0.208.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.96", "0.208.0"],
   ["2.1.92", "0.208.0"],
   ["2.1.91", "0.208.0"],
   ["2.1.90", "0.208.0"],
