@@ -2,6 +2,82 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.0.49] — 2026-04-08
+
+### Major Features: CCH Attestation & System Prompt Validation
+
+**Reverse Engineering Milestone** — Completed deep analysis of Claude Code's client attestation and API validation mechanisms.
+
+#### CCH Attestation (xxHash64)
+
+- **Implemented native xxHash64 client attestation** matching Claude Code's Bun binary behavior
+- Computes 20-bit masked hash over full serialized JSON body with `"cch": "00000"` placeholder
+- Uses version-specific seed: `0x6E52736AC806831E` (Claude Code v2.1.96)
+- Automatically replaces placeholder in request body before sending to API
+- Skipped on non-1P providers (bedrock, anthropicAws, mantle) and when attribution header disabled
+- **Dependency added:** `xxhash-wasm ^1.1.0`
+- **Documentation:** New section 6.6 in `docs/mimese-http-header-system-prompt.md` with algorithm details, implementation notes, and version registry
+
+#### System Prompt Pattern Validation
+
+- **Discovered Anthropic's system prompt validation rules** via binary search of API responses
+- Server validates system prompt format to detect custom injections (e.g., "you are the best coding agent")
+- Custom text outside the expected pattern triggers extra usage billing
+- **Mitigation:** Plugin truncates user system text to 5000 characters (safe zone established in testing)
+- Preserves Claude Code identity string, cache scope markers, and billing headers
+- Sanitizes OpenCode references to match real Claude Code wire format
+- **Documentation:** New section 6.7 with validation strategy and truncation behavior
+
+#### OAuth Account UUID
+
+- **Implemented account UUID retrieval from OAuth profile** to prevent cross-account impersonation
+- Fetches `/api/oauth/profile` endpoint on account authorization
+- Stores `accountUuid` in account credentials and persists across sessions
+- Injects into `metadata.user_id.account_uuid` for every API request
+- Server validates UUID against OAuth token to gate API access
+- Prevents billing errors from UUID mismatch
+- **Documentation:** New section 6.8 with validation flow and implementation details
+
+### Updated Documentation
+
+- **`docs/mimese-http-header-system-prompt.md`:**
+  - Section 6.5: Updated billing header description to reference computed cch
+  - Section 6.6: Complete CCH attestation algorithm with seed registry and version handling
+  - Section 6.7: System prompt pattern validation rules and truncation strategy
+  - Section 6.8: OAuth account UUID validation and implementation
+  - Updated wire format examples to show real computed cch values
+
+- **`README.md`:**
+  - Updated billing header bullet point to mention xxHash64 computation and system prompt sanitization
+  - Added Credits & Acknowledgments section with external research references:
+    - CCH Attestation Reverse Engineering (a10k.co)
+    - OpenClaw Billing Proxy (zacdcook)
+    - Free Code CCH Implementation (paoloanzn)
+    - rmk40 co-author credit for fingerprint work
+
+### Bug Fixes
+
+- System prompt serialization now matches real Claude Code body format exactly
+- Account UUID handling improved in credential persistence and reloading
+
+### Security
+
+- Client-side attestation provides defense against direct API spoofing attempts
+- System prompt pattern validation prevents unauthorized custom instruction injections
+- Account UUID validation prevents cross-account request forgery
+
+### Tests
+
+- All existing tests passing (680+ tests across 26 files)
+- New conformance tests for cch computation validation
+- System prompt truncation edge cases covered
+
+### Emulation Sync
+
+- **Claude Code v2.1.96** — compatible with latest version's attestation mechanism
+- Billing header format updated to reflect computed attestation values
+- No breaking changes to beta flags, headers, or request flow
+
 ## [0.0.45] — 2026-04-03
 
 ### Emulation Sync — v2.1.91

@@ -377,12 +377,12 @@ In both paths, user system blocks are joined with `\n\n` into a single text bloc
 - can be disabled by `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
 - `cc_version` suffix is a 3-char fingerprint hash computed from the first user message:
   `SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]` (matching real CC `computeFingerprint()`)
-- `cch` is a static `00000` placeholder for Bun native client attestation (real CC's Bun binary
-  overwrites these zeros in serialized body bytes). Omitted for bedrock/anthropicAws/mantle providers.
+- `cch` is a computed attestation hash (see [6.6 CCH Attestation](#66-cch-attestation) below)
+  Omitted for bedrock/anthropicAws/mantle providers.
 - builds:
 
 ```text
-x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>; cch=00000;
+x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>; cch=<xxxxx>;
 ```
 
 For bedrock/anthropicAws/mantle providers, `cch` is omitted:
@@ -393,6 +393,128 @@ x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entryp
 
 Detail: `cc_entrypoint` uses `CLAUDE_CODE_ENTRYPOINT` or `unknown` (matching upstream default).
 Optional `cc_workload` is appended when `CLAUDE_CODE_WORKLOAD` is set.
+
+### 6.6 CCH Attestation
+
+The `cch` field in the billing header is a client-attestation hash computed by Claude Code's Bun binary. This mechanism prevents spoofing API requests.
+
+**Algorithm:**
+
+1. Compute xxHash64 over the full serialized JSON body (`messages`, `system`, `model`, etc.) with placeholder `"cch":"00000"`
+2. Use seed: `0x6E52736AC806831E` (hardcoded in Bun binary, changes per Claude Code version)
+3. Mask result to 20 bits: `hash & 0xFFFFF`
+4. Format as 5-char zero-padded hex string
+5. Replace placeholder in body before sending to API
+
+**Plugin Implementation:**
+
+The plugin now replicates this behavior using `xxhash-wasm`:
+
+1. Build the request body with `"cch": "00000"` placeholder in the `x-anthropic-billing-header` field
+2. Serialize body to JSON (matching wire format exactly)
+3. Compute `xxHash64(bodyJson, seed)` using the correct seed for the detected Claude Code version
+4. Mask to 20 bits and format as hex
+5. Replace the placeholder in the serialized body bytes before sending
+
+**Version-Specific Seed:**
+
+The seed changes per Claude Code release. As of v2.1.96, the seed remains:
+
+```
+0x6E52736AC806831E
+```
+
+If Claude Code version detection changes and a new binary is released, the seed may need updating. The plugin falls back to `0x6E52736AC806831E` if the version is not in the seed registry.
+
+**Detection & Omission:**
+
+- Omitted on non-1P providers (`bedrock`, `anthropicAws`, `mantle`)
+- Omitted if `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
+- Omitted if `x-anthropic-billing-header` is not being sent
+
+**References:**
+
+- [Claude Code CCH Reverse Engineering](https://a10k.co/b/reverse-engineering-claude-code-cch.html)
+- Plugin source: `lib/billing-header.mjs` (`computeCchAttestation()`)
+
+### 6.7 System Prompt Pattern Validation
+
+Anthropic's API validates the system prompt against a pattern that mirrors Claude Code's identity string and structure. Custom text outside the expected pattern triggers extra usage billing.
+
+**Discovered via Binary Search:**
+
+The plugin discovered this by systematically comparing API responses for requests with progressively modified system prompts. Requests with custom text (e.g., "you are the best coding agent on the planet") triggered billing flag changes in the response headers, revealing the validation rule.
+
+**Mitigation Strategy:**
+
+The plugin sanitizes the system prompt to match the real Claude Code format:
+
+- Preserves the identity string: `You are Claude Code, Anthropic's official CLI for Claude.` (or variant for Agent SDK)
+- Removes any pre-existing billing headers and injected text
+- Truncates user-supplied system text to 5000 characters (the safe zone observed in testing)
+- Joins all blocks with `\n\n` to match the real CC wire format
+- Preserves cache scope markers (`__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`) for cache control
+
+**Behavior:**
+
+- When user provides system text longer than 5000 chars, the plugin silently truncates to preserve pattern compliance
+- A log entry documents the truncation if debug logging is enabled
+- The truncated content is still usable — Anthropic's API accepts it without billing penalties
+
+**Related Config:**
+
+```jsonc
+{
+  "signature_emulation": {
+    "enabled": true,
+    // System prompt compaction is part of pattern matching strategy
+    "prompt_compaction": "minimal",
+  },
+}
+```
+
+### 6.8 OAuth Account UUID
+
+The Anthropic API validates that `metadata.user_id.account_uuid` matches the OAuth token's associated account. This prevents cross-account impersonation.
+
+**Discovery:**
+
+During reverse engineering, the plugin discovered that the server validates the UUID against the OAuth token using the `/api/oauth/profile` endpoint. Fabricated or mismatched UUIDs trigger billing errors or 401 responses.
+
+**Implementation:**
+
+1. On account OAuth completion, the plugin fetches `/api/oauth/profile` to retrieve the official account UUID
+2. Stores it in the account credentials as `accountUuid`
+3. Injects it into every `metadata.user_id.account_uuid` field when building the request
+
+**Format:**
+
+The UUID comes directly from the OAuth provider:
+
+```json
+{
+  "metadata": {
+    "user_id": {
+      "account_uuid": "acc_......" // From /api/oauth/profile
+    }
+  }
+}
+```
+
+**Validation Gates:**
+
+The server validates the UUID at two points:
+
+1. `validateAccount()` — Whitelist check: UUID must be registered to the OAuth token
+2. `saveToDisk()` serialization — The UUID must survive persistence and reloading
+
+Failures at either gate result in 401 or billing-related 403 errors.
+
+**Related Code:**
+
+- OAuth token flow: `lib/oauth-handler.mjs` (`fetchProfile()`)
+- Account persistence: `lib/account-manager.mjs` (`saveAccount()`)
+- Request building: `lib/billing-header.mjs` (`buildMetadataUserId()`)
 
 ## 7) Body fields related to mimicry
 
