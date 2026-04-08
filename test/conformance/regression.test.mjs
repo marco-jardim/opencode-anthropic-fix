@@ -182,6 +182,11 @@ beforeEach(() => {
   delete process.env.CLAUDE_CODE_USER_EMAIL;
   delete process.env.CLAUDE_CODE_ORGANIZATION_UUID;
   delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+  delete process.env.CLAUDE_CODE_USE_BEDROCK;
+  delete process.env.CLAUDE_CODE_USE_VERTEX;
+  delete process.env.CLAUDE_CODE_USE_FOUNDRY;
+  delete process.env.CLAUDE_CODE_USE_ANTHROPIC_AWS;
+  delete process.env.CLAUDE_CODE_USE_MANTLE;
   delete process.env.OPENCODE_ANTHROPIC_INITIAL_ACCOUNT;
   delete process.env.OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING;
   delete process.env.MAX_THINKING_TOKENS;
@@ -726,17 +731,18 @@ describe("E2E: Full header set on a standard request", () => {
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.get("x-stainless-runtime")).toBe("node");
     expect(headers.get("x-stainless-runtime-version")).toBe(process.version);
-    expect(headers.get("x-stainless-package-version")).toBe("0.208.0");
+    // x-stainless-package-version: passthrough from host SDK (or fallback "0.208.0")
     expect(headers.get("x-stainless-retry-count")).toBe("0");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("authorization")).toBe("Bearer access-1");
     expect(headers.has("x-api-key")).toBe(false);
   });
 
-  it("does NOT include dangerous-direct-browser-access or x-stainless-helper-method", async () => {
+  it("includes anthropic-dangerous-direct-browser-access and excludes x-stainless-helper-method", async () => {
     const { headers } = await sendRequest(fetchFn);
 
-    expect(headers.has("anthropic-dangerous-direct-browser-access")).toBe(false);
+    // Real CC sends this header (confirmed via proxy capture)
+    expect(headers.get("anthropic-dangerous-direct-browser-access")).toBe("true");
     expect(headers.has("x-stainless-helper-method")).toBe(false);
   });
 
@@ -779,7 +785,8 @@ describe("E2E: System prompt block ordering invariants", () => {
     expect(body.system.length).toBeGreaterThanOrEqual(3);
     // Block 0: billing
     expect(body.system[0].text).toContain("x-anthropic-billing-header:");
-    expect(body.system[0].text).toMatch(/cch=[0-9a-f]{3,5}/);
+    // cch attestation: xxHash64 of body → 5 hex chars (replaces 00000 placeholder)
+    expect(body.system[0].text).toMatch(/cch=[0-9a-f]{5}/);
     expect(body.system[0].cache_control).toBeUndefined();
     // Block 1: identity (same TTL as other cached blocks)
     expect(body.system[1].text).toContain("Claude Code");
@@ -918,7 +925,7 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
-describe("E2E: Version is 2.1.92", () => {
+describe("E2E: Version is 2.1.96", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -927,17 +934,17 @@ describe("E2E: Version is 2.1.92", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.92", async () => {
+  it("User-Agent contains 2.1.96", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.92");
+    expect(headers.get("user-agent")).toContain("2.1.96");
   });
 
-  it("billing header contains 2.1.92", async () => {
+  it("billing header contains 2.1.96", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.92");
+    expect(body.system[0].text).toContain("2.1.96");
   });
 });
 

@@ -297,25 +297,55 @@ function extractBillingSalt(text) {
 /**
  * Extract the OAuth client ID (UUID format).
  *
- * Real bundle pattern: `CLIENT_ID:"9d1c250a-e61b-44d9-88ed-5944d1962f5e"`
- * Bug fix: the old regex grabbed the FIRST UUID in the bundle, which was
- * the uuid library's v4 template ("10000000-1000-4000-8000-100000000000").
- * Now we anchor to `CLIENT_ID:` or `CLIENT_ID=` to get the actual OAuth client ID.
+ * Real bundles contain BOTH local-dev and production CLIENT_ID values.
+ * We must prefer production (`OAUTH_FILE_SUFFIX:""`) over local
+ * (`OAUTH_FILE_SUFFIX:"-local-oauth"`) when both are present.
+ *
+ * Historical pitfalls:
+ * - First UUID in bundle may be uuid lib template (`10000000-1000-4000-8000-100000000000`)
+ * - First CLIENT_ID in bundle may be local-dev, not production
  *
  * @param {string} text
  * @returns {string|null}
  */
 function extractClientId(text) {
   try {
-    // Primary: CLIENT_ID:"<uuid>" — the OAuth config object field
-    const anchored = text.match(
-      /CLIENT_ID\s*[:=]\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/,
-    );
-    if (anchored) return anchored[1];
+    // Collect all CLIENT_ID assignments first.
+    const clientIdPattern =
+      /CLIENT_ID\s*[:=]\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/g;
+    const matches = [];
+    let m;
+    while ((m = clientIdPattern.exec(text)) !== null) {
+      matches.push({ id: m[1], index: m.index });
+    }
+
+    if (matches.length === 1) return matches[0].id;
+
+    // Prefer the CLIENT_ID whose nearby config has OAUTH_FILE_SUFFIX:"" (production).
+    for (const match of matches) {
+      const nearby = text.slice(match.index, match.index + 500);
+      const suffixMatch = nearby.match(/OAUTH_FILE_SUFFIX\s*[:=]\s*["']([^"']*)["']/);
+      if (suffixMatch && suffixMatch[1] === "") {
+        return match.id;
+      }
+    }
+
+    // Secondary preference: near BASE_API_URL:"https://api.anthropic.com".
+    for (const match of matches) {
+      const start = Math.max(0, match.index - 350);
+      const end = Math.min(text.length, match.index + 350);
+      const nearby = text.slice(start, end);
+      if (/BASE_API_URL\s*[:=]\s*["']https:\/\/api\.anthropic\.com["']/.test(nearby)) {
+        return match.id;
+      }
+    }
+
+    // If we found CLIENT_ID assignments but couldn't classify, return first match.
+    if (matches.length > 0) return matches[0].id;
 
     // Fallback: first UUID (less reliable — may grab uuid lib template)
-    const m = text.match(/["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/);
-    return m ? m[1] : null;
+    const anyUuid = text.match(/["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/);
+    return anyUuid ? anyUuid[1] : null;
   } catch {
     return null;
   }

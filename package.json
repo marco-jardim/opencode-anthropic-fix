@@ -43,6 +43,7 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@openauthjs/openauth": "^0.4.3"
+    "@openauthjs/openauth": "^0.4.3",
+    "xxhash-wasm": "^1.1.0"
   }
 }

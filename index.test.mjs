@@ -105,6 +105,11 @@ beforeEach(() => {
   delete process.env.CLAUDE_CODE_USER_EMAIL;
   delete process.env.CLAUDE_CODE_ORGANIZATION_UUID;
   delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+  delete process.env.CLAUDE_CODE_USE_BEDROCK;
+  delete process.env.CLAUDE_CODE_USE_VERTEX;
+  delete process.env.CLAUDE_CODE_USE_FOUNDRY;
+  delete process.env.CLAUDE_CODE_USE_ANTHROPIC_AWS;
+  delete process.env.CLAUDE_CODE_USE_MANTLE;
   delete process.env.OPENCODE_ANTHROPIC_INITIAL_ACCOUNT;
   process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID = "test-signature-user";
 });
@@ -730,7 +735,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.92");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.96");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -3249,7 +3254,8 @@ describe("header handling", () => {
     const parsed = JSON.parse(init.body);
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
     expect(parsed.system[0].text).toContain("cc_entrypoint=cli");
-    expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{3,5}/);
+    // cch attestation: xxHash64 of body → 5 hex chars (replaces 00000 placeholder)
+    expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{5}/);
     expect(parsed.system[0].cache_control).toBeUndefined();
     expect(parsed.system[1]).toEqual({
       type: "text",
@@ -3520,6 +3526,44 @@ describe("header handling", () => {
     expect(betaHeader).not.toContain("code-execution-2025-08-25");
     expect(betaHeader).not.toContain("files-api-2025-04-14");
     expect(betaHeader).toContain("claude-code-20250219");
+  });
+
+  it("uses mantle provider beta/header behavior when CLAUDE_CODE_USE_MANTLE=1", async () => {
+    process.env.CLAUDE_CODE_USE_MANTLE = "1";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4", messages: [{ role: "user", content: "hello" }] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    const parsed = JSON.parse(init.body);
+    expect(betaHeader).toContain("tool-search-tool-2025-10-19");
+    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
+    expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
+    expect(parsed.system[0].text).not.toContain("cch=00000");
+  });
+
+  it("omits cch for anthropicAws provider when CLAUDE_CODE_USE_ANTHROPIC_AWS=1", async () => {
+    process.env.CLAUDE_CODE_USE_ANTHROPIC_AWS = "1";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4", messages: [{ role: "user", content: "hello" }] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    const parsed = JSON.parse(init.body);
+    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).not.toContain("tool-search-tool-2025-10-19");
+    expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
+    expect(parsed.system[0].text).not.toContain("cch=00000");
   });
 
   it("extracts headers from Request object input", async () => {

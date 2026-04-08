@@ -378,14 +378,14 @@ In both paths, user system blocks are joined with `\n\n` into a single text bloc
 - `cc_version` suffix is a 3-char fingerprint hash computed from the first user message:
   `SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]` (matching real CC `computeFingerprint()`)
 - `cch` is a static `00000` placeholder for Bun native client attestation (real CC's Bun binary
-  overwrites these zeros in serialized body bytes). Omitted for bedrock/anthropicAws providers.
+  overwrites these zeros in serialized body bytes). Omitted for bedrock/anthropicAws/mantle providers.
 - builds:
 
 ```text
 x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>; cch=00000;
 ```
 
-For bedrock/anthropicAws providers, `cch` is omitted:
+For bedrock/anthropicAws/mantle providers, `cch` is omitted:
 
 ```text
 x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>;
@@ -574,7 +574,7 @@ The plugin now uses the correct tool search beta header per provider:
 | Provider                  | Header                         |
 | ------------------------- | ------------------------------ |
 | 1P (firstParty) / Foundry | `advanced-tool-use-2025-11-20` |
-| Vertex / Bedrock          | `tool-search-tool-2025-10-19`  |
+| Vertex / Bedrock / Mantle | `tool-search-tool-2025-10-19`  |
 
 This matches Claude Code's `getToolSearchBetaHeader()` function.
 

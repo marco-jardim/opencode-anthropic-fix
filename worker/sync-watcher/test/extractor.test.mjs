@@ -73,6 +73,16 @@ describe("extractScalars — v2.1.91", () => {
     expect(s.clientId).toBe("9d1c250a-e61b-44d9-88ed-5944d1962f5e");
   });
 
+  it("prefers production CLIENT_ID when local and prod IDs both exist", () => {
+    const text = [
+      `const local={CLIENT_ID:"22422756-60c9-4084-8eb7-27705fd5cf9a",OAUTH_FILE_SUFFIX:"-local-oauth"};`,
+      `const prod={CLIENT_ID:"9d1c250a-e61b-44d9-88ed-5944d1962f5e",OAUTH_FILE_SUFFIX:""};`,
+    ].join("\n");
+
+    const s = extractScalars(text);
+    expect(s.clientId).toBe("9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+  });
+
   it("T1.15: extracts SDK token", () => {
     const s = extractScalars(v91);
     expect(s.sdkToken).toBe("sdk-zAZezfDKGoZuXXKe");
