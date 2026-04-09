@@ -1024,11 +1024,19 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           const enabled = value === "on" || value === "true" || value === "1";
           saveConfig({ fast_mode: enabled });
           config.fast_mode = enabled;
+          _fastModeAppliedToast = false; // reset so next application toasts
+          toast(enabled ? "⚡ Fast mode ON (Opus 4.6 only)" : "⚡ Fast mode OFF", enabled ? "info" : "success", {
+            debounceKey: "fast-mode-toggle",
+          }).catch(() => {});
         },
         "fast-mode": () => {
           const enabled = value === "on" || value === "true" || value === "1";
           saveConfig({ fast_mode: enabled });
           config.fast_mode = enabled;
+          _fastModeAppliedToast = false;
+          toast(enabled ? "⚡ Fast mode ON (Opus 4.6 only)" : "⚡ Fast mode OFF", enabled ? "info" : "success", {
+            debounceKey: "fast-mode-toggle",
+          }).catch(() => {});
         },
         telemetry: () => {
           const enabled = value === "on" || value === "true" || value === "1";
@@ -1063,6 +1071,9 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
             adaptiveContextState.escalatedByError = false;
             adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
           }
+          toast(enabled ? "⬡ Adaptive 1M context ON" : "⬡ Adaptive 1M context OFF", enabled ? "info" : "success", {
+            debounceKey: "adaptive-ctx-toggle",
+          }).catch(() => {});
         },
         "token-efficient-tools": () => {
           const enabled = value === "on" || value === "true" || value === "1";
@@ -2783,6 +2794,12 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 );
                 logTransformedSystemPrompt(body);
 
+                // Toast on first fast-mode application in session (reset on toggle)
+                if (!_fastModeAppliedToast && typeof body === "string" && body.includes('"speed":"fast"')) {
+                  _fastModeAppliedToast = true;
+                  toast("⚡ Fast mode active", "info", { debounceKey: "fast-mode-active" }).catch(() => {});
+                }
+
                 // Capture request body for /anthropic context (2MB cap)
                 if (typeof body === "string" && body.length <= 2_000_000) {
                   sessionMetrics.lastRequestBody = body;
@@ -3271,7 +3288,11 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   if (response.status === 400 && errorBody && errorBody.includes("speed")) {
                     if (config.fast_mode) {
                       config.fast_mode = false;
+                      _fastModeAppliedToast = false;
                       saveConfig({ fast_mode: false });
+                      toast("⚡ Fast mode OFF — not supported by API", "warning", {
+                        debounceKey: "fast-mode-off",
+                      }).catch(() => {});
                       debugLog("fast mode not supported by API, auto-disabled");
                     }
                   }
@@ -3341,7 +3362,8 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     // Graceful degradation: disable fast mode on rate limits
                     if (config.fast_mode && (response.status === 429 || response.status === 529)) {
                       config.fast_mode = false;
-                      toast("Fast mode disabled due to rate limiting", "warning", {
+                      _fastModeAppliedToast = false;
+                      toast("⚡ Fast mode OFF — rate limited", "warning", {
                         debounceKey: "fast-mode-off",
                       }).catch(() => {});
                       debugLog("auto-disabled fast mode after rate limit");
@@ -3893,6 +3915,10 @@ const adaptiveContextState = {
   /** Set when escalation was triggered by a prompt_too_long error. */
   escalatedByError: false,
 };
+
+/** Track whether we've already toasted about fast mode being applied this session.
+ *  Resets when fast mode is toggled off/on so the user gets fresh feedback. */
+let _fastModeAppliedToast = false;
 
 // ---------------------------------------------------------------------------
 // Cache break detection state (Phase 2, Task 2.3)
