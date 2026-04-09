@@ -3040,8 +3040,8 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    // Haiku skips CLAUDE_CODE_BETA_FLAG but gets all other always-on betas
-    expect(betaHeader).not.toContain("claude-code-20250219");
+    // Haiku now gets CLAUDE_CODE_BETA_FLAG so subagent delegation gets full mimic
+    expect(betaHeader).toContain("claude-code-20250219");
     expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).toContain("fast-mode-2026-02-01");
     expect(betaHeader).toContain("effort-2025-11-24");

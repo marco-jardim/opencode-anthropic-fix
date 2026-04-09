@@ -6133,9 +6133,10 @@ function buildAnthropicBetaHeader(
 
   // === ALWAYS-ON BETAS (Claude Code v2.1.90 base set) ===
   // These are ALWAYS included regardless of env vars or feature flags.
-  if (!haiku) {
-    betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"
-  }
+  // NOTE: Real Claude Code skips this beta for Haiku, but we include it
+  // so that Haiku subagents (via model-router delegation) get full mimic
+  // behavior from the Anthropic API.
+  betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"
 
   // Tool search: use provider-aware header.
   // 1P/Foundry u2192 advanced-tool-use-2025-11-20 (enables broader tool capabilities)
