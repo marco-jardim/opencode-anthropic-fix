@@ -6200,10 +6200,20 @@ function buildAnthropicBetaHeader(
   }
 
   betas.push(FAST_MODE_BETA_FLAG); // "fast-mode-2026-02-01"
-  betas.push(EFFORT_BETA_FLAG); // "effort-2025-11-24"
 
-  // Interleaved thinking — always-on unless explicitly disabled
-  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING)) {
+  // effort-2025-11-24 — real CC's Lyz() only pushes this flag when rE(model)
+  // is true (Opus 4.6 / Sonnet 4.6). Pushing it for non-adaptive models like
+  // Haiku is a fingerprint mismatch vs real CC and can contaminate billing
+  // attribution even when the request body has no effort field.
+  if (isAdaptiveThinkingModel(model)) {
+    betas.push(EFFORT_BETA_FLAG); // "effort-2025-11-24"
+  }
+
+  // Interleaved thinking — real CC's i01 pushes via hv4(model), which is
+  // (firstParty && non-Claude-3). Claude 3.x models don't support interleaved
+  // thinking and real CC never sends this flag for them, so emitting it
+  // diverges the fingerprint for legacy Haiku/Sonnet 3.x requests.
+  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && !/claude-3-/i.test(model)) {
     betas.push("interleaved-thinking-2025-05-14");
   }
 

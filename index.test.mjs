@@ -3117,22 +3117,64 @@ describe("header handling", () => {
     expect(parsed.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
   });
 
-  it("haiku models get always-on betas but skip the claude-code flag", async () => {
+  it("haiku 3.5 gets base betas but NOT effort/interleaved (matches real CC hv4/rE gating)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "claude-haiku-3-5", messages: [] }),
+      // Canonical Anthropic model ID form — the Claude-3 detection regex
+      // matches "claude-3-" prefix which exists in the canonical form.
+      body: JSON.stringify({ model: "claude-3-5-haiku-latest", messages: [] }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    // Haiku now gets CLAUDE_CODE_BETA_FLAG so subagent delegation gets full mimic
+    // Haiku gets CLAUDE_CODE_BETA_FLAG so subagent delegation gets full mimic
     expect(betaHeader).toContain("claude-code-20250219");
     expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).toContain("fast-mode-2026-02-01");
+    // Real CC's Lyz() only pushes effort for Opus/Sonnet 4.6 — not Haiku
+    expect(betaHeader).not.toContain("effort-2025-11-24");
+    // Real CC's hv4() excludes Claude 3.x from interleaved thinking
+    expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
+  });
+
+  it("haiku 4.5 gets interleaved thinking but NOT effort (matches real CC hv4/rE gating)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    // Haiku 4.5 is Claude 4+ firstParty → hv4=true → interleaved pushed
+    expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
+    // Haiku 4.5 is NOT rE(model) → effort must NOT be pushed
+    expect(betaHeader).not.toContain("effort-2025-11-24");
+    // Other always-on betas still present
+    expect(betaHeader).toContain("claude-code-20250219");
+    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).toContain("fast-mode-2026-02-01");
+  });
+
+  it("sonnet 4.6 gets BOTH effort and interleaved thinking (matches real CC)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const betaHeader = init.headers.get("anthropic-beta");
+    // Sonnet 4.6 is rE(model) → effort pushed
     expect(betaHeader).toContain("effort-2025-11-24");
+    // Sonnet 4.6 is Claude 4+ → hv4=true → interleaved pushed
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
   });
 
@@ -3284,7 +3326,10 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-4", messages: [] }),
+      // Use opus-4-6 (adaptive model) so effort-2025-11-24 is actually pushed —
+      // the point of this test is to verify that non-experimental betas survive
+      // the disable filter, and effort is only pushed for rE(model) per real CC.
+      body: JSON.stringify({ model: "claude-opus-4-6", messages: [] }),
     });
 
     const [, init] = mockFetch.mock.calls[0];

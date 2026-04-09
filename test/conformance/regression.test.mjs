@@ -236,7 +236,9 @@ describe("Fix #2: EXPERIMENTAL_BETA_FLAGS filter behavior", () => {
 
   it("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 strips most always-on betas", async () => {
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
-    const { headers } = await sendRequest(fetchFn);
+    // Use opus-4-6 so effort-2025-11-24 is actually pushed — real CC's Lyz()
+    // only emits this flag for rE(model) (Opus/Sonnet 4.6).
+    const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const betaHeader = headers.get("anthropic-beta");
 
     // Survivors: oauth, claude-code, effort
@@ -819,7 +821,10 @@ describe("E2E: Beta composition is complete and correct", () => {
   });
 
   it("contains all required always-on betas for non-Haiku model (v2.1.92 set)", async () => {
-    const { headers } = await sendRequest(fetchFn);
+    // Use opus-4-6: real CC's Lyz() only pushes effort-2025-11-24 for
+    // rE(model) (Opus/Sonnet 4.6), so this test needs an adaptive model to
+    // verify the full always-on set including effort.
+    const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const beta = headers.get("anthropic-beta");
 
     // RE doc §15.16 always-on set — synced to v2.1.92
