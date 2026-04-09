@@ -7,3 +7,6 @@ tmp/
 .env.*
 nul
 RESEARCH_SUMMARY.txt
+.claude/
+.opencode/
+.wrangler/
