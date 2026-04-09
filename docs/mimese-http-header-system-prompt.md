@@ -377,12 +377,12 @@ In both paths, user system blocks are joined with `\n\n` into a single text bloc
 - can be disabled by `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
 - `cc_version` suffix is a 3-char fingerprint hash computed from the first user message:
   `SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]` (matching real CC `computeFingerprint()`)
-- `cch` is a computed attestation hash (see [6.6 CCH Attestation](#66-cch-attestation) below)
+- `cch=00000` is always the static placeholder — xxHash64 attestation was **removed in v2.1.97**
   Omitted for bedrock/anthropicAws/mantle providers.
 - builds:
 
 ```text
-x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>; cch=<xxxxx>;
+x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>; cch=00000;
 ```
 
 For bedrock/anthropicAws/mantle providers, `cch` is omitted:
@@ -394,48 +394,32 @@ x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entryp
 Detail: `cc_entrypoint` uses `CLAUDE_CODE_ENTRYPOINT` or `unknown` (matching upstream default).
 Optional `cc_workload` is appended when `CLAUDE_CODE_WORKLOAD` is set.
 
-### 6.6 CCH Attestation
+### 6.6 CCH Attestation (Removed in v2.1.97)
 
-The `cch` field in the billing header is a client-attestation hash computed by Claude Code's Bun binary. This mechanism prevents spoofing API requests.
+> **Historical note:** This section documents the CCH attestation mechanism that was active in Claude Code v2.1.96 and earlier. It was **completely removed in v2.1.97**. The `cch` field is now always the static placeholder `00000` and the plugin no longer computes or injects any hash value.
 
-**Algorithm:**
+**Previous Algorithm (v2.1.96 and earlier):**
 
-1. Compute xxHash64 over the full serialized JSON body (`messages`, `system`, `model`, etc.) with placeholder `"cch":"00000"`
-2. Use seed: `0x6E52736AC806831E` (hardcoded in Bun binary, changes per Claude Code version)
+1. Compute xxHash64 over the full serialized JSON body with placeholder `"cch":"00000"`
+2. Use seed: `0x6E52736AC806831E` (v2.1.96 seed)
 3. Mask result to 20 bits: `hash & 0xFFFFF`
 4. Format as 5-char zero-padded hex string
 5. Replace placeholder in body before sending to API
 
-**Plugin Implementation:**
+**Current Behavior (v2.1.97+):**
 
-The plugin now replicates this behavior using `xxhash-wasm`:
-
-1. Build the request body with `"cch": "00000"` placeholder in the `x-anthropic-billing-header` field
-2. Serialize body to JSON (matching wire format exactly)
-3. Compute `xxHash64(bodyJson, seed)` using the correct seed for the detected Claude Code version
-4. Mask to 20 bits and format as hex
-5. Replace the placeholder in the serialized body bytes before sending
-
-**Version-Specific Seed:**
-
-The seed changes per Claude Code release. As of v2.1.96, the seed remains:
-
-```
-0x6E52736AC806831E
-```
-
-If Claude Code version detection changes and a new binary is released, the seed may need updating. The plugin falls back to `0x6E52736AC806831E` if the version is not in the seed registry.
+- `cch=00000` is always sent as-is — the server no longer validates the hash value
+- The `xxhash-wasm` dependency has been removed from the plugin
+- `computeAndReplaceCch()` function has been removed
 
 **Detection & Omission:**
 
-- Omitted on non-1P providers (`bedrock`, `anthropicAws`, `mantle`)
-- Omitted if `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
-- Omitted if `x-anthropic-billing-header` is not being sent
+- `cch` field is omitted on non-1P providers (`bedrock`, `anthropicAws`, `mantle`)
+- `cch` field is omitted if `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
 
 **References:**
 
-- [Claude Code CCH Reverse Engineering](https://a10k.co/b/reverse-engineering-claude-code-cch.html)
-- Plugin source: `lib/billing-header.mjs` (`computeCchAttestation()`)
+- [Claude Code CCH Reverse Engineering](https://a10k.co/b/reverse-engineering-claude-code-cch.html) (historical, v2.1.96 era)
 
 ### 6.7 System Prompt Pattern Validation
 

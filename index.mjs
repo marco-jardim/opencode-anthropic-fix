@@ -3,7 +3,7 @@ import { stdin, stdout } from "node:process";
 import { randomBytes, randomUUID, createHash as createHashCrypto } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import xxhashInit from "xxhash-wasm";
+// xxhash-wasm import removed: CCH attestation was removed in CC v2.1.97
 import { AccountManager } from "./lib/accounts.mjs";
 import { authorize as oauthAuthorize, exchange as oauthExchange, refreshToken } from "./lib/oauth.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, CLIENT_ID, getConfigDir } from "./lib/config.mjs";
@@ -2815,8 +2815,9 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   _adaptiveOverride,
                   _tokenEconomy,
                 );
-                // Compute cch attestation: xxHash64 of body with seed, replaces "00000"
-                const finalBody = typeof body === "string" ? await computeAndReplaceCch(body) : body;
+                // v2.1.97: cch=00000 is now static (xxHash64 attestation removed).
+                // Send body as-is without cch replacement.
+                const finalBody = body;
 
                 // Execute the request
                 let response;
@@ -4957,17 +4958,18 @@ process.once("beforeExit", _beforeExitHandler);
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.96";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.97";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-04-08T03:13:25Z";
+const CLAUDE_CODE_BUILD_TIME = "2026-04-08T20:46:46Z";
 
-// The @anthropic-ai/sdk version bundled with Claude Code v2.1.96.
+// The @anthropic-ai/sdk version bundled with Claude Code v2.1.97.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .80-.96.
+// Verified by extracting VERSION="0.208.0" from the bundled cli.js of all versions .80-.97.
 const ANTHROPIC_SDK_VERSION = "0.208.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.97", "0.208.0"],
   ["2.1.96", "0.208.0"],
   ["2.1.95", "0.208.0"],
   ["2.1.94", "0.208.0"],
@@ -4998,31 +5000,11 @@ function getSdkVersion(cliVersion) {
 const BILLING_HASH_SALT = "59cf53e54c78";
 const BILLING_HASH_INDICES = [4, 7, 20];
 
-// cch attestation: xxHash64 of the full serialized body with seed, masked to 20 bits.
-// Seed is static per CC version, extracted from Bun's compiled Zig layer.
-// See: https://a10k.co/b/reverse-engineering-claude-code-cch.html
-const CCH_SEED = 0x6e52736ac806831en; // BigInt — changes per CC version
-
-/** @type {null | ((buf: Uint8Array, seed: bigint) => bigint)} */
-let _xxh64Raw = null;
-const _xxhashReady = xxhashInit().then((h) => {
-  _xxh64Raw = h.h64Raw;
-});
-
-/**
- * Compute the cch attestation hash for a serialized request body.
- * @param {string} bodyWithPlaceholder - JSON body containing "cch=00000"
- * @returns {Promise<string>} The body with "cch=00000" replaced by the computed hash
- */
-async function computeAndReplaceCch(bodyWithPlaceholder) {
-  if (!bodyWithPlaceholder.includes("cch=00000")) return bodyWithPlaceholder;
-  await _xxhashReady;
-  if (!_xxh64Raw) return bodyWithPlaceholder;
-  const bodyBytes = Buffer.from(bodyWithPlaceholder, "utf-8");
-  const hash = _xxh64Raw(bodyBytes, CCH_SEED);
-  const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
-  return bodyWithPlaceholder.replace("cch=00000", `cch=${cch}`);
-}
+// cch attestation: REMOVED in v2.1.97.
+// Previously (v2.1.96), CC computed xxHash64 of the serialized body and replaced
+// "cch=00000" with the 20-bit masked hash. In v2.1.97, the xxHash64 computation
+// was completely removed — "cch=00000" is now sent as a static placeholder.
+// Sending a computed cch value would now be detected as non-genuine.
 
 /**
  * Compute the billing cache hash (cch) matching Claude Code's NP1() function.
@@ -5250,24 +5232,23 @@ const BEDROCK_UNSUPPORTED_BETAS = new Set([
   "interleaved-thinking-2025-05-14",
   "context-1m-2025-08-07",
   "tool-search-tool-2025-10-19",
-  "code-execution-2025-08-25",
-  "files-api-2025-04-14",
-  "fine-grained-tool-streaming-2025-05-14",
 ]);
 const EXPERIMENTAL_BETA_FLAGS = new Set([
   "adaptive-thinking-2026-01-28",
   "advanced-tool-use-2025-11-20",
+  "advisor-tool-2026-03-01",
   "afk-mode-2026-01-31",
   "code-execution-2025-08-25",
+  "compact-2026-01-12",
   "context-1m-2025-08-07",
   "context-management-2025-06-27",
   "fast-mode-2026-02-01",
   "files-api-2025-04-14",
-  "fine-grained-tool-streaming-2025-05-14",
   "interleaved-thinking-2025-05-14",
   "prompt-caching-scope-2026-01-05",
   "redact-thinking-2026-02-12",
   "structured-outputs-2025-12-15",
+  "task-budgets-2026-03-13",
   "tool-search-tool-2025-10-19",
   "web-search-2025-03-05",
 ]);
@@ -5498,12 +5479,17 @@ function isAdaptiveThinkingModel(model) {
 
 /**
  * Check if a model is eligible for 1M context (can receive context-1m beta).
- * This includes models with explicit "1m" in the name AND Opus 4.6.
+ * Real CC v2.1.97 U01(): claude-sonnet-4* || opus-4-6 are eligible.
+ * Also matches explicit "1m" in the name (e.g. "claude-opus-4-6[1m]").
  * @param {string} model
  * @returns {boolean}
  */
 function isEligibleFor1MContext(model) {
-  return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model) || isOpus46Model(model);
+  if (!model) return false;
+  // Explicit 1m suffix/tag in model name
+  if (/(^|[-_ ])1m($|[-_ ])|context[-_]?1m|\[1m\]/i.test(model)) return true;
+  // CC v2.1.97 U01: claude-sonnet-4* (any Sonnet 4.x) or opus-4-6
+  return /claude-sonnet-4|sonnet[._-]4/i.test(model) || isOpus46Model(model);
 }
 
 /**
@@ -5664,13 +5650,13 @@ function buildRequestMetadata(input) {
 
 /**
  * Build the billing header block for Claude Code system prompt injection.
- * Claude Code v2.1.96: cc_version includes 3-char fingerprint hash (not model ID).
- * cch is a static "00000" placeholder for Bun native client attestation.
+ * Claude Code v2.1.97: cc_version includes 3-char fingerprint hash (not model ID).
+ * cch is a static "00000" placeholder (xxHash64 attestation removed in v2.1.97).
  *
  * Real CC (system.ts:78): version = `${MACRO.VERSION}.${fingerprint}`
- * Real CC (system.ts:82): cch = feature('NATIVE_CLIENT_ATTESTATION') ? ' cch=00000;' : ''
+ * Real CC (system.ts:82): cch = ' cch=00000;' (static, no longer computed)
  *
- * @param {string} version - CLI version (e.g., "2.1.96")
+ * @param {string} version - CLI version (e.g., "2.1.97")
  * @param {string} [firstUserMessage] - First user message text for fingerprint computation
  * @param {string} [provider] - API provider ("anthropic" | "bedrock" | "vertex" | "foundry" | "anthropicAws" | "mantle")
  * @returns {string}
@@ -5686,10 +5672,8 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
   // the hash from "000" chars (indices 4,7,20 all missing → fallback "0").
   const fingerprint = computeBillingCacheHash(firstUserMessage || "", version);
   const ccVersion = `${version}.${fingerprint}`;
-  // cch: The server may use the PRESENCE of cch as a CC identification signal.
-  // Real CC sends cch=00000 placeholder which Bun's Zig stack overwrites.
-  // For non-Bun runtimes: send cch=00000 so the server recognizes this as CC.
-  // The server should skip attestation verification for all-zeros cch.
+  // cch: v2.1.97 sends static "cch=00000" — xxHash64 attestation was removed.
+  // The server uses the PRESENCE of cch=00000 as a CC identification signal.
   const cchDisabled = provider === "bedrock" || provider === "anthropicAws" || provider === "mantle";
   const cchPart = cchDisabled ? "" : " cch=00000;";
   // Build workload part (upstream concatenates directly, no regex replace)
@@ -6689,9 +6673,10 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       }
     }
 
-    // Fast mode: inject speed parameter for supported models
+    // Fast mode: inject speed parameter for Opus 4.6 only (v2.1.97 restriction).
+    // Real CC v2.1.97 xJ() checks: model.includes("opus-4-6") — Sonnet is NOT eligible.
     const fastModeEnabled = signature.fastMode && !isFalsyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_FAST_MODE);
-    if (fastModeEnabled && parsed.model && (isOpus46Model(parsed.model) || isSonnet46Model(parsed.model))) {
+    if (fastModeEnabled && parsed.model && isOpus46Model(parsed.model)) {
       parsed.speed = "fast";
     }
 

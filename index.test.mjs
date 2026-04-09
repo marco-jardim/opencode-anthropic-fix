@@ -735,7 +735,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.96");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.97");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -3254,8 +3254,8 @@ describe("header handling", () => {
     const parsed = JSON.parse(init.body);
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
     expect(parsed.system[0].text).toContain("cc_entrypoint=cli");
-    // cch attestation: xxHash64 of body → 5 hex chars (replaces 00000 placeholder)
-    expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{5}/);
+    // cch is static "00000" since v2.1.97 (xxHash64 attestation removed)
+    expect(parsed.system[0].text).toContain("cch=00000;");
     expect(parsed.system[0].cache_control).toBeUndefined();
     expect(parsed.system[1]).toEqual({
       type: "text",

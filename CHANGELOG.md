@@ -2,6 +2,50 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.1] — 2026-04-08
+
+### Emulation Sync — Claude Code v2.1.97
+
+#### CCH Attestation Removed
+
+- **`cch=00000` is now always static** — Claude Code v2.1.97 completely removed the xxHash64 attestation mechanism. The plugin no longer computes or injects any hash value.
+- Removed `xxhash-wasm` dependency (no longer needed)
+- Removed `computeAndReplaceCch()` function and its `CCH_SEED` constant
+- Plugin was previously computing a real hash value; sending a computed `cch` with the server expecting `00000` caused request rejection. This was the root cause of the v2.1.97 breakage.
+
+#### Version Bump
+
+- `FALLBACK_CLAUDE_CLI_VERSION`: `2.1.96` → `2.1.97`
+- `CLAUDE_CODE_BUILD_TIME`: updated to `2026-04-08T20:46:46Z`
+- Added `["2.1.97", "0.208.0"]` to `CLI_TO_SDK_VERSION` map (SDK version unchanged)
+
+#### Fast Mode — Opus 4.6 Only
+
+- Fast mode (`speed: "fast"` body injection) now restricted to Opus 4.6 models only, matching v2.1.97's `xJ()` eligibility function. Previously also applied to Sonnet 4.6.
+
+#### 1M Context Eligibility Expanded
+
+- `isEligibleFor1MContext()` now covers all `claude-sonnet-4*` models (any Sonnet 4.x), matching CC's `U01()` function which checks `claude-sonnet-4*` OR `opus-4-6`.
+- Previously only Opus 4.6 and explicit `*-1m` suffix models were eligible. Sonnet 4.x users with 200K+ context windows were not being escalated to the 1M beta.
+
+#### Beta Flag Updates
+
+- **Removed** `fine-grained-tool-streaming-2025-05-14` from `BEDROCK_UNSUPPORTED_BETAS` and `EXPERIMENTAL_BETA_FLAGS` (removed from v2.1.97 bundle entirely)
+- **Removed** `code-execution-2025-08-25` and `files-api-2025-04-14` from `BEDROCK_UNSUPPORTED_BETAS` (Bedrock exclusion set simplified to 3 items in v2.1.97)
+- **Added** `advisor-tool-2026-03-01`, `compact-2026-01-12` to `EXPERIMENTAL_BETA_FLAGS`
+- `task-budgets-2026-03-13` already present from v2.1.84 sync
+
+### Tests
+
+- Version strings updated: `2.1.96` → `2.1.97` in all conformance and unit tests
+- CCH test updated: `toMatch(/cch=[0-9a-f]{5}/)` → `toContain("cch=00000;")`
+- 945 tests across all test files, all passing
+
+### Documentation
+
+- `README.md`: updated billing header bullet — removed xxHash64 claim, now correctly states `cch=00000` static
+- `docs/mimese-http-header-system-prompt.md`: section 6.5 updated to reflect static `cch=00000`; section 6.6 rewritten as historical reference documenting the removed attestation mechanism
+
 ## [0.0.49] — 2026-04-08
 
 ### Major Features: CCH Attestation & System Prompt Validation
