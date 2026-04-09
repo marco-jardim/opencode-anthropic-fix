@@ -5722,6 +5722,24 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
 // Opencode's customizations after ~5800 chars diverge and trigger extra usage billing.
 const MAX_SAFE_SYSTEM_TEXT_LENGTH = 5000;
 
+// A5: Subagent CC-prefix cache.
+//
+// Context: opencode/packages/opencode/src/session/llm.ts:110 uses
+//   `input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(model)`
+// so any agent with a custom prompt (explore, fast, title, summary, etc.)
+// fires WITHOUT the base CC prompt — the server-side fingerprint match fails
+// and the request is billed as pay-as-you-go credits instead of Max-plan usage.
+//
+// Fix: on the first main-agent call (where the anchor is present), cache the
+// sanitized CC prefix. On subsequent subagent calls (anchor missing), prepend
+// the cached prefix to the sanitized blocks so the fingerprint matches again.
+//
+// The cache lives at module scope because buildSystemPromptBlocks is re-entered
+// per request. It gets populated exactly once per process on the first main call.
+const MAX_SUBAGENT_CC_PREFIX = MAX_SAFE_SYSTEM_TEXT_LENGTH;
+const SUBAGENT_CC_ANCHOR = "You are an interactive";
+let cachedCCPrompt = null;
+
 function sanitizeSystemText(text) {
   // QA fix M4: use word boundaries to avoid mangling URLs and code identifiers
   let sanitized = text.replace(/\bOpenCode\b/g, "Claude Code").replace(/\bopencode\b/gi, "Claude");
@@ -6034,6 +6052,40 @@ function buildSystemPromptBlocks(system, signature) {
     ...item,
     text: compactSystemText(sanitizeSystemText(item.text), signature.promptCompactionMode),
   }));
+
+  // A5: Subagent CC-prefix cache/inject (see constant declaration above for context).
+  //
+  // After sanitize, main-agent blocks start with "You are an interactive..." because
+  // sanitizeSystemText() strips everything before that anchor. Subagent blocks
+  // (custom prompts from input.agent.prompt) do NOT start with the anchor —
+  // they start with whatever the agent template says (e.g., "You are a file search
+  // specialist.").
+  //
+  // This logic runs ONLY for Anthropic requests with signature enabled (signature.enabled
+  // is false for non-Anthropic providers), and skips the title-generator fast path
+  // because that one is replaced wholesale with COMPACT_TITLE_GENERATOR_SYSTEM_PROMPT below.
+  if (signature.enabled && !titleGeneratorRequest && sanitized.length > 0) {
+    const firstText = typeof sanitized[0]?.text === "string" ? sanitized[0].text : "";
+    const hasCcAnchor = firstText.startsWith(SUBAGENT_CC_ANCHOR);
+
+    if (hasCcAnchor) {
+      // Main-agent path: cache the prefix on the first hit so subagents can reuse it.
+      // We slice to MAX_SUBAGENT_CC_PREFIX to avoid unbounded growth if the upstream
+      // sanitize limit is ever raised.
+      if (!cachedCCPrompt) {
+        cachedCCPrompt = firstText.slice(0, MAX_SUBAGENT_CC_PREFIX);
+      }
+    } else if (cachedCCPrompt) {
+      // Subagent path: prepend the cached CC prefix so the fingerprint matches.
+      // We prepend, not concatenate, so the original subagent prompt stays as a
+      // separate block — dedupeSystemBlocks and splitSysPromptPrefix handle the
+      // join on their own downstream.
+      sanitized = [{ type: "text", text: cachedCCPrompt }, ...sanitized];
+    }
+    // If !hasCcAnchor && !cachedCCPrompt: no-op. The cache primes on the very
+    // first main call in a process. In practice opencode always fires a main
+    // call before any subagent, so this branch is only hit in synthetic tests.
+  }
 
   if (titleGeneratorRequest) {
     sanitized = [{ type: "text", text: COMPACT_TITLE_GENERATOR_SYSTEM_PROMPT }];
@@ -6547,6 +6599,27 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     // Normalize thinking block for adaptive (Opus 4.6 / Sonnet 4.6) vs manual (older models).
     if (Object.prototype.hasOwnProperty.call(parsed, "thinking")) {
       parsed.thinking = normalizeThinkingBlock(parsed.thinking, parsed.model || "");
+    }
+
+    // Fingerprint fix: real Claude Code v2.1.87+ nests the effort control inside
+    // `output_config.effort` (via Lyz() in cli.js). opencode's provider transform
+    // for variant=max on Opus 4.6 / Sonnet 4.6 sets `effort` at the top level,
+    // which causes Anthropic's server to fingerprint the body as non-CC and bill
+    // it as pay-as-you-go — surfacing as "You're out of extra usage" even on a
+    // valid Max plan. Move it into output_config when we're talking to an
+    // adaptive-thinking model so the wire shape matches real CC.
+    if (typeof parsed.effort === "string" && parsed.model && isAdaptiveThinkingModel(parsed.model)) {
+      if (!parsed.output_config || typeof parsed.output_config !== "object") {
+        parsed.output_config = {};
+      }
+      if (!("effort" in parsed.output_config)) {
+        parsed.output_config.effort = parsed.effort;
+      }
+      delete parsed.effort;
+    } else if (Object.prototype.hasOwnProperty.call(parsed, "effort")) {
+      // Non-adaptive models never carry a top-level effort in real CC — strip it
+      // to avoid polluting the fingerprint for models like Haiku.
+      delete parsed.effort;
     }
 
     // Claude Code temperature rule: when extended thinking is active (any type),
@@ -7372,5 +7445,35 @@ function extractFileIds(body) {
   walk(body.system, 0);
   return ids;
 }
+
+// Internals exposed for tests only. Do not consume from production code paths.
+//
+// IMPORTANT: do NOT add a new `export` declaration here. Opencode's plugin
+// loader (opencode/packages/opencode/src/plugin/index.ts:74-79) iterates
+// `Object.values(mod)` of the loaded module and throws "Plugin export is not
+// a function" if ANY export is not a plugin function. A named `export const
+// __testing__ = {...}` object would break plugin loading entirely.
+//
+// Instead, attach the test hooks as a PROPERTY of the exported function.
+// Functions are objects in JS, so this is valid. The module surface still
+// has only one exported value (the AnthropicAuthPlugin function), which is
+// what the loader expects. Tests reach internals via
+// `import { AnthropicAuthPlugin } from "./index.mjs"` then
+// `AnthropicAuthPlugin.__testing__`.
+AnthropicAuthPlugin.__testing__ = {
+  sanitizeSystemText,
+  compactSystemText,
+  dedupeSystemBlocks,
+  normalizeSystemTextBlocks,
+  buildSystemPromptBlocks,
+  get cachedCCPrompt() {
+    return cachedCCPrompt;
+  },
+  resetCachedCCPrompt() {
+    cachedCCPrompt = null;
+  },
+  SUBAGENT_CC_ANCHOR,
+  CLAUDE_CODE_IDENTITY_STRING,
+};
 
 export default AnthropicAuthPlugin;

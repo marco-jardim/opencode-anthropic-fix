@@ -3011,6 +3011,94 @@ describe("header handling", () => {
     expect(parsed.thinking).toEqual({ type: "adaptive" });
   });
 
+  it("moves top-level effort into output_config.effort for Opus 4.6 (fingerprint parity)", async () => {
+    // opencode's provider transform sets `effort: "max"` at the body root for
+    // variant=max on Opus 4.6. Real Claude Code v2.1.87+ nests it inside
+    // `output_config.effort` via Lyz(). If the plugin forwards the top-level
+    // shape the Anthropic server fingerprints it as non-CC and bills the
+    // request as pay-as-you-go ("You're out of extra usage").
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-6",
+        messages: [],
+        thinking: { type: "adaptive" },
+        effort: "max",
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.effort).toBeUndefined();
+    expect(parsed.output_config).toEqual({ effort: "max" });
+    expect(parsed.thinking).toEqual({ type: "adaptive" });
+  });
+
+  it("moves top-level effort into output_config.effort for Sonnet 4.6", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        messages: [],
+        thinking: { type: "adaptive" },
+        effort: "high",
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.effort).toBeUndefined();
+    expect(parsed.output_config).toEqual({ effort: "high" });
+  });
+
+  it("preserves existing output_config.effort when already present", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-6",
+        messages: [],
+        thinking: { type: "adaptive" },
+        effort: "low",
+        output_config: { effort: "max" },
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    // Existing output_config.effort wins; top-level effort is still stripped.
+    expect(parsed.effort).toBeUndefined();
+    expect(parsed.output_config).toEqual({ effort: "max" });
+  });
+
+  it("strips top-level effort for non-adaptive models", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        messages: [],
+        effort: "medium",
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.effort).toBeUndefined();
+    // Haiku never gets output_config.effort in real CC, don't fabricate it.
+    expect(parsed.output_config?.effort).toBeUndefined();
+  });
+
   it("passes thinking through unchanged for older models (budget_tokens preserved)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
