@@ -111,6 +111,7 @@ async function promptManageAccounts(accountManager) {
 
 export async function AnthropicAuthPlugin({ client, project, directory, worktree, serverUrl, $ }) {
   const config = loadConfig();
+  _pluginConfig = config; // expose to module-level functions (cache stats, response headers)
   // QA fix H6: read emulation settings live from config instead of stale const capture
   // so that runtime toggles via `/anthropic set emulation` take effect immediately
   const getSignatureEmulationEnabled = () => config.signature_emulation.enabled;
@@ -653,6 +654,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
         `telemetry-emulation: ${fresh.telemetry?.emulate_minimal ? "on (silent observer)" : "off"}`,
         `usage-toast: ${fresh.usage_toast ? "on" : "off"}`,
         `adaptive-context: ${fresh.adaptive_context?.enabled ? `on (↑${Math.round((fresh.adaptive_context.escalation_threshold || 150000) / 1000)}K ↓${Math.round((fresh.adaptive_context.deescalation_threshold || 100000) / 1000)}K)${adaptiveContextState.active ? " [ACTIVE]" : ""}` : "off"}`,
+        `anti-verbosity: ${fresh.anti_verbosity?.enabled !== false ? "on" : "off"} (length-anchors: ${fresh.anti_verbosity?.length_anchors !== false ? "on" : "off"})`,
       ];
       await sendCommandMessage(input.sessionID, lines.join("\n"));
       return;
@@ -3864,6 +3866,9 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 // ---------------------------------------------------------------------------
 
 /** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, totalWebSearchRequests: number, recentCacheRates: number[], sessionCostUsd: number, costBreakdown: {input: number, output: number, cacheRead: number, cacheWrite: number}, sessionStartTime: number, lastQuota: {tokens: number, requests: number, inputTokens: number, updatedAt: number, fiveHour: {utilization: number, resets_at: string|null, status: string|null, surpassedThreshold: number|null}, sevenDay: {utilization: number, resets_at: string|null, status: string|null, surpassedThreshold: number|null}, overallStatus: string|null, representativeClaim: string|null, fallback: string|null, fallbackPercentage: number|null, overageStatus: string|null, overageReason: string|null, lastPollAt: number}, lastStopReason: string | null, perModel: Record<string, {input: number, output: number, cacheRead: number, cacheWrite: number, costUsd: number, turns: number}>, lastModelId: string | null, lastRequestBody: string | null, tokenBudget: {limit: number, used: number, continuations: number, outputHistory: number[]}}} */
+/** Module-level config ref for functions outside AnthropicAuthPlugin closure. */
+let _pluginConfig = null;
+
 const sessionMetrics = {
   turns: 0,
   totalInput: 0,
@@ -4787,6 +4792,9 @@ function updateSessionMetrics(usage, model) {
     sessionMetrics.lastModelId = model;
   }
 
+  // Write cache transparency stats to disk for TUI consumption.
+  writeCacheStatsFile(usage, model, hitRate);
+
   // Token budget tracking (A9)
   if (sessionMetrics.tokenBudget.limit > 0) {
     sessionMetrics.tokenBudget.used += usage.outputTokens;
@@ -4806,6 +4814,63 @@ function getAverageCacheHitRate() {
   const rates = sessionMetrics.recentCacheRates;
   if (rates.length === 0) return 0;
   return rates.reduce((a, b) => a + b, 0) / rates.length;
+}
+
+/**
+ * Write cache transparency stats to a well-known JSON file for TUI consumption.
+ * The OpenCode TUI watches this file to display cache metrics in the status bar.
+ * @param {UsageStats} usage - Current turn usage
+ * @param {string} model - Model used
+ * @param {number} hitRate - Cache hit rate for this turn (0-1)
+ */
+function writeCacheStatsFile(usage, model, hitRate) {
+  try {
+    const statsPath = join(getConfigDir(), "cache-stats.json");
+    const avgHitRate = getAverageCacheHitRate();
+    const totalPrompt = sessionMetrics.totalInput + sessionMetrics.totalCacheRead + sessionMetrics.totalCacheWrite;
+    const sessionHitRate = totalPrompt > 0 ? sessionMetrics.totalCacheRead / totalPrompt : 0;
+
+    // Calculate cache savings in USD
+    const pricing = MODEL_PRICING[model] || MODEL_PRICING["claude-opus-4-6"] || { input: 15, cacheRead: 1.5 };
+    const savedPerMToken = pricing.input - (pricing.cacheRead || pricing.input * 0.1);
+    const sessionSavingsUsd = (sessionMetrics.totalCacheRead / 1_000_000) * savedPerMToken;
+
+    const stats = {
+      // Per-turn stats (latest request)
+      turn: {
+        input_tokens: usage.inputTokens,
+        output_tokens: usage.outputTokens,
+        cache_read_tokens: usage.cacheReadTokens,
+        cache_write_tokens: usage.cacheWriteTokens,
+        cache_hit_rate: Math.round(hitRate * 1000) / 1000,
+        model,
+      },
+      // Session-level stats
+      session: {
+        turns: sessionMetrics.turns,
+        total_input: sessionMetrics.totalInput,
+        total_output: sessionMetrics.totalOutput,
+        total_cache_read: sessionMetrics.totalCacheRead,
+        total_cache_write: sessionMetrics.totalCacheWrite,
+        session_hit_rate: Math.round(sessionHitRate * 1000) / 1000,
+        avg_recent_hit_rate: Math.round(avgHitRate * 1000) / 1000,
+        cost_usd: Math.round(sessionMetrics.sessionCostUsd * 10000) / 10000,
+        cache_savings_usd: Math.round(sessionSavingsUsd * 10000) / 10000,
+      },
+      // Config state
+      config: {
+        cache_ttl: _pluginConfig?.cache_policy?.ttl ?? "1h",
+        boundary_marker: _pluginConfig?.cache_policy?.boundary_marker ?? false,
+        anti_verbosity: _pluginConfig?.anti_verbosity?.enabled !== false,
+        length_anchors: _pluginConfig?.anti_verbosity?.length_anchors !== false,
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    writeFileSync(statsPath, JSON.stringify(stats, null, 2));
+  } catch {
+    // Non-critical — silently ignore write failures
+  }
 }
 
 // --- Phase 5: Auto-strategy adaptation ---
@@ -5319,6 +5384,33 @@ const COMPACT_TITLE_GENERATOR_SYSTEM_PROMPT = [
   "- No explanations, prefixes, or suffixes.",
   "- Keep important technical terms, numbers, and filenames when present.",
 ].join("\n");
+
+/**
+ * Anti-verbosity system prompt text.
+ * Extracted from CC v2.1.100 (gated on quiet_salted_ember A/B test for Opus 4.6).
+ * Significantly reduces output token count by instructing the model to be concise.
+ */
+const ANTI_VERBOSITY_SYSTEM_PROMPT = [
+  "# Communication style",
+  "Assume users can't see most tool calls or thinking — only your text output. Before your first tool call, state in one sentence what you're about to do. While working, give short updates at key moments: when you find something, when you change direction, or when you hit a blocker. Brief is good — silent is not. One sentence per update is almost always enough.",
+  "",
+  "Don't narrate your internal deliberation. User-facing text should be relevant communication to the user, not a running commentary on your thought process. State results and decisions directly, and focus user-facing text on relevant updates for the user.",
+  "",
+  "When you do write updates, write so the reader can pick up cold: complete sentences, no unexplained jargon or shorthand from earlier in the session. But keep it tight — a clear sentence is better than a clear paragraph.",
+  "",
+  "End-of-turn summary: one or two sentences. What changed and what's next. Nothing else.",
+  "",
+  "Match responses to the task: a simple question gets a direct answer, not headers and sections.",
+  "",
+  "In code: default to writing no comments. Never write multi-paragraph docstrings or multi-line comment blocks — one short line max. Don't create planning, decision, or analysis documents unless the user asks for them — work from conversation context, not intermediate files.",
+].join("\n");
+
+/**
+ * Numeric length anchors text.
+ * Extracted from CC v2.1.100. Hard word-count limits for output.
+ */
+const NUMERIC_LENGTH_ANCHORS_PROMPT =
+  "Length limits: keep text between tool calls to ≤25 words. Keep final responses to ≤100 words unless the task requires more detail.";
 
 /**
  * Returns the persistent device ID (64-char hex string).
@@ -6103,6 +6195,18 @@ function buildSystemPromptBlocks(system, signature) {
     sanitized = dedupeSystemBlocks(sanitized);
   }
 
+  // Anti-verbosity injection (CC v2.1.100 quiet_salted_ember equivalent).
+  // Only for Opus 4.6 and non-title-generator requests.
+  if (!titleGeneratorRequest && signature.modelId && isOpus46Model(signature.modelId)) {
+    const avConfig = signature.antiVerbosity;
+    if (avConfig?.enabled !== false) {
+      sanitized.push({ type: "text", text: ANTI_VERBOSITY_SYSTEM_PROMPT });
+    }
+    if (avConfig?.length_anchors !== false) {
+      sanitized.push({ type: "text", text: NUMERIC_LENGTH_ANCHORS_PROMPT });
+    }
+  }
+
   if (!signature.enabled) {
     return sanitized;
   }
@@ -6677,7 +6781,7 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     const modelId = parsed.model || "";
     // Extract first user message text for billing hash computation (cch)
     const firstUserMessage = extractFirstUserMessageText(parsed.messages);
-    const signatureWithModel = { ...signature, modelId, firstUserMessage };
+    const signatureWithModel = { ...signature, modelId, firstUserMessage, antiVerbosity: config?.anti_verbosity };
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signatureWithModel);
 
@@ -7185,10 +7289,18 @@ function transformResponse(response, onUsage, onAccountError) {
     },
   });
 
+  // Inject cache transparency headers (session-level, available before stream completes).
+  const responseHeaders = new Headers(response.headers);
+  responseHeaders.set("x-opencode-cache-hit-rate", String(Math.round(getAverageCacheHitRate() * 1000) / 1000));
+  responseHeaders.set("x-opencode-cache-read-total", String(sessionMetrics.totalCacheRead));
+  responseHeaders.set("x-opencode-session-cost", String(Math.round(sessionMetrics.sessionCostUsd * 10000) / 10000));
+  responseHeaders.set("x-opencode-turns", String(sessionMetrics.turns));
+  responseHeaders.set("x-opencode-anti-verbosity", _pluginConfig?.anti_verbosity?.enabled !== false ? "on" : "off");
+
   return new Response(stream, {
     status: response.status,
     statusText: response.statusText,
-    headers: response.headers,
+    headers: responseHeaders,
   });
 }
 
