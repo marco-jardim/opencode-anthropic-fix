@@ -3041,7 +3041,15 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     sessionMetrics.lastQuota.inputTokens = maxUtilization;
                   }
 
-                  if (maxUtilization > 0.8) {
+                  // Proactive account management is gated on config. When
+                  // account_management.proactive_disabled is true (default),
+                  // we never apply penalties on a 200 OK response — those
+                  // penalties were locking out single-account users whose
+                  // server-side quota was still in `allowed_warning` state.
+                  // The reactive 429 path below is unaffected.
+                  const proactiveDisabled = config.account_management?.proactive_disabled !== false;
+
+                  if (!proactiveDisabled && maxUtilization > 0.8) {
                     const penalty = Math.round((maxUtilization - 0.8) * 50); // 0-10 points
                     accountManager.applyUtilizationPenalty(account, penalty);
                     debugLog("high rate limit utilization", {
@@ -3052,7 +3060,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     });
                   }
 
-                  if (anySurpassed) {
+                  if (!proactiveDisabled && anySurpassed) {
                     accountManager.applySurpassedThreshold(account, surpassedResetAt);
                     debugLog("rate limit threshold surpassed", {
                       accountIndex: account.index,
@@ -3070,8 +3078,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   }
 
                   // Predictive rate limit avoidance: switch account BEFORE hitting 429
-                  // Parse reset timestamps to compute time-weighted risk
-                  if (maxUtilization > 0.6 && accountManager.getAccountCount() > 1) {
+                  // Parse reset timestamps to compute time-weighted risk.
+                  // Gated on proactive_disabled — when true (default), no automatic
+                  // switches happen on 200 OK responses (fully manual rotation).
+                  if (!proactiveDisabled && maxUtilization > 0.6 && accountManager.getAccountCount() > 1) {
                     let highestRisk = 0;
                     for (const win of RATE_LIMIT_WINDOWS) {
                       const utilizationStr = response.headers.get(`anthropic-ratelimit-unified-${win.key}-utilization`);
