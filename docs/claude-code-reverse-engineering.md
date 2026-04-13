@@ -1,11 +1,11 @@
 # Claude Code Reverse Engineering — Complete Analysis
 
-**Package:** `@anthropic-ai/claude-code` v2.1.90
-**Source:** `cli.js` (12.5 MB bundled/minified)
-**Build Time:** `2026-04-01T22:53:10Z`
+**Package:** `@anthropic-ai/claude-code` v2.1.105 (latest reviewed; see §16 for per-version drift)
+**Source:** `cli.js` (13.67 MB bundled/minified as of v2.1.105)
+**Build Time:** `2026-04-13T19:06:08Z` (v2.1.105)
 **Internal Codename:** `tengu`
 **Purpose:** Full reverse-engineering for OpenCode plugin mimicry of Claude Code authentication and API calls
-**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90
+**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90, v2.1.100, v2.1.104, v2.1.105
 
 ---
 
@@ -1924,6 +1924,50 @@ Tracks server-side enforcement changes observed at Anthropic's OAuth and API end
 These are inferred from behavioral changes (requests that previously succeeded but now fail),
 not from official announcements.
 
+### 2026-04-13 — v2.1.91–v2.1.105 Review (No Mimesis Impact)
+
+**Type:** Upstream client release series. No OAuth/auth, header, body, or beta-header breaking changes.
+
+**Scope of review:** Diffed `@anthropic-ai/claude-code` **2.1.100 → 2.1.105** (full bundle)
+against the plugin's mimicry contract in `index.mjs`. Spot-checked 2.1.104 as a
+middle point. No v2.1.91–v2.1.99 release was covered by a prior entry; the diff
+here therefore effectively supersedes the stale v2.1.90 baseline for the purposes
+of the plugin's mimesis surface.
+
+**Mimicry verdict:** **Plugin is compatible with 2.1.105 as-is. No code changes required.**
+
+**Key findings in v2.1.105 (from v2.1.100):**
+
+| Change                                            | Detail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Mimicry Impact                                                  |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| **OAuth contract**                                | All constants identical: `CLIENT_ID` `9d1c250a-…`, `TOKEN_URL` `https://platform.claude.com/v1/oauth/token`, scopes (`user:inference`, `user:profile`, `org:create_api_key`, `user:sessions:claude_code`, `user:mcp_servers`, `user:file_upload`), PKCE flow.                                                                                                                                                                                                                                                                 | NONE                                                            |
+| **HTTP headers on `/v1/messages`**                | Zero added, zero removed, zero renamed. 46 unique `x-*` / `anthropic-*` keys in both versions. `anthropic-version: 2023-06-01` unchanged (17 call sites).                                                                                                                                                                                                                                                                                                                                                                     | NONE                                                            |
+| **`anthropic-beta` base set**                     | Literal beta list unchanged: `claude-code-20250219`, `interleaved-thinking-2025-05-14`, `context-1m-2025-08-07`, `context-management-2025-06-27`, `structured-outputs-2025-12-15`, `web-search-2025-03-05`, `advanced-tool-use-2025-11-20`, `tool-search-tool-2025-10-19`, `effort-2025-11-24`, `task-budgets-2026-03-13`, `prompt-caching-scope-2026-01-05`, `fast-mode-2026-02-01`, `redact-thinking-2026-02-12`, `afk-mode-2026-01-31`, `advisor-tool-2026-03-01`. Validation sets (`experimental`, `required`) unchanged. | NONE                                                            |
+| **Request body shape**                            | Frequency counts identical for every mimicked literal: `context_management` (10), `thinking:{type:` (4), `metadata:{` (27), `user_id:` (1), `"effort"` (14), `budget_tokens:` (11), `temperature:` (11), `"system":` (17), `tool_choice:` (6), `ephemeral_5m`/`ephemeral_1h` (10/10). Plugin's nested `thinking.{type, effort, budget_tokens}` shape still matches.                                                                                                                                                           | NONE                                                            |
+| **Identity preamble strings**                     | All three variants unchanged: `"You are Claude Code, Anthropic's official CLI for Claude."`, the `"…running within the Claude Agent SDK."` tail, `"You are a Claude agent, built on Anthropic's Claude Agent SDK."`. Frequencies match.                                                                                                                                                                                                                                                                                       | NONE                                                            |
+| **Billing header (`x-anthropic-billing-header`)** | Format unchanged: `cc_version=${V}; cc_entrypoint=${E};[ cch=00000;][ cc_workload=${w};]`. Provider suppression (`bedrock`/`anthropicAws`/`mantle`) unchanged. One cosmetic refactor: literal now extracted to a module-scoped constant (`Hqz`) with a `startsWith` helper — wire-equivalent.                                                                                                                                                                                                                                 | NONE                                                            |
+| **Bundled Stainless SDK version**                 | `x-stainless-package-version` constant still **`0.81.0`** in 2.1.105 (minifier-renamed from `d66` to `g86`). No other Stainless version literal exists in either bundle. Plugin's hardcoded value remains correct.                                                                                                                                                                                                                                                                                                            | NONE                                                            |
+| **`sdk-tools.d.ts`**                              | +258 B (+4 lines). Sole semantic change: `EnterWorktreeInput` gained an optional `path?: string` field (and `name?` doc amended for mutual exclusion). All 43 exported types otherwise byte-identical. No tools added, renamed, or removed.                                                                                                                                                                                                                                                                                   | NONE — built-in tool, not MCP-proxied; plugin forwards verbatim |
+| **New `CLAUDE_CODE_*` env vars (+7)**             | `CLAUDE_CODE_BASE_REFS`, `CLAUDE_CODE_CERT_STORE`, `CLAUDE_CODE_ENABLE_AWAY_SUMMARY`, `CLAUDE_CODE_REPO_CHECKOUTS`, `CLAUDE_CODE_RESUME_FROM_SESSION`, `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` (SDK guest ↔ host 401 refresh signal), `CLAUDE_CODE_ULTRAREVIEW_PREFLIGHT_FIXTURE`.                                                                                                                                                                                                                                                | NONE — host/SDK toggles only                                    |
+| **Removed env var (−1)**                          | `CLAUDE_CODE_SM_COMPACT`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | NONE                                                            |
+| **Slash commands**                                | Added: `/loops` (disabled), `/recap` (feature-flag-gated: `tengu_sedge_lantern`), `/update` (hidden+disabled). Removed: `/think-back`, `/thinkback-play` (seasonal 2025 YIR rotated out).                                                                                                                                                                                                                                                                                                                                     | NONE — slash dispatch is host-side                              |
+| **`CLAUDE_CODE_BUILD_TIME`**                      | 2.1.100 = `2026-04-10T04:22:20Z`; 2.1.104 = `2026-04-12T01:47:37Z`; **2.1.105 = `2026-04-13T19:06:08Z`**. Plugin currently hardcodes `2026-04-08T20:46:46Z` (≈5 days stale).                                                                                                                                                                                                                                                                                                                                                  | LOW — cosmetic drift; header is informational                   |
+| **Ultrareview fixture duplication**               | Embedded review-validation markdown tutorial block ("Worked example / PR body claims / Plan / Execute / Verdict") now appears twice in the bundle (once canonical, once golden/expected), gated by the new `CLAUDE_CODE_ULTRAREVIEW_PREFLIGHT_FIXTURE` env var.                                                                                                                                                                                                                                                               | NONE — host-side only                                           |
+| **Identifier-mangling churn**                     | Most minified identifiers renamed (`uH→QH`, `p3→d3`, `YA8→hw8`, `Gu→Km`, `pj→gj`, `Eq→Sq`, `X1→M1`, `d66→g86`). Expected from minifier re-seeding.                                                                                                                                                                                                                                                                                                                                                                            | NONE                                                            |
+| **Bundle size**                                   | `cli.js` 13.47 MB → 13.67 MB (+200 KB).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | NONE                                                            |
+
+**Plugin actions:**
+
+- **None required for correctness.** All 13 mimicry contract points (betas, OAuth, Stainless `0.81.0`, `anthropic-version`, identity strings, billing header format, `metadata.user_id`, thinking/effort shape, `context_management`, `ephemeral_5m/1h`, `mcp_` prefix round-trip, system-prompt sanitization) verified unchanged.
+- **Optional cosmetic bump:** update `CLAUDE_CODE_BUILD_TIME` in `index.mjs` from `"2026-04-08T20:46:46Z"` → `"2026-04-13T19:06:08Z"` on the next touch. Not required for function; the field has always been informational in observed traffic.
+- **Do not** add handling for `EnterWorktreeInput.path`. It is a built-in claude-code tool (not `mcp__…`-qualified), so the plugin's `mcp_`-prefix rewriter never sees it and forwards the JSON untouched. Whether the host sends `name`, `path`, or neither is irrelevant to mimesis.
+- **Do not** add any of the 7 new `CLAUDE_CODE_*` env vars to plugin allowlists — they are meaningful only to the claude-code host, not the `/v1/messages` wire.
+
+**OAuth/Auth:** STABLE.
+**Beta headers:** STABLE.
+**API request shape:** STABLE.
+**Monitoring note:** the single most-likely-to-drift constant is `x-stainless-package-version` (currently `0.81.0`). Re-diff on every upstream bump.
+
 ### 2026-03-21 — OAuth Token Endpoint Fingerprint Enforcement
 
 **Affected endpoint:** `POST https://platform.claude.com/v1/oauth/token`
@@ -2238,5 +2282,5 @@ REVIEW.md violations are treated as nit-level findings.
 ---
 
 _Generated by reverse-engineering `@anthropic-ai/claude-code` cli.js bundle._
-_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90_
-_Last updated: 2026-04-01_
+_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90, v2.1.100, v2.1.104, v2.1.105_
+_Last updated: 2026-04-13_

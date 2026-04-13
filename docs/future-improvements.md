@@ -171,4 +171,70 @@ but only uses it for the User-Agent string. Could extend this to:
 
 ---
 
-_Last updated: 2026-03-21_
+## 5. Refresh `CLAUDE_CODE_BUILD_TIME` Constant
+
+**Status:** Cosmetic, optional
+**Risk:** None
+**Source:** v2.1.105 drift review (see `claude-code-reverse-engineering.md` §16, 2026-04-13 entry)
+
+Plugin currently hardcodes `CLAUDE_CODE_BUILD_TIME = "2026-04-08T20:46:46Z"` (≈v2.1.97
+era). Upstream v2.1.105 emits `2026-04-13T19:06:08Z`. The field appears to be purely
+informational in observed traffic — no server-side block/accept logic has ever been
+tied to it — so this is not a correctness issue, but refreshing it on the next touch
+of `index.mjs` keeps the header within a reasonable drift window from the latest CC.
+
+**Suggested follow-on:** pair the bump with an `ANTHROPIC_SDK_VERSION` / `CLI_TO_SDK_VERSION`
+audit (see §4 "Upstream Version Auto-Sync" above). `x-stainless-package-version`
+confirmed still `0.81.0` in 2.1.105 (no bump needed).
+
+---
+
+## 6. Opt-In SDK OAuth-Refresh Signal
+
+**Status:** Idea
+**Risk:** Low
+**Source:** v2.1.105 drift review
+
+v2.1.105 introduced `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` — when set, the Claude Agent
+SDK stops erroring on HTTP 401s and instead calls `$.requestOAuthTokenRefresh()` on
+the host. This is meaningful only if the plugin is ever embedded inside an SDK
+guest context. For the current OpenCode-as-host topology, the plugin _is_ the OAuth
+authority, so the env var is inert and nothing to implement.
+
+If the plugin ever grows an "embed inside another host" mode (e.g., for MCP bridges
+that want to borrow our token rotation), this is the signal to set outgoing so the
+guest delegates refresh to us rather than failing loudly.
+
+---
+
+## 7. Monitor Future Drift Signals
+
+**Status:** Documentation hint
+**Risk:** None
+
+The 2026-04-13 drift review identified the single most-likely-to-drift constant:
+
+- **`x-stainless-package-version`** — currently hardcoded `"0.81.0"` in `index.mjs`.
+  Stable from v2.1.97 through v2.1.105 (only the minifier identifier name changed,
+  `d66` → `g86`). Re-check with a single grep on every upstream bump:
+
+  ```bash
+  rg -n '"0\.\d+\.\d+"' _tmp_claude_pkg/<version>/package/cli.js | grep -A0 -B2 'stainless'
+  ```
+
+  If it bumps, the plugin's hardcoded value must follow within a release or the
+  server may fingerprint the mismatch.
+
+Additional "cheap watch" grep targets:
+
+- `oauth-2025-`, `claude-code-2025`, `files-api-` — new OAuth/file-upload beta flags.
+- `x-app|x-service-name|anthropic-dangerous-direct-browser-access` — header set.
+- `"You are Claude Code,` — identity preamble.
+- `cch=|cc_version=|cc_entrypoint=` — billing-header template.
+- `thinking:{type:` — nested `effort`/`budget_tokens` shape.
+
+If any of these diverge in a future version, the plugin's mimesis must follow.
+
+---
+
+_Last updated: 2026-04-13 (added items 5–7 from v2.1.105 drift review)_

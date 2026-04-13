@@ -5061,7 +5061,7 @@ process.once("beforeExit", _beforeExitHandler);
 
 const FALLBACK_CLAUDE_CLI_VERSION = "2.1.97";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-04-08T20:46:46Z";
+const CLAUDE_CODE_BUILD_TIME = "2026-04-13T19:06:08Z";
 
 // The @anthropic-ai/sdk version bundled with Claude Code v2.1.97.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
@@ -6613,6 +6613,10 @@ function buildRequestHeaders(
     requestHeaders.set("x-stainless-lang", "js");
     requestHeaders.set("x-stainless-os", getStainlessOs(process.platform));
     // Real CC sends 0.81.0 (confirmed via proxy capture), not the internal 0.208.0.
+    // WATCH: most-likely-to-drift mimesis constant. Stable v2.1.97 → v2.1.105 (only
+    // the minifier identifier renamed, d66 → g86). Re-verify on every upstream bump:
+    //   rg -n '"0\.\d+\.\d+"' _tmp_claude_pkg/<version>/package/cli.js | rg -C2 stainless
+    // See docs/future-improvements.md §7 and claude-code-reverse-engineering.md §16.
     requestHeaders.set("x-stainless-package-version", "0.81.0");
     // Real CC on Windows/Node reports "node" — confirmed via proxy capture.
     requestHeaders.set("x-stainless-runtime", "node");
