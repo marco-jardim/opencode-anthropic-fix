@@ -5058,7 +5058,7 @@ process.once("beforeExit", _beforeExitHandler);
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.107";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.108";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CLAUDE_CODE_BUILD_TIME = "2026-04-14T03:13:25Z";
 
@@ -5069,6 +5069,7 @@ const ANTHROPIC_SDK_VERSION = "0.81.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.108", "0.208.0"],
   ["2.1.107", "0.81.0"],
   ["2.1.105", "0.81.0"],
   ["2.1.97", "0.208.0"],
