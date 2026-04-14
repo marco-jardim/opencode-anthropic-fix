@@ -666,6 +666,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       const secondary = (args[1] || "").toLowerCase();
       if (secondary === "reset") {
         sessionMetrics.turns = 0;
+        sessionMetrics.usedTools.clear();
         sessionMetrics.totalInput = 0;
         sessionMetrics.totalOutput = 0;
         sessionMetrics.totalCacheRead = 0;
@@ -1081,8 +1082,6 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           const enabled = value === "on" || value === "true" || value === "1";
           const te = config.token_economy || {
             token_efficient_tools: true,
-            redact_thinking: false,
-            connector_text_summarization: true,
           };
           te.token_efficient_tools = enabled;
           saveConfig({ token_economy: te });
@@ -1094,25 +1093,35 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           const enabled = value === "on" || value === "true" || value === "1";
           const te = config.token_economy || {
             token_efficient_tools: true,
-            redact_thinking: false,
-            connector_text_summarization: true,
           };
           te.redact_thinking = enabled;
           saveConfig({ token_economy: te });
           config.token_economy = te;
           betaLatchState.dirty = true;
         },
-        "connector-text": () => {
+        "tool-deferral": () => {
           const enabled = value === "on" || value === "true" || value === "1";
-          const te = config.token_economy || {
-            token_efficient_tools: true,
-            redact_thinking: false,
-            connector_text_summarization: true,
-          };
-          te.connector_text_summarization = enabled;
-          saveConfig({ token_economy: te });
-          config.token_economy = te;
-          betaLatchState.dirty = true;
+          saveConfig({ token_economy_strategies: { tool_deferral: enabled } });
+          if (!config.token_economy_strategies) config.token_economy_strategies = {};
+          config.token_economy_strategies.tool_deferral = enabled;
+        },
+        "tool-compaction": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ token_economy_strategies: { tool_description_compaction: enabled } });
+          if (!config.token_economy_strategies) config.token_economy_strategies = {};
+          config.token_economy_strategies.tool_description_compaction = enabled;
+        },
+        "adaptive-tools": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ token_economy_strategies: { adaptive_tool_set: enabled } });
+          if (!config.token_economy_strategies) config.token_economy_strategies = {};
+          config.token_economy_strategies.adaptive_tool_set = enabled;
+        },
+        "prompt-tailing": () => {
+          const enabled = value === "on" || value === "true" || value === "1";
+          saveConfig({ token_economy_strategies: { system_prompt_tailing: enabled } });
+          if (!config.token_economy_strategies) config.token_economy_strategies = {};
+          config.token_economy_strategies.system_prompt_tailing = enabled;
         },
       };
 
@@ -2785,11 +2794,19 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     cachePolicy: effectiveCachePolicy,
                     fastMode: config.fast_mode || false,
                     strategy: getEffectiveStrategy(),
+                    toolDeferral: config.token_economy_strategies?.tool_deferral,
+                    toolDescriptionCompaction: config.token_economy_strategies?.tool_description_compaction,
+                    adaptiveToolSet: config.token_economy_strategies?.adaptive_tool_set,
+                    systemPromptTailing: config.token_economy_strategies?.system_prompt_tailing,
+                    systemPromptTailTurns: config.token_economy_strategies?.system_prompt_tail_turns,
+                    systemPromptTailMaxChars: config.token_economy_strategies?.system_prompt_tail_max_chars,
                   },
                   {
                     persistentUserId: signatureUserId,
                     sessionId: signatureSessionId,
                     accountId: getAccountIdentifier(account),
+                    turns: sessionMetrics.turns,
+                    usedTools: sessionMetrics.usedTools,
                   },
                   computedBetaHeader,
                   config,
@@ -3908,6 +3925,8 @@ const sessionMetrics = {
     continuations: 0,
     outputHistory: [], // last 5 output token deltas
   },
+  /** Tools used in this session (populated from assistant tool_use blocks in messages) */
+  usedTools: new Set(),
 };
 
 // ---------------------------------------------------------------------------
@@ -5357,6 +5376,23 @@ const BEDROCK_UNSUPPORTED_BETAS = new Set([
   "context-1m-2025-08-07",
   "tool-search-tool-2025-10-19",
 ]);
+// OpenCode SDK betas that leak through the host's Anthropic SDK but are NOT
+// part of CC's beta vocabulary. Filtered out when signature emulation is on.
+// Core tool names (CC PascalCase) that are always eager-loaded.
+const CORE_TOOL_NAMES = new Set([
+  "Bash",
+  "Read",
+  "Glob",
+  "Grep",
+  "Edit",
+  "Write",
+  "WebFetch",
+  "TodoWrite",
+  "Skill",
+  "Task",
+  "Compress",
+]);
+const HOST_SDK_BETAS_BLOCKLIST = new Set(["fine-grained-tool-streaming-2025-05-14", "structured-outputs-2025-11-13"]);
 const EXPERIMENTAL_BETA_FLAGS = new Set([
   "adaptive-thinking-2026-01-28",
   "advanced-tool-use-2025-11-20",
@@ -5883,6 +5919,19 @@ function sanitizeSystemText(text) {
  * @param {'minimal' | 'off'} mode
  * @returns {string}
  */
+function compactToolDescription(text) {
+  return text
+    .replace(/<example[\s\S]*?<\/example>/gi, "")
+    .replace(/\|[\s|:-]+\|/g, "")
+    .replace(/^\|.*\|$/gm, "")
+    .replace(/^(?:\s*[-*]\s+.{200,})$/gm, (m) => m.slice(0, 200) + "...")
+    .replace(/^(#{1,3}\s+)/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function compactSystemText(text, mode) {
   const withoutDuplicateIdentityPrefix = text.startsWith(`${CLAUDE_CODE_IDENTITY_STRING}\n`)
     ? text.slice(CLAUDE_CODE_IDENTITY_STRING.length).trimStart()
@@ -6386,6 +6435,14 @@ function buildAnthropicBetaHeader(
     betas.push("web-search-2025-03-05");
   }
 
+  // Advisor tool — in CC this is gated by server-side feature flag
+  // (tengu_sage_compass2) and firstParty+isLoggedIn. Since we can't check
+  // CC's feature flags, include it unconditionally for Claude 4+ models.
+  // CC v108 sends it in MITM captures for Max/Pro users.
+  if (!/claude-3-/i.test(model)) {
+    betas.push("advisor-tool-2026-03-01");
+  }
+
   // Files API — scoped to file endpoints/references
   if (isFilesEndpoint || hasFileReferences) {
     betas.push("files-api-2025-04-14");
@@ -6396,16 +6453,15 @@ function buildAnthropicBetaHeader(
     betas.push(TOKEN_COUNTING_BETA_FLAG);
   }
 
-  // === TOKEN ECONOMY BETAS (config-controlled) ===
+  // === TOKEN ECONOMY BETAS (on by default for token savings) ===
 
   // redact-thinking: suppresses thinking summaries server-side.
-  // When enabled, API returns redacted_thinking blocks instead of summaries.
-  // Saves bandwidth and tokens for users who don't inspect thinking.
+  // CC v108 enables this by default but we keep it off so thinking is visible.
+  // Users can opt in via `/anthropic set redact-thinking on`.
   if (te.redact_thinking && !disableExperimentalBetas) {
     betas.push("redact-thinking-2026-02-12");
   }
 
-  // summarize-connector-text-2026-03-13 was removed in v2.1.90 (dead slot njq="").
   // compact-2026-01-12 and mcp-client-2025-11-20 exist only in docs, not runtime.
 
   // afk-mode — NOT auto-included (requires user opt-in)
@@ -6418,8 +6474,11 @@ function buildAnthropicBetaHeader(
     }
   }
 
-  // Merge incoming betas from the original request
-  let mergedBetas = [...new Set([...betas, ...incomingBetasList])];
+  // Merge incoming betas from the original request, filtering out host-injected
+  // betas (e.g. fine-grained-tool-streaming-2025-05-14, structured-outputs-2025-11-13)
+  // that OpenCode's Anthropic SDK adds but real Claude Code never sends.
+  const filteredIncoming = incomingBetasList.filter((b) => !HOST_SDK_BETAS_BLOCKLIST.has(b));
+  let mergedBetas = [...new Set([...betas, ...filteredIncoming])];
 
   // Add custom betas from config
   if (customBetas?.length) {
@@ -6713,7 +6772,7 @@ function resolveMaxTokens(body, config) {
  *
  * @param {string | undefined} body
  * @param {{enabled: boolean, claudeCliVersion: string, promptCompactionMode: 'minimal' | 'off', provider?: string}} signature
- * @param {{persistentUserId: string, sessionId: string, accountId: string}} runtime
+ * @param {{persistentUserId: string, sessionId: string, accountId: string, turns?: number, usedTools?: Set<string>}} runtime
  * @param {string} [betaHeader] - Pre-computed anthropic-beta header value to inject into the body.
  * @param {import('./lib/config.mjs').AnthropicAuthConfig} [config] - Plugin configuration for output cap
  * @returns {string | undefined}
@@ -6813,6 +6872,25 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signatureWithModel);
 
+    // Strategy 5 — System prompt tailing: after N turns, truncate the large
+    // host-provided system block to its first ~2000 chars. The model has already
+    // internalized the full instructions by this point. On /clear, turns reset
+    // and the full prompt is re-sent.
+    const tailThreshold = signature.systemPromptTailTurns ?? 6;
+    if (signature.systemPromptTailing !== false && runtime.turns >= tailThreshold && Array.isArray(parsed.system)) {
+      const maxChars = signature.systemPromptTailMaxChars ?? 2000;
+      for (let i = 0; i < parsed.system.length; i++) {
+        const block = parsed.system[i];
+        if (block.type === "text" && block.text && block.text.length > maxChars * 2) {
+          block.text =
+            block.text.slice(0, maxChars) +
+            "\n\n[System instructions truncated after turn " +
+            tailThreshold +
+            " for token efficiency. Full instructions were provided in earlier turns.]";
+        }
+      }
+    }
+
     // Token budget (A9): parse NL budget from last user message, inject status block
     if (config?.token_budget?.enabled && Array.isArray(parsed.messages)) {
       const budgetExpr = parseNaturalLanguageBudget(parsed.messages);
@@ -6864,10 +6942,12 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       // our system prompt ttl=1h). Then add our own 1h to the last user message
       // (matching real CC behavior seen in proxy capture).
       const ccTtl = signature.cachePolicy?.ttl || "1h";
-      if (Array.isArray(parsed.tools)) {
+      if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
         for (const tool of parsed.tools) {
           if (tool.cache_control) delete tool.cache_control;
         }
+        // Add cache_control to last tool as prompt-cache breakpoint (CC does this)
+        parsed.tools[parsed.tools.length - 1].cache_control = { type: "ephemeral", ttl: ccTtl };
       }
       if (Array.isArray(parsed.messages)) {
         for (const msg of parsed.messages) {
@@ -6925,6 +7005,69 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
         }
       }
     }
+    // Track which tools the model has used (from assistant tool_use blocks).
+    // Names are already CC PascalCase after renaming above.
+    if (Array.isArray(parsed.messages)) {
+      for (const msg of parsed.messages) {
+        if (msg.role === "assistant" && Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.type === "tool_use" && block.name) {
+              runtime.usedTools.add(block.name);
+            }
+          }
+        }
+      }
+    }
+
+    // Strategy 4 — Adaptive tool set: after turn 3, defer non-core tools that
+    // the model hasn't used yet. This saves schema bytes on turns where tools
+    // are unlikely to be needed. Core tools stay eager. Resets on /clear.
+    if (
+      Array.isArray(parsed.tools) &&
+      signature.adaptiveToolSet !== false &&
+      runtime.turns >= 3 &&
+      parsed.model &&
+      !/claude-3-|haiku/i.test(parsed.model)
+    ) {
+      const used = runtime.usedTools;
+      for (const tool of parsed.tools) {
+        if (tool.name && !used.has(tool.name) && !CORE_TOOL_NAMES.has(tool.name)) {
+          tool.defer_loading = true;
+        }
+      }
+    }
+
+    // Tool description compaction: apply the same compaction logic used for
+    // system prompts (strip examples, collapse whitespace, dedup lines) to tool
+    // descriptions. The top 4 tools (Bash 10.6K, TodoWrite 9.7K, Task 5.5K,
+    // Compress 4.5K) account for 30KB. Compaction typically saves 30-50%.
+    if (Array.isArray(parsed.tools) && signature.toolDescriptionCompaction !== false) {
+      for (const tool of parsed.tools) {
+        if (tool.description && tool.description.length > 500) {
+          tool.description = compactToolDescription(tool.description);
+        }
+      }
+    }
+
+    // MCP tool deferral: mark non-core tools with defer_loading: true.
+    // CC defers all MCP tools by default — the API omits their full schemas from token
+    // counting, only sending the tool name. When the model needs a deferred tool, it uses
+    // tool_reference to load the schema on demand. This saves ~20KB per turn.
+    // Core tools (OC_TO_CC_TOOL_NAMES) are always eager-loaded.
+    if (
+      Array.isArray(parsed.tools) &&
+      signature.toolDeferral !== false &&
+      parsed.model &&
+      !/claude-3-|haiku/i.test(parsed.model)
+    ) {
+      const coreToolNames = new Set(Object.values(OC_TO_CC_TOOL_NAMES));
+      for (const tool of parsed.tools) {
+        if (tool.name && !coreToolNames.has(tool.name)) {
+          tool.defer_loading = true;
+        }
+      }
+    }
+
     // Task budgets: when the task-budgets beta is active, preserve or inject output_config.
     // The beta unlocks output_config.max_output_tokens for per-task budget control.
     // Model-router compatibility: the beta header + output_config body are forwarded as-is.
@@ -7016,6 +7159,22 @@ function transformRequestUrl(input) {
       }
       requestUrl.searchParams.set("beta", "true");
       requestInput = input instanceof Request ? new Request(requestUrl.toString(), input) : requestUrl;
+    }
+  }
+
+  // MITM proxy redirect: rewrite host/port/protocol when OPENCODE_MITM_BASE_URL is set.
+  // This allows capturing the exact over-the-wire request for conformance testing.
+  // Example: OPENCODE_MITM_BASE_URL=http://localhost:9999
+  const mitmBase = process.env.OPENCODE_MITM_BASE_URL;
+  if (mitmBase && requestUrl) {
+    try {
+      const mitmUrl = new URL(mitmBase);
+      requestUrl.protocol = mitmUrl.protocol;
+      requestUrl.hostname = mitmUrl.hostname;
+      requestUrl.port = mitmUrl.port;
+      requestInput = input instanceof Request ? new Request(requestUrl.toString(), input) : requestUrl;
+    } catch {
+      // Invalid MITM URL — ignore silently
     }
   }
 
