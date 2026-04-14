@@ -931,7 +931,7 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
-describe("E2E: Version is 2.1.107", () => {
+describe("E2E: Version is 2.1.108", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -940,17 +940,17 @@ describe("E2E: Version is 2.1.107", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.107", async () => {
+  it("User-Agent contains 2.1.108", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.107");
+    expect(headers.get("user-agent")).toContain("2.1.108");
   });
 
-  it("billing header contains 2.1.107", async () => {
+  it("billing header contains 2.1.108", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.107");
+    expect(body.system[0].text).toContain("2.1.108");
   });
 });
 
