@@ -995,6 +995,26 @@ describe("fetch interceptor", () => {
     expect(body.tools[1].name).toBe("chrome-devtools_click");
   });
 
+  it("reverse-maps PascalCase tool names in response stream to opencode lowercase", async () => {
+    const responseBody =
+      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"Write","id":"t1"}}\n\n';
+    mockFetch.mockResolvedValueOnce(
+      new Response(responseBody, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+
+    const text = await response.text();
+    expect(text).toContain('"name":"write"');
+    expect(text).not.toContain('"name":"Write"');
+  });
+
   it("does not strip mcp_ from text content in response stream", async () => {
     // A text content block that happens to contain "name": "mcp_foo" — should NOT be modified
     const responseBody =

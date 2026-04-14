@@ -7146,8 +7146,40 @@ function stripMcpPrefixFromSSE(text) {
 }
 
 /**
- * Mutate a parsed SSE event object, removing `mcp_` prefix from tool_use
- * name fields. Returns true if any modification was made.
+ * Reverse map: CC PascalCase → opencode lowercase for response stream.
+ * Built from the outgoing OC_TO_CC_TOOL_NAMES map (defined in transformRequestBody).
+ * Must stay in sync with that map.
+ */
+const CC_TO_OC_TOOL_NAMES = {
+  Bash: "bash",
+  Read: "read",
+  Glob: "glob",
+  Grep: "grep",
+  Edit: "edit",
+  Write: "write",
+  WebFetch: "webfetch",
+  TodoWrite: "todowrite",
+  Skill: "skill",
+  Task: "task",
+  Compress: "compress",
+};
+
+/**
+ * Reverse-map a tool name from CC PascalCase back to opencode lowercase,
+ * and strip `mcp_` prefix if present. Returns the original name if no mapping exists.
+ * @param {string} name
+ * @returns {string}
+ */
+function reverseMapToolName(name) {
+  if (CC_TO_OC_TOOL_NAMES[name]) return CC_TO_OC_TOOL_NAMES[name];
+  if (name.startsWith("mcp_")) return name.slice(4);
+  return name;
+}
+
+/**
+ * Mutate a parsed SSE event object, reversing tool name renames (CC PascalCase
+ * → opencode lowercase) and removing `mcp_` prefix from tool_use name fields.
+ * Returns true if any modification was made.
  *
  * @param {any} parsed
  * @returns {boolean}
@@ -7157,23 +7189,28 @@ function stripMcpPrefixFromParsedEvent(parsed) {
 
   let modified = false;
 
-  // content_block_start: { content_block: { type: "tool_use", name: "mcp_..." } }
+  // content_block_start: { content_block: { type: "tool_use", name: "..." } }
   if (
     parsed.content_block &&
     parsed.content_block.type === "tool_use" &&
-    typeof parsed.content_block.name === "string" &&
-    parsed.content_block.name.startsWith("mcp_")
+    typeof parsed.content_block.name === "string"
   ) {
-    parsed.content_block.name = parsed.content_block.name.slice(4);
-    modified = true;
+    const mapped = reverseMapToolName(parsed.content_block.name);
+    if (mapped !== parsed.content_block.name) {
+      parsed.content_block.name = mapped;
+      modified = true;
+    }
   }
 
-  // message_start: { message: { content: [{ type: "tool_use", name: "mcp_..." }] } }
+  // message_start: { message: { content: [{ type: "tool_use", name: "..." }] } }
   if (parsed.message && Array.isArray(parsed.message.content)) {
     for (const block of parsed.message.content) {
-      if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith("mcp_")) {
-        block.name = block.name.slice(4);
-        modified = true;
+      if (block.type === "tool_use" && typeof block.name === "string") {
+        const mapped = reverseMapToolName(block.name);
+        if (mapped !== block.name) {
+          block.name = mapped;
+          modified = true;
+        }
       }
     }
   }
@@ -7181,9 +7218,12 @@ function stripMcpPrefixFromParsedEvent(parsed) {
   // Top-level content array (non-streaming responses forwarded through SSE)
   if (Array.isArray(parsed.content)) {
     for (const block of parsed.content) {
-      if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith("mcp_")) {
-        block.name = block.name.slice(4);
-        modified = true;
+      if (block.type === "tool_use" && typeof block.name === "string") {
+        const mapped = reverseMapToolName(block.name);
+        if (mapped !== block.name) {
+          block.name = mapped;
+          modified = true;
+        }
       }
     }
   }
