@@ -5919,6 +5919,42 @@ function sanitizeSystemText(text) {
  * @param {'minimal' | 'off'} mode
  * @returns {string}
  */
+function tailSystemBlock(text, maxChars, turnThreshold) {
+  const lines = text.split("\n");
+  const kept = [];
+  let charCount = 0;
+  const importantRe = /\b(MUST|NEVER|CRITICAL|IMPORTANT|REQUIRED|DO NOT|ALWAYS|FORBIDDEN)\b/i;
+  const headerRe = /^#{1,4}\s/;
+  const listItemRe = /^\s*[-*]\s/;
+  // Always keep the first paragraph (identity/role definition)
+  let firstParaEnd = 0;
+  for (let j = 0; j < lines.length; j++) {
+    if (lines[j].trim() === "" && j > 0) {
+      firstParaEnd = j;
+      break;
+    }
+  }
+  if (firstParaEnd === 0) firstParaEnd = Math.min(5, lines.length);
+  for (let j = 0; j <= firstParaEnd; j++) {
+    kept.push(lines[j]);
+    charCount += (lines[j]?.length || 0) + 1;
+  }
+  // Scan remaining lines: keep headers, important constraints, short list items
+  for (let j = firstParaEnd + 1; j < lines.length; j++) {
+    const line = lines[j];
+    const isHeader = headerRe.test(line);
+    const isImportant = importantRe.test(line);
+    const isShortListItem = listItemRe.test(line) && line.length < 120;
+    if (isHeader || isImportant || isShortListItem) {
+      if (charCount + line.length + 1 > maxChars) break;
+      kept.push(line);
+      charCount += line.length + 1;
+    }
+  }
+  kept.push("", "[Verbose instructions trimmed after turn " + turnThreshold + ". Key constraints preserved above.]");
+  return kept.join("\n");
+}
+
 function compactToolDescription(text) {
   return text
     .replace(/<example[\s\S]*?<\/example>/gi, "")
@@ -6872,21 +6908,18 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signatureWithModel);
 
-    // Strategy 5 — System prompt tailing: after N turns, truncate the large
-    // host-provided system block to its first ~2000 chars. The model has already
-    // internalized the full instructions by this point. On /clear, turns reset
-    // and the full prompt is re-sent.
+    // Strategy 5 — System prompt tailing: after N turns, trim large system blocks
+    // to essential sections only. The model has internalized verbose instructions
+    // (shell strategy, package manager tables, delegation protocols) by this point.
+    // Preserves: first paragraph (identity/role), lines containing MUST/NEVER/CRITICAL/
+    // IMPORTANT, section headers, and short blocks. Drops verbose body paragraphs.
     const tailThreshold = signature.systemPromptTailTurns ?? 6;
     if (signature.systemPromptTailing !== false && runtime.turns >= tailThreshold && Array.isArray(parsed.system)) {
       const maxChars = signature.systemPromptTailMaxChars ?? 2000;
       for (let i = 0; i < parsed.system.length; i++) {
         const block = parsed.system[i];
         if (block.type === "text" && block.text && block.text.length > maxChars * 2) {
-          block.text =
-            block.text.slice(0, maxChars) +
-            "\n\n[System instructions truncated after turn " +
-            tailThreshold +
-            " for token efficiency. Full instructions were provided in earlier turns.]";
+          block.text = tailSystemBlock(block.text, maxChars, tailThreshold);
         }
       }
     }
@@ -7348,10 +7381,10 @@ function stripMcpPrefixFromParsedEvent(parsed) {
 
   let modified = false;
 
-  // content_block_start: { content_block: { type: "tool_use", name: "..." } }
+  // content_block_start: { content_block: { type: "tool_use"|"tool_reference", name: "..." } }
   if (
     parsed.content_block &&
-    parsed.content_block.type === "tool_use" &&
+    (parsed.content_block.type === "tool_use" || parsed.content_block.type === "tool_reference") &&
     typeof parsed.content_block.name === "string"
   ) {
     const mapped = reverseMapToolName(parsed.content_block.name);
@@ -7361,10 +7394,10 @@ function stripMcpPrefixFromParsedEvent(parsed) {
     }
   }
 
-  // message_start: { message: { content: [{ type: "tool_use", name: "..." }] } }
+  // message_start: { message: { content: [{ type: "tool_use"|"tool_reference", name: "..." }] } }
   if (parsed.message && Array.isArray(parsed.message.content)) {
     for (const block of parsed.message.content) {
-      if (block.type === "tool_use" && typeof block.name === "string") {
+      if ((block.type === "tool_use" || block.type === "tool_reference") && typeof block.name === "string") {
         const mapped = reverseMapToolName(block.name);
         if (mapped !== block.name) {
           block.name = mapped;
@@ -7377,7 +7410,7 @@ function stripMcpPrefixFromParsedEvent(parsed) {
   // Top-level content array (non-streaming responses forwarded through SSE)
   if (Array.isArray(parsed.content)) {
     for (const block of parsed.content) {
-      if (block.type === "tool_use" && typeof block.name === "string") {
+      if ((block.type === "tool_use" || block.type === "tool_reference") && typeof block.name === "string") {
         const mapped = reverseMapToolName(block.name);
         if (mapped !== block.name) {
           block.name = mapped;
@@ -7833,9 +7866,12 @@ function extractFileIds(body) {
 AnthropicAuthPlugin.__testing__ = {
   sanitizeSystemText,
   compactSystemText,
+  compactToolDescription,
   dedupeSystemBlocks,
   normalizeSystemTextBlocks,
   buildSystemPromptBlocks,
+  stripMcpPrefixFromParsedEvent,
+  CORE_TOOL_NAMES,
   get cachedCCPrompt() {
     return cachedCCPrompt;
   },
