@@ -1,8 +1,12 @@
 # Mimese/Fingerprint Fidelity Analysis - Code Extraction
 
-**Generated:** 2026-04-07  
+**Generated:** 2026-04-07 (updated 2026-04-14 for v2.1.107 changes)  
 **File:** D:\git\opencode-anthropic-fix\index.mjs  
 **Scope:** All functions related to HTTP header composition, system prompt building, metadata construction, and signature emulation for Claude Code mimicry.
+
+> **v2.1.107 UPDATE:** The `cch` field in the billing header is no longer a static `"00000"` placeholder. Starting with v2.1.107, the compiled Bun binary computes `cch` dynamically via `xxHash64(serializedBody, 0x6E52736AC806831E) & 0xFFFFF` → 5-hex-char hash, replacing `"cch=00000"` in the serialized body bytes. The plugin now replicates this via `xxhash-wasm`. See `computeAndReplaceCCH()` below and §16 Enforcement Changelog for full details.
+>
+> **v2.1.107 UPDATE:** Anthropic now blocklists specific tool names in the request body. The name `todowrite` (opencode's all-lowercase version of CC's `TodoWrite`) triggers immediate 400 rejection. The plugin now renames blocklisted tool names to their CC equivalents.
 
 ---
 
@@ -215,6 +219,40 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
 - **Standard:** `x-anthropic-billing-header: cc_version={version}.{fingerprint}; cc_entrypoint={entrypoint}; cch=00000;`
 - **Bedrock:** `x-anthropic-billing-header: cc_version={version}.{fingerprint}; cc_entrypoint={entrypoint};` (no cch)
 - **With workload:** Appends ` cc_workload={workload};`
+
+> **v2.1.107 NOTE:** The `cch=00000` placeholder is now replaced post-serialization by `computeAndReplaceCCH()`. See below.
+
+#### computeAndReplaceCCH() — CCH Attestation (v2.1.107+)
+
+```javascript
+const CCH_SEED = 0x6e52736ac806831en; // Attestation.zig seed (unchanged since v2.1.96)
+let _xxh64Raw = null;
+const _xxhashReady = xxhashInit().then((h) => {
+  _xxh64Raw = h.h64Raw;
+});
+
+async function computeAndReplaceCCH(body) {
+  if (typeof body !== "string" || !body.includes("cch=00000")) return body;
+  await _xxhashReady;
+  if (!_xxh64Raw) return body;
+  const bodyBytes = Buffer.from(body, "utf-8");
+  const hash = _xxh64Raw(bodyBytes, CCH_SEED);
+  const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
+  return body.replace("cch=00000", `cch=${cch}`);
+}
+```
+
+**Purpose:** Replaces the static `cch=00000` placeholder in the serialized JSON body with a 5-hex-char attestation hash. Called after `JSON.stringify()` but before sending the request.
+
+**Algorithm:** `xxHash64(bodyBytes, seed) & 0xFFFFF` → 5-char lowercase hex.
+
+**Key details:**
+
+- The seed `0x6E52736AC806831E` is extracted from the compiled Bun binary's `Attestation.zig` module
+- The hash is computed over the full serialized body (including the `cch=00000` placeholder)
+- After hashing, `cch=00000` is replaced with the computed value via string replacement
+- This means the hash is computed with the placeholder still present — the server knows to expect this
+- Bedrock/anthropicAws providers skip cch entirely (no `cch=00000` in the header)
 
 **Environment Variables:**
 

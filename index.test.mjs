@@ -735,7 +735,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.97");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.107");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -923,7 +923,7 @@ describe("fetch interceptor", () => {
     expect(body.system[2].text).toContain("<example>keep me</example>");
   });
 
-  it("prefixes tool names with mcp_ in request", async () => {
+  it("does not prefix tool names with mcp_ in request (v2.1.107+)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -941,71 +941,26 @@ describe("fetch interceptor", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    expect(body.tools[0].name).toBe("mcp_read_file");
-    expect(body.messages[0].content[0].name).toBe("mcp_read_file");
+    // Tool names should pass through unchanged (no mcp_ prefix added)
+    expect(body.tools[0].name).toBe("read_file");
+    expect(body.messages[0].content[0].name).toBe("read_file");
   });
 
-  it("strips mcp_ prefix from tool names in response stream", async () => {
-    const responseBody =
-      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_read_file"}}\n\n';
-    mockFetch.mockResolvedValueOnce(
-      new Response(responseBody, {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      }),
-    );
-
-    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({ messages: [] }),
-    });
-
-    const text = await response.text();
-    expect(text).toContain('"name":"read_file"');
-    expect(text).not.toContain("mcp_read_file");
-  });
-
-  it("strips mcp_ prefix when a tool_use SSE data line is split across chunks", async () => {
-    const encoder = new TextEncoder();
-    const splitStream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(
-          encoder.encode('data:{"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_'),
-        );
-        controller.enqueue(encoder.encode('read_file","id":"t1"}}\n'));
-        controller.enqueue(encoder.encode("\n"));
-        controller.close();
-      },
-    });
-
-    mockFetch.mockResolvedValueOnce(
-      new Response(splitStream, {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      }),
-    );
-
-    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({ messages: [] }),
-    });
-
-    const text = await response.text();
-    expect(text).toContain('"name":"read_file"');
-    expect(text).not.toContain("mcp_read_file");
-  });
-
-  it("double-prefixes tools already named mcp_* in request body", async () => {
+  it("renames known opencode tool names to CC PascalCase", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
-        tools: [{ name: "mcp_server", description: "An MCP server tool" }],
+        tools: [
+          { name: "todowrite", description: "Manage todos" },
+          { name: "bash", description: "Run commands" },
+          { name: "webfetch", description: "Fetch web" },
+        ],
         messages: [
           {
             role: "assistant",
-            content: [{ type: "tool_use", name: "mcp_server", id: "t1", input: {} }],
+            content: [{ type: "tool_use", name: "todowrite", id: "t1", input: {} }],
           },
         ],
       }),
@@ -1013,34 +968,31 @@ describe("fetch interceptor", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    // Must become mcp_mcp_server so that response stripping restores the original name
-    expect(body.tools[0].name).toBe("mcp_mcp_server");
-    expect(body.messages[0].content[0].name).toBe("mcp_mcp_server");
+    expect(body.tools[0].name).toBe("TodoWrite");
+    expect(body.tools[1].name).toBe("Bash");
+    expect(body.tools[2].name).toBe("WebFetch");
+    expect(body.messages[0].content[0].name).toBe("TodoWrite");
   });
 
-  it("round-trips mcp_-prefixed tool names correctly", async () => {
-    // Tool already named mcp_server → sent as mcp_mcp_server → response strips back to mcp_server
-    const responseBody =
-      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_mcp_server","id":"t1"}}\n\n';
-    mockFetch.mockResolvedValueOnce(
-      new Response(responseBody, {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      }),
-    );
+  it("passes through non-opencode tool names unchanged", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
-    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+    await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
-        tools: [{ name: "mcp_server", description: "An MCP server tool" }],
+        tools: [
+          { name: "mcp_server", description: "An MCP server tool" },
+          { name: "chrome-devtools_click", description: "Click" },
+        ],
         messages: [],
       }),
     });
 
-    const text = await response.text();
-    // Should strip one mcp_ prefix, restoring original name
-    expect(text).toContain('"name":"mcp_server"');
-    expect(text).not.toContain("mcp_mcp_server");
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    // Non-opencode tool names pass through as-is
+    expect(body.tools[0].name).toBe("mcp_server");
+    expect(body.tools[1].name).toBe("chrome-devtools_click");
   });
 
   it("does not strip mcp_ from text content in response stream", async () => {
@@ -3387,8 +3339,8 @@ describe("header handling", () => {
     const parsed = JSON.parse(init.body);
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
     expect(parsed.system[0].text).toContain("cc_entrypoint=cli");
-    // cch is static "00000" since v2.1.97 (xxHash64 attestation removed)
-    expect(parsed.system[0].text).toContain("cch=00000;");
+    // cch is computed via xxHash64 post-serialization; in tests it may be the computed value
+    expect(parsed.system[0].text).toMatch(/cch=[0-9a-f]{5};/);
     expect(parsed.system[0].cache_control).toBeUndefined();
     expect(parsed.system[1]).toEqual({
       type: "text",

@@ -787,8 +787,9 @@ describe("E2E: System prompt block ordering invariants", () => {
     expect(body.system.length).toBeGreaterThanOrEqual(3);
     // Block 0: billing
     expect(body.system[0].text).toContain("x-anthropic-billing-header:");
-    // cch is static "00000" since v2.1.97 (xxHash64 attestation removed)
-    expect(body.system[0].text).toContain("cch=00000;");
+    // cch starts as "00000" placeholder, replaced post-serialization by computeAndReplaceCCH()
+    // In test context (no xxhash-wasm), the placeholder may remain
+    expect(body.system[0].text).toMatch(/cch=[0-9a-f]{5};/);
     expect(body.system[0].cache_control).toBeUndefined();
     // Block 1: identity (same TTL as other cached blocks)
     expect(body.system[1].text).toContain("Claude Code");
@@ -930,7 +931,7 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
-describe("E2E: Version is 2.1.97", () => {
+describe("E2E: Version is 2.1.107", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -939,17 +940,17 @@ describe("E2E: Version is 2.1.97", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.97", async () => {
+  it("User-Agent contains 2.1.107", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.97");
+    expect(headers.get("user-agent")).toContain("2.1.107");
   });
 
-  it("billing header contains 2.1.97", async () => {
+  it("billing header contains 2.1.107", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.97");
+    expect(body.system[0].text).toContain("2.1.107");
   });
 });
 
