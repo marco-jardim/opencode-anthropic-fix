@@ -2,6 +2,13 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [sync-2.1.112] — 2026-04-16
+
+### Emulation Sync — v2.1.112
+
+- **Bumped to Claude Code v2.1.112** — version, build_time (2026-04-16T18:33:19Z), SDK 0.208.0
+- Synced from v2.1.111
+
 ## [0.1.1] — 2026-04-08
 
 ### Emulation Sync — Claude Code v2.1.97
