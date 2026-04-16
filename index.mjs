@@ -5069,6 +5069,7 @@ const ANTHROPIC_SDK_VERSION = "0.81.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.112", "0.208.0"],
   ["2.1.107", "0.81.0"],
   ["2.1.105", "0.81.0"],
   ["2.1.97", "0.208.0"],
