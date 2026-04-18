@@ -6800,6 +6800,21 @@ function buildSystemPromptBlocks(system, signature) {
     return sanitized;
   }
 
+  // Lean system prompt for non-main requests (title-gen is already handled
+  // above via the COMPACT_TITLE_GENERATOR_SYSTEM_PROMPT swap). For "title"
+  // and "small" request roles — one-off queries that don't belong to the main
+  // REPL thread — we skip billing identity + CC identity injection. This
+  // matches the spirit of real CC's querySource gates: identity context is
+  // for interactive main-thread conversations, not fire-and-forget calls.
+  // Opt-in (default off) because it changes the system-prompt shape.
+  const leanNonMain =
+    signature.leanNonMain === true &&
+    (signature.requestRole === "title" || signature.requestRole === "small") &&
+    !titleGeneratorRequest;
+  if (leanNonMain) {
+    return sanitized;
+  }
+
   // Build attribution header
   const billingHeader = buildAnthropicBillingHeader(
     signature.claudeCliVersion,
@@ -7491,7 +7506,18 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     const modelId = parsed.model || "";
     // Extract first user message text for billing hash computation (cch)
     const firstUserMessage = extractFirstUserMessageText(parsed.messages);
-    const signatureWithModel = { ...signature, modelId, firstUserMessage, antiVerbosity: config?.anti_verbosity };
+    const signatureWithModel = {
+      ...signature,
+      modelId,
+      firstUserMessage,
+      antiVerbosity: config?.anti_verbosity,
+      // Role-aware system-prompt leaning: for non-main-thread requests (title,
+      // small, empty shapes) strip billing identity + CC identity injection.
+      // Title-gen path is handled separately by isTitleGeneratorSystemBlocks().
+      // Default off — opt-in via `token_economy.lean_system_non_main: true`.
+      requestRole: runtime?.requestRole,
+      leanNonMain: config?.token_economy?.lean_system_non_main === true,
+    };
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signatureWithModel);
 
@@ -7559,9 +7585,18 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     ) {
       // Strip ALL incoming cache_control from tools and messages to prevent
       // TTL ordering violations (host SDK may set ttl=5m which conflicts with
-      // our system prompt ttl=1h). Then add our own 1h to the last user message
+      // our system prompt ttl=1h). Then add our own to the last user message
       // (matching real CC behavior seen in proxy capture).
-      const ccTtl = signature.cachePolicy?.ttl || "1h";
+      //
+      // Role-scoped TTL: real CC's MoY(querySource) gates the `ttl:"1h"` field
+      // on an allowlist of query sources (`repl_main_thread*`, `sdk`,
+      // `auto_mode`). Non-matching requests fall back to the default 5m tier
+      // — which is cheaper to write. We match this via classifyRequestRole
+      // (main → configured TTL, usually 1h; everything else → 5m).
+      const configuredTtl = signature.cachePolicy?.ttl || "1h";
+      const roleScopedTtl = config?.token_economy?.role_scoped_cache_ttl !== false;
+      const isMainForCache = runtime?.requestRole === "main" || runtime?.requestRole == null;
+      const ccTtl = roleScopedTtl && !isMainForCache ? "5m" : configuredTtl;
       if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
         for (const tool of parsed.tools) {
           if (tool.cache_control) delete tool.cache_control;

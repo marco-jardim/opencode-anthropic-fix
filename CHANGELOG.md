@@ -2,6 +2,54 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.11] — 2026-04-17
+
+### Role-Scoped Cache TTL (CC v2.1.110+ `MoY` parity)
+
+Real CC's `MoY(querySource)` gates the `ttl:"1h"` field on an allowlist of
+query sources (`repl_main_thread*`, `sdk`, `auto_mode`). Non-matching requests
+fall back to the default 5m tier, which has a cheaper write multiplier. We
+were unconditionally writing 1h — inflating cache-write cost on title-gen /
+small one-shot requests where the entry would never be reused before the 5m
+mark anyway.
+
+Implementation reuses the existing `classifyRequestRole(parsed)` classifier.
+Cache breakpoints on tools and the last user message now use `ttl:"1h"` only
+when the request role is `main`; everything else gets `ttl:"5m"`.
+
+| Flag                    | Default | What it does                                        |
+| ----------------------- | ------- | --------------------------------------------------- |
+| `role_scoped_cache_ttl` | `true`  | Downgrade cache TTL to 5m for non-main requests     |
+| `lean_system_non_main`  | `false` | Strip billing+identity system blocks on title/small |
+
+### Lean System Prompt (opt-in)
+
+When `token_economy.lean_system_non_main = true`, title-gen and small-shape
+requests skip the billing-header and CC-identity prefix blocks in
+`buildSystemPromptBlocks`. This preserves only the sanitized user system
+prompt and eliminates ~3.5KB of cached-but-unused prefix for one-shots.
+Default off because it changes the visible system-prompt shape — flip on if
+your workflow relies heavily on non-main fanout (title generation,
+name-this-chat, etc.).
+
+Gate is deliberately narrow: only `"title"` and `"small"` roles are
+affected — `"empty"` and `"unknown"` fall through unchanged to preserve
+existing test contracts.
+
+### `scripts/` reorganization
+
+Moved 41 loose reverse-engineering files from `tmp/` and `_analysis/` into
+`scripts/{mitm,capture,extract,bisect,verify,replay,analyze}/`. Only
+`scripts/build.mjs`, `scripts/install.mjs`, and `scripts/README.md` are
+tracked; subfolders are gitignored (research scaffolding, no stable API).
+`scripts/README.md` documents each subfolder and two common workflows (plugin
+4xx debugging, new CC version sync).
+
+### Test coverage
+
+- `regression.test.mjs` gains 4 tests: role-scoped TTL (1h vs 5m) and lean
+  system prompt (strip on small, retain on main). All 1002 tests pass.
+
 ## [0.1.10] — 2026-04-17
 
 ### Token-Economy Overhaul

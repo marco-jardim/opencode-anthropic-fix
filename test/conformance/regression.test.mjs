@@ -555,6 +555,120 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
   }, 15000);
 });
 
+describe("Role-scoped cache TTL (CC v2.1.110+ MoY parity)", () => {
+  // Real CC's MoY(querySource) emits `ttl:"1h"` only for an allowlist of query
+  // sources (repl_main_thread*, sdk, auto_mode). Everything else falls back to
+  // the 5m tier. We mirror this via classifyRequestRole: main → 1h, else → 5m.
+  let client, fetchFn;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    fetchFn = await setupFetchFn(client);
+  });
+
+  it("uses ttl:1h on main-thread-shaped requests", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 8000,
+        system: "x".repeat(300),
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      }),
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    const lastUser = body.messages[body.messages.length - 1];
+    const lastBlock = Array.isArray(lastUser.content) ? lastUser.content[lastUser.content.length - 1] : null;
+    expect(lastBlock?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  it("downgrades to ttl:5m for small/one-shot requests", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 512, // "small" signal
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    const lastUser = body.messages[body.messages.length - 1];
+    const lastBlock = Array.isArray(lastUser.content) ? lastUser.content[lastUser.content.length - 1] : null;
+    expect(lastBlock?.cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
+  });
+});
+
+describe("Lean system prompt for non-main requests (opt-in)", () => {
+  let client, fetchFn;
+
+  async function setupLean() {
+    const original = await vi.importActual("../../lib/config.mjs");
+    loadConfig.mockImplementation(() => ({
+      ...original.DEFAULT_CONFIG,
+      account_selection_strategy: "sticky",
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+      override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+      custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+      idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      token_economy: { ...original.DEFAULT_CONFIG.token_economy, lean_system_non_main: true },
+    }));
+    return setupFetchFn(client);
+  }
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    fetchFn = await setupLean();
+  });
+
+  it("strips billing + identity blocks for small-shaped requests when opted in", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 512,
+        system: "Custom instructions",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    const systemText = body.system.map((b) => b.text).join("\n");
+    expect(systemText).not.toMatch(/x-anthropic-billing-header:/);
+    expect(systemText).not.toMatch(/You are an interactive/);
+  });
+
+  it("still injects billing + identity on main-thread requests when opted in", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 8000,
+        system: "x".repeat(300),
+        messages: [{ role: "user", content: "real question" }],
+      }),
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    const systemText = body.system.map((b) => b.text).join("\n");
+    expect(systemText).toMatch(/x-anthropic-billing-header:/);
+  });
+});
+
 describe("Fix #7: Telemetry session ID matches API session ID", () => {
   it("sessionId from API request matches (both derived from signatureSessionId)", async () => {
     // QA fix C5: replaced tautological test with real assertion.
