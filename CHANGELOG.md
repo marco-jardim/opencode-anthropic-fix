@@ -2,6 +2,33 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.13] — 2026-04-17
+
+### `token_economy.conservative` (default ON) — stop cache thrash
+
+High-priority fix for user report "CC uses far fewer tokens than the plugin."
+The v0.1.10 token-economy transforms shrink each request body but rewrite the
+message history / tools array turn-to-turn. Every rewrite risks breaking the
+prompt-cache prefix, forcing a fresh `cache_creation_input_tokens` charge
+(2x base input multiplier) every turn. For long sessions, cache reuse
+dominates per-turn cost — the "optimizations" were net negative.
+
+New `token_economy.conservative: true` (default) disables all
+cache-invalidating transforms:
+
+- `ttl_thinking_strip`
+- `proactive_microcompact`
+- `trailing_summary_trim`
+- `tool_result_dedupe`
+- `stable_tool_ordering`
+- `deferred_tool_names`
+
+Unaffected (cache-safe): `adaptive_thinking_zero_simple` (only mutates the
+thinking budget, not cached content).
+
+To restore the v0.1.10–0.1.12 behavior, set `token_economy.conservative: false`
+in `~/.opencode/opencode-anthropic-fix.json`.
+
 ## [0.1.12] — 2026-04-17
 
 ### `role_scoped_cache_ttl` default flipped off

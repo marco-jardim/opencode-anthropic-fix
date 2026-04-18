@@ -7424,7 +7424,17 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     const tes = runtime?.tokenEconomySession;
     const isMainRole = runtime?.requestRole === "main" || runtime?.requestRole == null;
 
-    if (isMainRole && Array.isArray(parsed.messages) && tes) {
+    // `conservative` (default ON) disables all history-rewriting and tool-array
+    // transforms. These optimizations shrink each request body but cause the
+    // prompt-cache prefix to change turn-to-turn, invalidating the 1h cache
+    // and forcing a fresh cache_write each turn — which costs 2x base input
+    // tokens. For long opencode sessions, cache reuse dominates; flip to
+    // `false` only if you have measurements showing otherwise. Adaptive
+    // thinking zero-out remains active (affects only the thinking budget,
+    // not cached content).
+    const conservative = te.conservative !== false;
+
+    if (!conservative && isMainRole && Array.isArray(parsed.messages) && tes) {
       // (1) TTL-based thinking strip
       if (te.ttl_thinking_strip !== false) {
         const ttlMs = signature?.cachePolicy?.ttl === "5m" ? 5 * 60_000 : 60 * 60_000;
@@ -7474,7 +7484,7 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     }
 
     // === Token economy: tool-array transforms (stable ordering, deferral) ===
-    if (isMainRole && Array.isArray(parsed.tools)) {
+    if (!conservative && isMainRole && Array.isArray(parsed.tools)) {
       if (te.stable_tool_ordering !== false) {
         parsed.tools = applyStableToolOrdering(parsed.tools);
       }
