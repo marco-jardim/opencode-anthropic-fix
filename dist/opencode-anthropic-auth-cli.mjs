@@ -199,7 +199,18 @@ var DEFAULT_CONFIG = {
      *  claude-haiku-4-5-20251001 at temperature 0 to produce the compaction
      *  summary, bypassing the main model. Requires opencode fork support
      *  — no-op without it. Off by default. */
-    haiku_rolling_summary: false
+    haiku_rolling_summary: false,
+    /** Stale-read eviction: replace `read`/`view` tool outputs from
+     *  messages older than N turns with a placeholder. Runs on every
+     *  request via `experimental.chat.messages.transform`. Saves
+     *  ~1-2KB per old read × conversation depth. Off by default. */
+    stale_read_eviction: false,
+    /** Per-tool-class prune thresholds: apply different token budgets
+     *  to reproducible (read/grep/glob/ls) vs stateful (bash/edit/write)
+     *  tool outputs during request assembly. Reproducible outputs can
+     *  be re-run on demand, so they prune at a lower threshold. Off by
+     *  default — when ON, uses 10_000/40_000 token budgets. */
+    per_tool_class_prune: false
   },
   /** Output cap: default max_tokens to save context window. */
   output_cap: {
@@ -575,7 +586,9 @@ function validateConfig(raw) {
       tool_description_compaction: typeof tes.tool_description_compaction === "boolean" ? tes.tool_description_compaction : DEFAULT_CONFIG.token_economy_strategies.tool_description_compaction,
       adaptive_tool_set: typeof tes.adaptive_tool_set === "boolean" ? tes.adaptive_tool_set : DEFAULT_CONFIG.token_economy_strategies.adaptive_tool_set,
       tool_result_dedupe_session_wide: typeof tes.tool_result_dedupe_session_wide === "boolean" ? tes.tool_result_dedupe_session_wide : DEFAULT_CONFIG.token_economy_strategies.tool_result_dedupe_session_wide,
-      haiku_rolling_summary: typeof tes.haiku_rolling_summary === "boolean" ? tes.haiku_rolling_summary : DEFAULT_CONFIG.token_economy_strategies.haiku_rolling_summary
+      haiku_rolling_summary: typeof tes.haiku_rolling_summary === "boolean" ? tes.haiku_rolling_summary : DEFAULT_CONFIG.token_economy_strategies.haiku_rolling_summary,
+      stale_read_eviction: typeof tes.stale_read_eviction === "boolean" ? tes.stale_read_eviction : DEFAULT_CONFIG.token_economy_strategies.stale_read_eviction,
+      per_tool_class_prune: typeof tes.per_tool_class_prune === "boolean" ? tes.per_tool_class_prune : DEFAULT_CONFIG.token_economy_strategies.per_tool_class_prune
     };
   }
   if (raw.output_cap && typeof raw.output_cap === "object") {

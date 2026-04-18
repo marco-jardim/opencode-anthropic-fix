@@ -21,6 +21,7 @@ import {
 } from "./lib/backoff.mjs";
 import { callHaiku } from "./lib/haiku-call.mjs";
 import { summarize as rollingSummarize } from "./lib/rolling-summarizer.mjs";
+import { staleReadEviction, perToolClassPrune } from "./lib/message-transform.mjs";
 
 // ---------------------------------------------------------------------------
 // Account management CLI prompts
@@ -4057,6 +4058,24 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
           type: "api",
         },
       ],
+    },
+    /**
+     * Stateless message-list transforms. Previously fork-only patches
+     * (4c3f4fc19 stale-read eviction, 797ae24d8 per-tool-class prune)
+     * now live here and apply on the cloned request messages. Hook
+     * input is `{}` — no sessionID, so these are global policies.
+     */
+    "experimental.chat.messages.transform": async (_input, output) => {
+      const strategies = config?.token_economy_strategies;
+      if (!strategies) return;
+      if (!output?.messages) return;
+
+      if (strategies.stale_read_eviction) {
+        staleReadEviction({ messages: output.messages });
+      }
+      if (strategies.per_tool_class_prune) {
+        perToolClassPrune({ messages: output.messages });
+      }
     },
     "experimental.session.compacting": async (input, output) => {
       // Reset adaptive context state on session compaction (new conversation boundary).

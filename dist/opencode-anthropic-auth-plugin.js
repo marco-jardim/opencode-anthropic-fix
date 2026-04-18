@@ -318,7 +318,9 @@ function validateConfig(raw) {
       tool_description_compaction: typeof tes.tool_description_compaction === "boolean" ? tes.tool_description_compaction : DEFAULT_CONFIG.token_economy_strategies.tool_description_compaction,
       adaptive_tool_set: typeof tes.adaptive_tool_set === "boolean" ? tes.adaptive_tool_set : DEFAULT_CONFIG.token_economy_strategies.adaptive_tool_set,
       tool_result_dedupe_session_wide: typeof tes.tool_result_dedupe_session_wide === "boolean" ? tes.tool_result_dedupe_session_wide : DEFAULT_CONFIG.token_economy_strategies.tool_result_dedupe_session_wide,
-      haiku_rolling_summary: typeof tes.haiku_rolling_summary === "boolean" ? tes.haiku_rolling_summary : DEFAULT_CONFIG.token_economy_strategies.haiku_rolling_summary
+      haiku_rolling_summary: typeof tes.haiku_rolling_summary === "boolean" ? tes.haiku_rolling_summary : DEFAULT_CONFIG.token_economy_strategies.haiku_rolling_summary,
+      stale_read_eviction: typeof tes.stale_read_eviction === "boolean" ? tes.stale_read_eviction : DEFAULT_CONFIG.token_economy_strategies.stale_read_eviction,
+      per_tool_class_prune: typeof tes.per_tool_class_prune === "boolean" ? tes.per_tool_class_prune : DEFAULT_CONFIG.token_economy_strategies.per_tool_class_prune
     };
   }
   if (raw.output_cap && typeof raw.output_cap === "object") {
@@ -783,7 +785,18 @@ var init_config = __esm({
          *  claude-haiku-4-5-20251001 at temperature 0 to produce the compaction
          *  summary, bypassing the main model. Requires opencode fork support
          *  — no-op without it. Off by default. */
-        haiku_rolling_summary: false
+        haiku_rolling_summary: false,
+        /** Stale-read eviction: replace `read`/`view` tool outputs from
+         *  messages older than N turns with a placeholder. Runs on every
+         *  request via `experimental.chat.messages.transform`. Saves
+         *  ~1-2KB per old read × conversation depth. Off by default. */
+        stale_read_eviction: false,
+        /** Per-tool-class prune thresholds: apply different token budgets
+         *  to reproducible (read/grep/glob/ls) vs stateful (bash/edit/write)
+         *  tool outputs during request assembly. Reproducible outputs can
+         *  be re-run on demand, so they prune at a lower threshold. Off by
+         *  default — when ON, uses 10_000/40_000 token budgets. */
+        per_tool_class_prune: false
       },
       /** Output cap: default max_tokens to save context window. */
       output_cap: {
@@ -4246,6 +4259,95 @@ async function summarize(messages, opts) {
   return formatTemplate(parsed, maxChars);
 }
 
+// lib/message-transform.mjs
+var STALE_READ_TOOLS = /* @__PURE__ */ new Set(["read", "view"]);
+var REPRODUCIBLE_TOOLS = /* @__PURE__ */ new Set([
+  "read",
+  "grep",
+  "glob",
+  "ls",
+  "list",
+  "find"
+]);
+var PRUNE_PROTECTED_TOOLS = /* @__PURE__ */ new Set(["skill"]);
+var STALE_READ_PLACEHOLDER = "[File was read earlier in this session \u2014 re-read if you need the current contents]";
+function estimateTokens(text) {
+  if (typeof text !== "string" || text.length === 0) return 0;
+  return Math.ceil(text.length / 4);
+}
+function staleReadEviction({
+  messages,
+  threshold = 10,
+  tools = STALE_READ_TOOLS
+}) {
+  if (!Array.isArray(messages) || messages.length <= threshold) {
+    return { evicted: 0 };
+  }
+  const cutoff = messages.length - threshold;
+  let evicted = 0;
+  for (let i = 0; i < cutoff; i++) {
+    const msg = messages[i];
+    if (!msg?.parts) continue;
+    for (const part of msg.parts) {
+      if (part?.type !== "tool") continue;
+      if (part.state?.status !== "completed") continue;
+      if (part.state.time?.compacted) continue;
+      if (!tools.has(part.tool)) continue;
+      part.state.output = STALE_READ_PLACEHOLDER;
+      if (part.state.attachments) {
+        part.state.attachments = [];
+      }
+      evicted++;
+    }
+  }
+  return { evicted };
+}
+function perToolClassPrune({
+  messages,
+  reproducibleThreshold = 1e4,
+  statefulThreshold = 4e4,
+  reproducibleTools = REPRODUCIBLE_TOOLS
+}) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { pruned: 0, tokensSaved: 0 };
+  }
+  let totalReproducible = 0;
+  let totalStateful = 0;
+  let pruned = 0;
+  let tokensSaved = 0;
+  outer: for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg?.parts?.length) continue;
+    for (let j = msg.parts.length - 1; j >= 0; j--) {
+      const part = msg.parts[j];
+      if (part?.type !== "tool") continue;
+      if (part.state?.status !== "completed") continue;
+      if (PRUNE_PROTECTED_TOOLS.has(part.tool)) continue;
+      if (part.state.time?.compacted) break outer;
+      const estimate = estimateTokens(part.state.output);
+      const isReproducible = reproducibleTools.has(part.tool.toLowerCase());
+      if (isReproducible) {
+        totalReproducible += estimate;
+        if (totalReproducible > reproducibleThreshold) {
+          part.state.output = "";
+          if (part.state.attachments) part.state.attachments = [];
+          pruned++;
+          tokensSaved += estimate;
+        }
+      } else {
+        totalStateful += estimate;
+        if (totalStateful > statefulThreshold) {
+          part.state.output = "";
+          if (part.state.attachments) part.state.attachments = [];
+          pruned++;
+          tokensSaved += estimate;
+        }
+      }
+    }
+  }
+  return { pruned, tokensSaved };
+}
+
 // index.mjs
 async function promptAccountMenu(accountManager) {
   const accounts = accountManager.getAccountsSnapshot();
@@ -7424,6 +7526,23 @@ ${message}`);
         }
       ]
     },
+    /**
+     * Stateless message-list transforms. Previously fork-only patches
+     * (4c3f4fc19 stale-read eviction, 797ae24d8 per-tool-class prune)
+     * now live here and apply on the cloned request messages. Hook
+     * input is `{}` — no sessionID, so these are global policies.
+     */
+    "experimental.chat.messages.transform": async (_input, output) => {
+      const strategies = config?.token_economy_strategies;
+      if (!strategies) return;
+      if (!output?.messages) return;
+      if (strategies.stale_read_eviction) {
+        staleReadEviction({ messages: output.messages });
+      }
+      if (strategies.per_tool_class_prune) {
+        perToolClassPrune({ messages: output.messages });
+      }
+    },
     "experimental.session.compacting": async (input, output) => {
       adaptiveContextState.active = false;
       adaptiveContextState.lastTransitionTurn = sessionMetrics.turns;
@@ -7897,15 +8016,15 @@ function analyzeRequestContext(bodyStr) {
   try {
     const parsed = JSON.parse(bodyStr);
     const contentHashes = /* @__PURE__ */ new Map();
-    const estimateTokens = (s) => Math.ceil((s || "").length / 4);
+    const estimateTokens2 = (s) => Math.ceil((s || "").length / 4);
     if (Array.isArray(parsed.system)) {
       for (const block of parsed.system) {
         if (block.type === "text" && typeof block.text === "string") {
-          result.systemTokens += estimateTokens(block.text);
+          result.systemTokens += estimateTokens2(block.text);
         }
       }
     } else if (typeof parsed.system === "string") {
-      result.systemTokens += estimateTokens(parsed.system);
+      result.systemTokens += estimateTokens2(parsed.system);
     }
     if (Array.isArray(parsed.messages)) {
       for (const msg of parsed.messages) {
@@ -7913,7 +8032,7 @@ function analyzeRequestContext(bodyStr) {
         const blocks = typeof msg.content === "string" ? [{ type: "text", text: msg.content }] : Array.isArray(msg.content) ? msg.content : [];
         for (const block of blocks) {
           if (block.type === "text" && typeof block.text === "string") {
-            const tokens = estimateTokens(block.text);
+            const tokens = estimateTokens2(block.text);
             if (role === "user") result.userTokens += tokens;
             else if (role === "assistant") result.assistantTokens += tokens;
           } else if (block.type === "tool_result") {
@@ -7923,7 +8042,7 @@ function analyzeRequestContext(bodyStr) {
             } else if (Array.isArray(block.content)) {
               content = block.content.map((b) => b.text || "").join("");
             }
-            const tokens = estimateTokens(content);
+            const tokens = estimateTokens2(content);
             result.toolResultTokens += tokens;
             result.userTokens += tokens;
             const toolName = block.tool_name || block.name || "unknown_tool";
@@ -7944,7 +8063,7 @@ function analyzeRequestContext(bodyStr) {
               }
             }
           } else if (block.type === "tool_use") {
-            const tokens = estimateTokens(JSON.stringify(block.input || {}));
+            const tokens = estimateTokens2(JSON.stringify(block.input || {}));
             if (role === "assistant") result.assistantTokens += tokens;
           }
         }

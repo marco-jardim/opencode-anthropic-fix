@@ -2,6 +2,52 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.21] — 2026-04-18
+
+### Feature — Stateless message-list transforms migrated from opencode fork
+
+Two token-economy strategies previously implemented as patches in the
+opencode fork are now plugin features, applied via the
+`experimental.chat.messages.transform` hook. Both default OFF.
+
+**`token_economy_strategies.stale_read_eviction`** — replaces
+`read`/`view` tool outputs from messages older than 10 turns with a
+placeholder note. Saves ~1-2 KB per old read × conversation depth.
+Previously fork commit `4c3f4fc19`.
+
+**`token_economy_strategies.per_tool_class_prune`** — applies
+different token budgets to reproducible (`read`/`grep`/`glob`/`ls`/
+`list`/`find`) vs stateful tool outputs during request assembly.
+Reproducible outputs prune at 10k tokens; stateful at 40k.
+Previously fork commit `797ae24d8`.
+
+**Behavioral delta vs the fork path:** plugin path is non-destructive
+— transforms see a `structuredClone` of the session messages and
+mutation only affects the outbound request. The original fork path
+also wrote `state.time.compacted` to storage, permanently erasing
+old tool outputs. Plugin path keeps storage intact.
+
+**Why this version:** shrinks the opencode fork toward upstream
+parity. See `docs/fork-customizations.md` for the full migration
+audit (which patches moved, which stay fork-only and why).
+
+### New files
+
+- `lib/message-transform.mjs` — `staleReadEviction` + `perToolClassPrune`
+- `lib/message-transform.test.mjs` — 14 unit tests
+- `docs/fork-customizations.md` — plugin migration audit
+
+### Config schema additions
+
+```json
+{
+  "token_economy_strategies": {
+    "stale_read_eviction": false,
+    "per_tool_class_prune": false
+  }
+}
+```
+
 ## [0.1.20] — 2026-04-18
 
 ### Feature — Haiku rolling summary (opt-in, requires opencode fork with `experimental.session.summarize`)
