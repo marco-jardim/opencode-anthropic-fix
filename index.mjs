@@ -5456,6 +5456,174 @@ function applyContextHintCompaction(messages, opts = {}) {
 }
 
 /**
+ * Tools whose output is trivially reproducible by re-running with the same
+ * arguments. Stateful tools (bash, edit, write, etc.) never dedupe — their
+ * outputs may reflect non-idempotent side effects that the transcript needs
+ * to preserve.
+ */
+const REPRODUCIBLE_TOOL_NAMES = new Set(["read", "grep", "glob", "ls", "list", "find"]);
+
+/**
+ * Title-case a tool name for the stub string ("read" → "Read", "grep" → "Grep").
+ * Pure; no locale.
+ */
+function titleCaseToolName(name) {
+  if (typeof name !== "string" || name.length === 0) return "";
+  return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+}
+
+/**
+ * Minimal deterministic stable-stringify for args canonicalization.
+ * Sorts object keys at every depth before serialization so that
+ * `{a:1,b:2}` and `{b:2,a:1}` produce the same string.
+ *
+ * Arrays are traversed in order. Non-plain objects (Date, Map, etc.) fall
+ * through to `JSON.stringify` — we don't expect them in tool args, but the
+ * fallback keeps the function total.
+ */
+function stableStringifyForDedupe(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return "[" + value.map((v) => stableStringifyForDedupe(v)).join(",") + "]";
+  }
+  const keys = Object.keys(value).sort();
+  const parts = [];
+  for (const k of keys) {
+    parts.push(JSON.stringify(k) + ":" + stableStringifyForDedupe(value[k]));
+  }
+  return "{" + parts.join(",") + "}";
+}
+
+/**
+ * Session-wide tool-result dedupe. Pure over `messages`.
+ *
+ * Walks the conversation once to collect every `tool_use` + `tool_result`
+ * pair where the tool is in `REPRODUCIBLE_TOOL_NAMES` (case-insensitive).
+ * Groups them by `(toolName, stableStringify(args))`. For every group
+ * containing more than one call, keeps the LATEST result verbatim and
+ * replaces each earlier result's `content` with a stub:
+ *
+ *   `[<ToolTitleCase> of <argsKey> superseded by later read at msg #<N>]`
+ *
+ * where `N` is the message index of the latest call's user-message.
+ *
+ * `tool_use_id` and any other `tool_result` fields are preserved. Assistant
+ * `tool_use` blocks are NEVER modified — only the paired user `tool_result`.
+ *
+ * Cache-stable: decision is a pure function of message history, so rerunning
+ * over an unchanged prefix yields byte-identical output.
+ *
+ * @param {Array} messages — Parsed messages array
+ * @returns {{ messages: Array, changed: boolean, stats: { deduped: number } }}
+ */
+function applySessionToolResultDedupe(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { messages, changed: false, stats: { deduped: 0 } };
+  }
+
+  // Pass 1: build tool_use_id → { name, argsKey } for reproducible tools.
+  const idToMeta = new Map();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block?.type !== "tool_use") continue;
+      const name = typeof block.name === "string" ? block.name : "";
+      if (!REPRODUCIBLE_TOOL_NAMES.has(name.toLowerCase())) continue;
+      const argsKey = stableStringifyForDedupe(block.input ?? {});
+      idToMeta.set(block.id, { name, argsKey });
+    }
+  }
+
+  // Pass 2: collect tool_result locations by group key, preserving order.
+  /** @type {Map<string, Array<{msgIdx: number, blockIdx: number, toolUseId: string, name: string, argsKey: string}>>} */
+  const groups = new Map();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "user" || !Array.isArray(msg.content)) continue;
+    for (let j = 0; j < msg.content.length; j++) {
+      const block = msg.content[j];
+      if (block?.type !== "tool_result") continue;
+      const meta = idToMeta.get(block.tool_use_id);
+      if (!meta) continue;
+      const groupKey = meta.name.toLowerCase() + "\u0000" + meta.argsKey;
+      let arr = groups.get(groupKey);
+      if (!arr) {
+        arr = [];
+        groups.set(groupKey, arr);
+      }
+      arr.push({
+        msgIdx: i,
+        blockIdx: j,
+        toolUseId: block.tool_use_id,
+        name: meta.name,
+        argsKey: meta.argsKey,
+      });
+    }
+  }
+
+  // Build supersede map: "msgIdx:blockIdx" → stub string.
+  const supersedeStubs = new Map();
+  let deduped = 0;
+  // Deterministic iteration: sort group entries by group key before processing.
+  const sortedEntries = Array.from(groups.entries()).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  for (const [, occurrences] of sortedEntries) {
+    if (occurrences.length < 2) continue;
+    const latest = occurrences[occurrences.length - 1];
+    const stub =
+      "[" +
+      titleCaseToolName(latest.name) +
+      " of " +
+      latest.argsKey +
+      " superseded by later read at msg #" +
+      latest.msgIdx +
+      "]";
+    for (let k = 0; k < occurrences.length - 1; k++) {
+      const occ = occurrences[k];
+      supersedeStubs.set(occ.msgIdx + ":" + occ.blockIdx, stub);
+      deduped += 1;
+    }
+  }
+
+  if (deduped === 0) {
+    return { messages, changed: false, stats: { deduped: 0 } };
+  }
+
+  // Pass 3: rewrite. Preserve tool_use_id and other fields.
+  const out = messages.map((msg, i) => {
+    if (msg?.role !== "user" || !Array.isArray(msg.content)) return msg;
+    let mutated = false;
+    const newContent = msg.content.map((block, j) => {
+      if (block?.type !== "tool_result") return block;
+      const stub = supersedeStubs.get(i + ":" + j);
+      if (!stub) return block;
+      mutated = true;
+      return { ...block, content: stub };
+    });
+    return mutated ? { ...msg, content: newContent } : msg;
+  });
+
+  return { messages: out, changed: true, stats: { deduped } };
+}
+
+/**
+ * Dispatch wrapper: only apply `applySessionToolResultDedupe` when the
+ * `token_economy_strategies.tool_result_dedupe_session_wide` flag is true.
+ * When disabled, returns the input `messages` by identity (not a copy) so
+ * callers can cheaply detect "no-op" with reference equality.
+ *
+ * @param {Array} messages
+ * @param {object} [config]
+ * @returns {Array}
+ */
+function maybeApplySessionToolResultDedupe(messages, config) {
+  const flag = config?.token_economy_strategies?.tool_result_dedupe_session_wide;
+  if (flag !== true) return messages;
+  const result = applySessionToolResultDedupe(messages);
+  return result.messages;
+}
+
+/**
  * TTL-based thinking strip. When the time since the last strip exceeds the
  * cache TTL (roughly the point at which the prompt prefix cache would expire),
  * remove all `thinking` / `redacted_thinking` blocks from prior assistant
@@ -7524,6 +7692,15 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
         }
       }
 
+      // (1b) Session-wide reproducible-tool result dedupe (Phase C C3, opt-in)
+      // Pure over message history; runs before microcompact so dedup'd stubs
+      // are visible to downstream size estimation. Gated by
+      // token_economy_strategies.tool_result_dedupe_session_wide (default off).
+      if (config?.token_economy_strategies?.tool_result_dedupe_session_wide === true) {
+        const res = applySessionToolResultDedupe(parsed.messages);
+        if (res.changed) parsed.messages = res.messages;
+      }
+
       // (2) Proactive microcompact (client-side, pre-422)
       if (te.proactive_microcompact !== false) {
         const estimated = estimatePromptTokensFromParsed(parsed);
@@ -8621,6 +8798,9 @@ AnthropicAuthPlugin.__testing__ = {
   buildSystemPromptBlocks,
   stripMcpPrefixFromParsedEvent,
   CORE_TOOL_NAMES,
+  // exposed for session-dedupe regression tests (phase C3)
+  applySessionToolResultDedupe,
+  maybeApplySessionToolResultDedupe,
   get cachedCCPrompt() {
     return cachedCCPrompt;
   },
