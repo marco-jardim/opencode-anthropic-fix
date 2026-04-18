@@ -2,6 +2,56 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.17] — 2026-04-18
+
+### Phase B + Phase C — structural + CC-parity token-economy work
+
+**New modules:**
+
+- **B3 — `lib/rolling-summarizer.mjs`**: deterministic Haiku summarizer
+  module. `temperature: 0`, fixed template, no timestamps, sorted-key
+  iteration. Two calls over the same messages produce byte-identical output.
+  Pure + dependency-injected `haikuCall` so tests are fully offline. Not yet
+  wired into `experimental.session.compacting` — the hook doesn't pass
+  messages, so end-to-end wiring waits on a per-session accumulator.
+
+**Hardening:**
+
+- **C1 — context-hint determinism harness**: `applyContextHintCompaction`
+  is now pinned by a regression test. Future edits that leak timestamps,
+  random IDs, or Set iteration order into the compaction output fail CI.
+  Prerequisite for C2.
+
+**Behavior flips:**
+
+- **C2 — `token_economy.context_hint` default flipped to `true`** for
+  first-party providers on non-claude-3 models in main-thread requests.
+  With C1 proving the retry path deterministic, it's safe to enable by
+  default. Explicit opt-out via `context_hint: false` is respected;
+  error-latching on 400/409/529 still disables for the session.
+
+**Opt-in additions:**
+
+- **C3 — `token_economy_strategies.tool_result_dedupe_session_wide`**
+  (default `false`): when enabled, replaces older reproducible-tool
+  outputs (Read/Grep/Glob/LS) with stubs pointing at the latest
+  identical-args call. Stateful tools (Bash/Edit/Write) never dedupe.
+  Pure over message history → cache-stable. Saves 10–20% on long
+  debugging sessions.
+
+**Diagnostics fix:**
+
+- **Dumper honesty**: `token_economy.debug_dump_bodies` previously wrote
+  the body _before_ `computeAndReplaceCCH` substituted the `cch=00000`
+  placeholder with the real `xxHash64(body) & 0xFFFFF` hash. The outgoing
+  request was correct but dumps showed `cch=00000`, confusing debugging.
+  Dumper now writes the final post-`cch` body — what actually hits the
+  wire.
+
+**Opt-in enabling:** `context_hint` is already on by default (C2). The
+dedupe (C3) is opt-in:
+`{"token_economy_strategies": {"tool_result_dedupe_session_wide": true}}`.
+
 ## [0.1.16] — 2026-04-18
 
 ### Phase A surgical token-economy fixes
