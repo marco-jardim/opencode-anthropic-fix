@@ -4004,6 +4004,11 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       }
 
       output.context.push(contextParts.join("\n"));
+
+      // TODO(B3): wire rolling-summarizer once per-session message capture exists
+      // (requires chat.messages.transform accumulator). Module exists at
+      // lib/rolling-summarizer.mjs — call summarize(messages, {haikuCall}) here
+      // behind config.token_economy.rolling_summarizer when messages are available.
     },
   };
 }
