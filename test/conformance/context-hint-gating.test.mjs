@@ -73,6 +73,12 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
   };
 });
 
+vi.mock("../../lib/context-hint-persist.mjs", () => ({
+  loadContextHintDisabledFlag: vi.fn(() => ({ disabled: false })),
+  saveContextHintDisabledFlag: vi.fn(),
+  getContextHintFlagPath: vi.fn(() => "/tmp/test-context-hint-disabled.flag"),
+}));
+
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
