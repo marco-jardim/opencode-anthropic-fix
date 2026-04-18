@@ -4,8 +4,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let tmpRoot;
-let originalAppdata;
-let originalXdg;
 
 vi.mock("../lib/config.mjs", async () => {
   return {

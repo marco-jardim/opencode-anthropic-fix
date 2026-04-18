@@ -67,6 +67,22 @@ export default [
     },
   },
   {
-    ignores: ["dist/", "node_modules/", ".mitm/", "_tmp_*/", "tmp/", ".opencode/", "**/fixtures/**"],
+    ignores: [
+      "dist/",
+      "node_modules/",
+      ".mitm/",
+      "_tmp_*/",
+      "tmp/",
+      ".opencode/",
+      "**/fixtures/**",
+      "_analysis/",
+      "scripts/bisect/",
+      "scripts/mitm/",
+      "scripts/verify/",
+      "scripts/analyze/",
+      "scripts/capture/",
+      "scripts/extract/",
+      "test/test-subagent-fix.mjs",
+    ],
   },
 ];
