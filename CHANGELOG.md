@@ -2,6 +2,24 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.14] — 2026-04-18
+
+### Cache-break detector: add `messages_prefix` + fix minus-sign typo
+
+User reported frequent `Cache break detected` toasts with the `(u2212NNNN tokens)`
+prefix but **no source name** after. Two fixes:
+
+1. `(u2212...)` was a sed-escape residue — the intended character is the
+   unicode minus sign (`−`, U+2212). Now renders correctly.
+2. Toasts without a source name mean the detector knew the cache dropped but
+   couldn't identify which source changed — because `extractCacheSourceHashes`
+   only hashed `system_prompt` and tool schemas, not the conversation history.
+   Added a `messages_prefix` hash (everything except the last message, with
+   `cache_control` markers stripped to avoid false positives). When the toast
+   names `messages_prefix`, the cache break is in the conversation history
+   prefix — most likely opencode sending a rewritten history each turn, or
+   per-turn metadata (timestamps, cwd snapshots) baked into the messages.
+
 ## [0.1.13] — 2026-04-17
 
 ### `token_economy.conservative` (default ON) — stop cache thrash

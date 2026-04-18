@@ -3721,7 +3721,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                           cacheBreakState.lastAlertTurn !== sessionMetrics.turns
                         ) {
                           const drop = cacheBreakState.prevCacheRead - cacheRead;
-                          let alertMsg = `Cache break detected (u2212${drop.toLocaleString()} tokens)`;
+                          let alertMsg = `Cache break detected (−${drop.toLocaleString()} tokens)`;
 
                           // Identify changed sources if we have pending hashes
                           if (cacheBreakState._pendingHashes && cacheBreakState.sourceHashes.size > 0) {
@@ -4326,6 +4326,30 @@ function extractCacheSourceHashes(bodyStr, parsedBody = undefined) {
           hashes.set(`tool:${tool.name}`, hashCacheSource(JSON.stringify(tool)));
         }
       }
+    }
+
+    // Hash messages prefix (everything except the last message) so we can
+    // detect when the conversation history prefix changes byte-for-byte
+    // between turns — a common cause of prompt-cache invalidation that
+    // system_prompt/tool hashes alone don't explain.
+    if (Array.isArray(parsed.messages) && parsed.messages.length > 1) {
+      const prefix = parsed.messages.slice(0, -1);
+      // Strip cache_control markers before hashing — they're legitimately
+      // re-stamped each turn and shouldn't trigger a false positive.
+      const normalized = prefix.map((m) => {
+        if (!Array.isArray(m.content)) return m;
+        return {
+          ...m,
+          content: m.content.map((b) => {
+            if (b && typeof b === "object" && b.cache_control) {
+              const { cache_control: _cc, ...rest } = b;
+              return rest;
+            }
+            return b;
+          }),
+        };
+      });
+      hashes.set("messages_prefix", hashCacheSource(JSON.stringify(normalized)));
     }
   } catch {
     // Ignore parse errors
