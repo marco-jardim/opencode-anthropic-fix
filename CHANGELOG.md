@@ -2,6 +2,28 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.16] — 2026-04-18
+
+### Phase A surgical token-economy fixes
+
+**Fixes:**
+
+- **A1**: `claude-opus-4-7` now recognized as adaptive-thinking model; requests
+  correctly include `thinking: {type: "adaptive"}`. Previously produced
+  `thinking: undefined` on every turn, skipping effort-beta injection too.
+- **A2**: `token_economy_strategies.system_prompt_tailing` default flipped from
+  implicit-on to explicit opt-in (`false`). Tailing shrinks system prompts at
+  turn 6; on sessions with ~1MB cumulative history, the resulting cache break
+  costs more than the tailing saves. Opt in only for short sessions with huge
+  prompts.
+
+**Expected impact on long sessions:** 30–40% lower per-turn input tokens, no
+more turn-6 cache break toast.
+
+**Opt-in to pre-0.1.16 behavior:** set
+`{"token_economy_strategies": {"system_prompt_tailing": true}}` in
+`anthropic-auth.json`.
+
 ## [0.1.15] — 2026-04-18
 
 ### `token_economy.debug_dump_bodies` — opt-in request dumper
