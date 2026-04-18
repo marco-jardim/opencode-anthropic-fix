@@ -19,6 +19,8 @@ import {
   parseShouldRetryHeader,
   TRANSIENT_RETRY_THRESHOLD_MS,
 } from "./lib/backoff.mjs";
+import { callHaiku } from "./lib/haiku-call.mjs";
+import { summarize as rollingSummarize } from "./lib/rolling-summarizer.mjs";
 
 // ---------------------------------------------------------------------------
 // Account management CLI prompts
@@ -4044,6 +4046,70 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       // (requires chat.messages.transform accumulator). Module exists at
       // lib/rolling-summarizer.mjs — call summarize(messages, {haikuCall}) here
       // behind config.token_economy.rolling_summarizer when messages are available.
+    },
+    /**
+     * B3 L2 Option C: Plugin-generated compaction summary.
+     *
+     * When the opencode fork exposes `experimental.session.summarize` (added
+     * as a sibling to experimental.session.compacting in the fork's plugin
+     * interface), and the user has opted into
+     * token_economy_strategies.haiku_rolling_summary, this handler calls
+     * claude-haiku-4-5-20251001 at temperature 0 to produce a deterministic,
+     * byte-stable summary — short-circuiting opencode's model-based
+     * summarizer entirely. On ANY failure (OAuth, network, rate limit,
+     * Haiku error, malformed response), leaves output.summary undefined so
+     * opencode falls through to its default path.
+     */
+    "experimental.session.summarize": async (input, output) => {
+      if (!config?.token_economy_strategies?.haiku_rolling_summary) return;
+      if (!accountManager) return;
+
+      try {
+        const account = accountManager.getCurrentAccount();
+        if (!account) return;
+
+        const getAccessToken = async () => {
+          let tok = account.access;
+          if (!tok || !account.expires || account.expires < Date.now()) {
+            tok = await refreshAccountTokenSingleFlight(account);
+          }
+          if (!tok) throw new Error("no access token available for Haiku call");
+          return tok;
+        };
+
+        // Capture tokens/cost via closure — rollingSummarize only returns
+        // the summary string, but we want the per-call telemetry too.
+        let capturedTokens = { input: 0, output: 0 };
+        let capturedCost = 0;
+        const haikuCall = async (request) => {
+          const r = await callHaiku({
+            prompt: request.prompt,
+            fetch: globalThis.fetch,
+            getAccessToken,
+          });
+          capturedTokens = r.tokens;
+          capturedCost = r.cost;
+          return r.text;
+        };
+
+        const summaryText = await rollingSummarize(input.messages, { haikuCall });
+        if (typeof summaryText !== "string" || summaryText.length === 0) return;
+
+        output.summary = summaryText;
+        output.modelID = "claude-haiku-4-5-20251001";
+        output.providerID = "anthropic";
+        output.tokens = capturedTokens;
+        output.cost = capturedCost;
+      } catch (err) {
+        // Fall-through: leave output.summary undefined so opencode uses
+        // its default model-based summarizer. Log for the user's benefit.
+        if (typeof console !== "undefined" && console.warn) {
+          const msg = err && typeof err === "object" && "message" in err ? err.message : String(err);
+          console.warn(
+            `[opencode-anthropic-fix] haiku rolling summary failed; falling back to default compaction: ${msg}`,
+          );
+        }
+      }
     },
   };
 }
