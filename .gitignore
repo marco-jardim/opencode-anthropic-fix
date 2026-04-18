@@ -3,6 +3,16 @@ _analysis/
 _tmp_*/
 tmp/
 *.tgz
+
+# scripts/ — only build.mjs, install.mjs, and README.md are tracked.
+# Everything else is reverse-engineering / debugging scaffolding.
+scripts/mitm/
+scripts/capture/
+scripts/extract/
+scripts/bisect/
+scripts/verify/
+scripts/replay/
+scripts/analyze/
 .env
 .env.*
 nul
