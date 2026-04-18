@@ -184,6 +184,35 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
     lastHeader: null,
   };
 
+  // Context-hint controller (CC v2.1.110+). Mirrors real CC's `createContextHintController`:
+  // sticky on across requests until the server responds with a specific error family.
+  //   - 422/424 → apply hint compaction (clear thinking + microcompact) and retry
+  //   - 400 "Unexpected value" + "anthropic-beta" → disable for session (beta unsupported)
+  //   - 409      → disable for session (conflict)
+  //   - 529 / overloaded → disable for session (temporary overload)
+  // When disabled, we strip context-hint from betas + body on subsequent requests so
+  // we don't keep triggering the same rejection and churning the cache.
+  const contextHintState = {
+    /** Permanently disabled for this session after a server rejection. */
+    disabled: false,
+    /** Number of 422/424 compactions applied this session (for telemetry). */
+    compactionsApplied: 0,
+  };
+
+  // Token economy — session state for layered compaction strategies.
+  const tokenEconomySession = {
+    /** When thinking was last stripped (TTL-based strategy). 0 = never. */
+    lastThinkingStripMs: 0,
+    /** When proactive microcompact was last run (threshold-based). 0 = never. */
+    lastMicrocompactMs: 0,
+    /** Running count of tool_results client-compacted this session. */
+    toolResultsCompacted: 0,
+    /** Running count of thinking blocks stripped this session. */
+    thinkingStripped: 0,
+    /** Map of content-hash → first-seen tool_use_id for cross-turn dedupe. */
+    seenContentHashes: new Map(),
+  };
+
   // Cache TTL session latching: latch the cache policy at session start
   // so mid-session toggles don't bust the server-side prompt cache.
   let sessionCachePolicyLatched = false;
@@ -2712,8 +2741,19 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 
                 const _adaptiveOverride = _adaptiveOverrideForRequest;
 
-                // Token economy config (resolved once, passed to beta builder)
-                const _tokenEconomy = config.token_economy || {};
+                // Token economy config (resolved once, passed to beta builder).
+                // If the server has rejected context-hint this session, reflect it here
+                // so buildAnthropicBetaHeader (called again inside buildRequestHeaders)
+                // drops the beta on subsequent requests.
+                // Also classify the request role (CC's querySource analog) and
+                // suppress context-hint for non-main-thread requests so we don't
+                // opt subagent/title/tool one-shots into a server retry loop.
+                const _requestRole = classifyRequestRole(_parsedBodyOnce);
+                const _baseTE = config.token_economy || {};
+                const _disableCtxHint = contextHintState.disabled || _requestRole !== "main";
+                const _tokenEconomy = _disableCtxHint
+                  ? { ..._baseTE, context_hint: false, __requestRole: _requestRole }
+                  : { ..._baseTE, __requestRole: _requestRole };
 
                 // Microcompact: inject clear betas at high context utilization
                 let _microcompactBetas = null;
@@ -2769,6 +2809,12 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   // Merge latched betas that aren't in the current set
                   const merged = new Set(currentBetas);
                   for (const b of betaLatchState.sent) merged.add(b);
+                  // Context-hint kill switch: once server rejected it this session,
+                  // stop sending the beta (body field is gated on header, so it drops too).
+                  if (contextHintState.disabled) {
+                    merged.delete("context-hint-2026-04-09");
+                    betaLatchState.sent.delete("context-hint-2026-04-09");
+                  }
                   computedBetaHeader = [...merged].join(",");
                   betaLatchState.lastHeader = computedBetaHeader;
                 }
@@ -2807,6 +2853,8 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     accountId: getAccountIdentifier(account),
                     turns: sessionMetrics.turns,
                     usedTools: sessionMetrics.usedTools,
+                    tokenEconomySession,
+                    requestRole: _requestRole,
                   },
                   computedBetaHeader,
                   config,
@@ -3167,6 +3215,63 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     }
                   } catch {
                     // Ignore read errors in debug logging path.
+                  }
+
+                  // Context-hint protocol (CC v2.1.110+): detect server rejections and
+                  // apply the same disable/compact semantics as real Claude Code.
+                  //   - 400 w/ "Unexpected value" + "anthropic-beta" → beta unsupported, disable
+                  //   - 409 / 529 / overloaded                      → temporary, disable
+                  //   - 422 / 424                                    → compact messages (strip
+                  //     thinking blocks + old tool_result content) and retry ONCE.
+                  // Disable is permanent for the session; the beta latch strips it from future
+                  // requests so we don't keep triggering the same rejection.
+                  if (!contextHintState.disabled) {
+                    if (
+                      response.status === 400 &&
+                      errorBody &&
+                      errorBody.includes("Unexpected value") &&
+                      errorBody.includes("anthropic-beta") &&
+                      errorBody.includes("context-hint")
+                    ) {
+                      contextHintState.disabled = true;
+                      betaLatchState.dirty = true;
+                      debugLog("context-hint: beta rejected by server (400), disabling for session");
+                    } else if (response.status === 409) {
+                      contextHintState.disabled = true;
+                      betaLatchState.dirty = true;
+                      debugLog("context-hint: 409 conflict, disabling for session");
+                    } else if (response.status === 529 && errorBody && errorBody.includes("context_hint")) {
+                      contextHintState.disabled = true;
+                      betaLatchState.dirty = true;
+                      debugLog("context-hint: 529 overloaded referencing hint, disabling for session");
+                    } else if (
+                      (response.status === 422 || response.status === 424) &&
+                      !requestInit._contextHintCompactAttempted
+                    ) {
+                      try {
+                        const hintBody = JSON.parse(requestInit.body);
+                        if (Array.isArray(hintBody.messages)) {
+                          const compacted = applyContextHintCompaction(hintBody.messages);
+                          if (compacted.changed) {
+                            hintBody.messages = compacted.messages;
+                            requestInit.body = JSON.stringify(hintBody);
+                            _parsedBodyOnce = null;
+                            requestInit._contextHintCompactAttempted = true;
+                            contextHintState.compactionsApplied += 1;
+                            attempt--;
+                            toast(
+                              `⚙ Context hint compaction (${response.status}) — cleared ${compacted.stats.thinkingCleared} thinking / ${compacted.stats.toolResultsCleared} tool results`,
+                              "info",
+                              { debounceKey: "context-hint-compact" },
+                            ).catch(() => {});
+                            debugLog("context-hint: applied compaction on status", response.status, compacted.stats);
+                            continue;
+                          }
+                        }
+                      } catch {
+                        // fall through to normal error handling
+                      }
+                    }
                   }
 
                   // Reactive compaction: on "prompt too long" error, trim oldest messages and retry once
@@ -5077,17 +5182,25 @@ process.once("beforeExit", _beforeExitHandler);
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.107";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.114";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-04-14T03:13:25Z";
+const CLAUDE_CODE_BUILD_TIME = "2026-04-17T22:37:24Z";
 
 // The @anthropic-ai/sdk version bundled with Claude Code.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-// v2.1.107 switched from @anthropic-ai/sdk v0.208.0 to v0.81.0 (confirmed via proxy capture).
+// v2.1.107 switched from @anthropic-ai/sdk v0.208.0 to v0.81.0 (confirmed via bundle var x$H="0.81.0").
+// Still 0.81.0 in v2.1.114 (verified via strings extraction from native Bun binary).
 const ANTHROPIC_SDK_VERSION = "0.81.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.114", "0.81.0"],
+  ["2.1.113", "0.81.0"],
+  ["2.1.112", "0.81.0"],
+  ["2.1.111", "0.81.0"],
+  ["2.1.110", "0.81.0"],
+  ["2.1.109", "0.81.0"],
+  ["2.1.108", "0.81.0"],
   ["2.1.107", "0.81.0"],
   ["2.1.105", "0.81.0"],
   ["2.1.97", "0.208.0"],
@@ -5205,6 +5318,334 @@ function computeBillingCacheHash(firstUserMessage, version) {
  * @param {Array} messages — The messages array from the parsed request body
  * @returns {Array} — Repaired messages array
  */
+/**
+ * Apply context-hint compaction to a message array. Mirrors real CC's
+ * `applyHintEdits` (d85) + `qD4` microcompact: clears thinking/redacted_thinking
+ * blocks from assistant messages and replaces old tool_result content with a
+ * placeholder, keeping the last few tool results intact. Used on 422/424
+ * responses before retrying.
+ *
+ * @param {Array} messages — Parsed messages array
+ * @param {object} [opts]
+ * @param {number} [opts.keepRecentToolResults=8] — How many most-recent tool_result blocks to preserve verbatim
+ * @param {string} [opts.clearedPlaceholder] — Replacement content for older tool_result blocks
+ * @returns {{ messages: Array, changed: boolean, stats: { thinkingCleared: number, toolResultsCleared: number } }}
+ */
+function applyContextHintCompaction(messages, opts = {}) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { messages, changed: false, stats: { thinkingCleared: 0, toolResultsCleared: 0 } };
+  }
+  const keepRecent = opts.keepRecentToolResults ?? 8;
+  const placeholder = opts.clearedPlaceholder ?? "[Old tool result content cleared]";
+
+  // First pass: count tool_result blocks so we know which are "old" vs "recent".
+  const toolResultRefs = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+    for (let j = 0; j < msg.content.length; j++) {
+      if (msg.content[j]?.type === "tool_result") {
+        toolResultRefs.push({ msgIdx: i, blockIdx: j });
+      }
+    }
+  }
+  const oldCutoff = Math.max(0, toolResultRefs.length - keepRecent);
+  const oldSet = new Set(toolResultRefs.slice(0, oldCutoff).map((r) => `${r.msgIdx}:${r.blockIdx}`));
+
+  let thinkingCleared = 0;
+  let toolResultsCleared = 0;
+  const out = messages.map((msg, i) => {
+    if (!Array.isArray(msg.content)) return msg;
+    if (msg.role === "assistant") {
+      const newContent = msg.content.filter((block) => {
+        if (block?.type === "thinking" || block?.type === "redacted_thinking") {
+          thinkingCleared += 1;
+          return false;
+        }
+        return true;
+      });
+      if (newContent.length !== msg.content.length) {
+        return { ...msg, content: newContent };
+      }
+      return msg;
+    }
+    if (msg.role === "user") {
+      let mutated = false;
+      const newContent = msg.content.map((block, j) => {
+        if (block?.type !== "tool_result") return block;
+        const key = `${i}:${j}`;
+        if (!oldSet.has(key)) return block;
+        toolResultsCleared += 1;
+        mutated = true;
+        // Replace content with placeholder, preserve tool_use_id
+        return {
+          ...block,
+          content: placeholder,
+        };
+      });
+      return mutated ? { ...msg, content: newContent } : msg;
+    }
+    return msg;
+  });
+
+  return {
+    messages: out,
+    changed: thinkingCleared > 0 || toolResultsCleared > 0,
+    stats: { thinkingCleared, toolResultsCleared },
+  };
+}
+
+/**
+ * TTL-based thinking strip. When the time since the last strip exceeds the
+ * cache TTL (roughly the point at which the prompt prefix cache would expire),
+ * remove all `thinking` / `redacted_thinking` blocks from prior assistant
+ * messages. Mirrors CC's `logThinkingClearLatched("ttl", ...)`.
+ *
+ * We keep the MOST RECENT assistant's thinking intact — chain-of-thought
+ * continuity for the current turn matters; older ones don't.
+ *
+ * @param {Array} messages
+ * @param {{ lastClearMs: number, ttlMs: number, now?: number }} ctx
+ * @returns {{ messages: Array, changed: boolean, cleared: number, ranStripAt: number }}
+ */
+function applyTtlThinkingStrip(messages, ctx) {
+  const now = ctx.now ?? Date.now();
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { messages, changed: false, cleared: 0, ranStripAt: ctx.lastClearMs };
+  }
+  if (ctx.lastClearMs > 0 && now - ctx.lastClearMs < ctx.ttlMs) {
+    return { messages, changed: false, cleared: 0, ranStripAt: ctx.lastClearMs };
+  }
+
+  // Find the last assistant message index — preserve its thinking.
+  let lastAsstIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "assistant") {
+      lastAsstIdx = i;
+      break;
+    }
+  }
+
+  let cleared = 0;
+  const out = messages.map((msg, i) => {
+    if (msg.role !== "assistant" || i === lastAsstIdx || !Array.isArray(msg.content)) {
+      return msg;
+    }
+    const newContent = msg.content.filter((b) => {
+      if (b?.type === "thinking" || b?.type === "redacted_thinking") {
+        cleared += 1;
+        return false;
+      }
+      return true;
+    });
+    return newContent.length !== msg.content.length ? { ...msg, content: newContent } : msg;
+  });
+
+  return { messages: out, changed: cleared > 0, cleared, ranStripAt: cleared > 0 ? now : ctx.lastClearMs };
+}
+
+/**
+ * Proactive microcompact — client-side, runs BEFORE the request goes out.
+ * At or above `percent` of the model's context window, replace old
+ * tool_result.content with a placeholder (keeping last `keepRecent` verbatim).
+ *
+ * Returns the new messages array + change stats.
+ *
+ * @param {Array} messages
+ * @param {{ estimatedTokens: number, contextWindow: number, percent: number, keepRecent: number }} ctx
+ * @returns {{ messages: Array, changed: boolean, cleared: number, triggered: boolean }}
+ */
+function applyProactiveMicrocompact(messages, ctx) {
+  const threshold = ctx.contextWindow * (ctx.percent / 100);
+  if (ctx.estimatedTokens < threshold) {
+    return { messages, changed: false, cleared: 0, triggered: false };
+  }
+  const result = applyContextHintCompaction(messages, { keepRecentToolResults: ctx.keepRecent });
+  return {
+    messages: result.messages,
+    changed: result.changed,
+    cleared: result.stats.toolResultsCleared,
+    triggered: true,
+  };
+}
+
+/**
+ * Stable tool ordering — sort tools by name so the system-prompt prefix stays
+ * cache-stable across turns. Safe: tool semantics are name-based, not index-based.
+ *
+ * @param {any[]} tools
+ * @returns {any[]}
+ */
+function applyStableToolOrdering(tools) {
+  if (!Array.isArray(tools) || tools.length < 2) return tools;
+  // Preserve a pinned "first" for tools whose position is load-bearing (none today).
+  return [...tools].sort((a, b) => {
+    const an = typeof a?.name === "string" ? a.name : "";
+    const bn = typeof b?.name === "string" ? b.name : "";
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  });
+}
+
+/**
+ * Tool schema deferral — replace the `input_schema` of deferred tools with a
+ * minimal placeholder until the tool has been invoked in this session.
+ *
+ * @param {any[]} tools
+ * @param {{ deferred: Set<string>, invoked: Set<string> }} ctx
+ * @returns {{ tools: any[], deferredCount: number }}
+ */
+function applyToolSchemaDeferral(tools, ctx) {
+  if (!Array.isArray(tools) || ctx.deferred.size === 0) {
+    return { tools, deferredCount: 0 };
+  }
+  let deferredCount = 0;
+  const out = tools.map((t) => {
+    const name = typeof t?.name === "string" ? t.name : "";
+    if (!ctx.deferred.has(name) || ctx.invoked.has(name)) return t;
+    deferredCount += 1;
+    // Minimal schema — `type:object` with no properties is accepted by the API.
+    return {
+      ...t,
+      input_schema: { type: "object", properties: {}, additionalProperties: true },
+    };
+  });
+  return { tools: out, deferredCount };
+}
+
+/**
+ * Adaptive thinking — zero the thinking budget for trivially simple follow-ups.
+ * "Simple" heuristic: most recent user message is short (<200 chars), no file
+ * references, and the conversation is past turn 1 (so we have context).
+ *
+ * @param {any} parsed Parsed request body (mutated in place if simple)
+ * @returns {{ applied: boolean, previousBudget: number | null }}
+ */
+function applyAdaptiveThinkingZero(parsed) {
+  if (!parsed || !parsed.thinking || parsed.thinking.type !== "enabled") {
+    return { applied: false, previousBudget: null };
+  }
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+  if (messages.length < 2) return { applied: false, previousBudget: null };
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== "user") return { applied: false, previousBudget: null };
+
+  let userText = "";
+  if (typeof last.content === "string") userText = last.content;
+  else if (Array.isArray(last.content)) {
+    for (const b of last.content) {
+      if (b?.type === "text" && typeof b.text === "string") userText += b.text;
+      if (b?.type === "tool_result") return { applied: false, previousBudget: null };
+    }
+  }
+  if (userText.length > 200) return { applied: false, previousBudget: null };
+  if (/\b(analyze|refactor|design|review|audit|plan)\b/i.test(userText)) {
+    return { applied: false, previousBudget: null };
+  }
+
+  const previousBudget = typeof parsed.thinking.budget_tokens === "number" ? parsed.thinking.budget_tokens : null;
+  // "Zero" means remove thinking entirely — API disallows budget_tokens:0.
+  delete parsed.thinking;
+  if (typeof parsed.temperature !== "number") parsed.temperature = 1;
+  return { applied: true, previousBudget };
+}
+
+/**
+ * Cross-turn tool_result dedupe — when the same (tool name, input) pair
+ * appeared earlier in the conversation, replace the later result content
+ * with a pointer string. Safe-set only: Read, Grep, Glob, LS.
+ *
+ * @param {Array} messages
+ * @param {{ seen: Map<string, string>, safeTools: Set<string> }} ctx
+ * @returns {{ messages: Array, changed: boolean, deduped: number }}
+ */
+function applyToolResultDedupe(messages, ctx) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { messages, changed: false, deduped: 0 };
+  }
+  // First pass: build map of tool_use_id → { name, inputHash } from assistant messages.
+  const idToKey = new Map();
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (const b of msg.content) {
+      if (b?.type !== "tool_use") continue;
+      if (!ctx.safeTools.has(b.name)) continue;
+      const inputStr = JSON.stringify(b.input ?? {});
+      idToKey.set(b.id, `${b.name}::${inputStr}`);
+    }
+  }
+
+  let deduped = 0;
+  const out = messages.map((msg) => {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) return msg;
+    let mutated = false;
+    const newContent = msg.content.map((b) => {
+      if (b?.type !== "tool_result") return b;
+      const key = idToKey.get(b.tool_use_id);
+      if (!key) return b;
+      const firstSeen = ctx.seen.get(key);
+      if (firstSeen && firstSeen !== b.tool_use_id) {
+        deduped += 1;
+        mutated = true;
+        return { ...b, content: `[Identical to tool_use_id=${firstSeen}]` };
+      }
+      if (!firstSeen) ctx.seen.set(key, b.tool_use_id);
+      return b;
+    });
+    return mutated ? { ...msg, content: newContent } : msg;
+  });
+
+  return { messages: out, changed: deduped > 0, deduped };
+}
+
+/**
+ * Trailing-summary trimmer — strip the final text block of past assistant
+ * messages if it looks like a summary (ends with "...done" / "summary" /
+ * numbered list / "I've X'd Y"). Only applies to messages past the last one.
+ *
+ * @param {Array} messages
+ * @returns {{ messages: Array, changed: boolean, trimmed: number }}
+ */
+function applyTrailingSummaryTrim(messages) {
+  if (!Array.isArray(messages) || messages.length < 2) {
+    return { messages, changed: false, trimmed: 0 };
+  }
+  const SUMMARY_PATTERNS = [
+    /\b(summary|summar(y|ised|ized)):/i,
+    /\bto summari[sz]e\b/i,
+    /^\s*in (summary|short|brief)/im,
+    /\bi['']ve (done|completed|implemented|added|updated|fixed) /i,
+    /\bthat's it\b/i,
+  ];
+
+  let lastAsstIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "assistant") {
+      lastAsstIdx = i;
+      break;
+    }
+  }
+
+  let trimmed = 0;
+  const out = messages.map((msg, i) => {
+    if (msg.role !== "assistant" || i === lastAsstIdx) return msg;
+    if (!Array.isArray(msg.content)) return msg;
+
+    const last = msg.content[msg.content.length - 1];
+    if (!last || last.type !== "text" || typeof last.text !== "string") return msg;
+    const text = last.text;
+    if (text.length < 80) return msg;
+    const isSummary = SUMMARY_PATTERNS.some((p) => p.test(text));
+    if (!isSummary) return msg;
+
+    trimmed += 1;
+    const newContent = msg.content.slice(0, -1);
+    if (newContent.length === 0) return msg; // keep at least one block
+    return { ...msg, content: newContent };
+  });
+
+  return { messages: out, changed: trimmed > 0, trimmed };
+}
+
 function repairOrphanedToolUseBlocks(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
@@ -5401,6 +5842,7 @@ const EXPERIMENTAL_BETA_FLAGS = new Set([
   "code-execution-2025-08-25",
   "compact-2026-01-12",
   "context-1m-2025-08-07",
+  "context-hint-2026-04-09",
   "context-management-2025-06-27",
   "fast-mode-2026-02-01",
   "files-api-2025-04-14",
@@ -5416,6 +5858,8 @@ const BETA_SHORTCUTS = new Map([
   ["1m", "context-1m-2025-08-07"],
   ["1m-context", "context-1m-2025-08-07"],
   ["context-1m", "context-1m-2025-08-07"],
+  ["context-hint", "context-hint-2026-04-09"],
+  ["hint", "context-hint-2026-04-09"],
   ["fast", "fast-mode-2026-02-01"],
   ["fast-mode", "fast-mode-2026-02-01"],
   ["opus-fast", "fast-mode-2026-02-01"],
@@ -5727,6 +6171,46 @@ function detectProvider(requestUrl) {
   if (host.includes("aiplatform") || host.includes("vertex")) return "vertex";
   if (host.includes("foundry") || host.includes("azure")) return "foundry";
   return "anthropic";
+}
+
+/**
+ * Classify a request by inferred role, mirroring CC's `querySource` gate.
+ * CC gates features like context-hint on `querySource.startsWith("repl_main_thread")`.
+ * We don't have that string on the wire, so we infer from body shape.
+ *
+ * Returns one of:
+ *   - "main"   → interactive main thread (long system, normal max_tokens, messages present)
+ *   - "title"  → title / name generation (tiny max_tokens, 1 message)
+ *   - "small"  → short background query (small max_tokens but not title)
+ *   - "empty"  → pre-warm / no messages
+ *   - "unknown" → treat as main for safety
+ *
+ * @param {any} parsed Parsed request body
+ * @returns {"main"|"title"|"small"|"empty"|"unknown"}
+ */
+function classifyRequestRole(parsed) {
+  if (!parsed || typeof parsed !== "object") return "unknown";
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+  const maxTokens = typeof parsed.max_tokens === "number" ? parsed.max_tokens : null;
+
+  if (messages.length === 0) return "empty";
+  if (maxTokens != null) {
+    if (maxTokens <= 256 && messages.length <= 2) return "title";
+    if (maxTokens <= 1024) return "small";
+  }
+  // System prompt length heuristic
+  let sysLen = 0;
+  if (typeof parsed.system === "string") {
+    sysLen = parsed.system.length;
+  } else if (Array.isArray(parsed.system)) {
+    for (const s of parsed.system) {
+      if (s && typeof s.text === "string") sysLen += s.text.length;
+    }
+  }
+  if (sysLen < 200 && messages.length <= 2 && (maxTokens == null || maxTokens <= 2048)) {
+    return "small";
+  }
+  return "main";
 }
 
 /**
@@ -6479,6 +6963,23 @@ function buildAnthropicBetaHeader(
     betas.push("advisor-tool-2026-03-01");
   }
 
+  // context-hint-2026-04-09 — introduced in CC v2.1.110. Paired with the body
+  // field `context_hint: { enabled: true }` (injected in transformRequestBody).
+  // Real CC gates it on includeFirstPartyBetas + querySource startsWith
+  // "repl_main_thread" (i.e. interactive sessions on 1P Anthropic only).
+  // Server responds with hints suggesting which messages to forget for
+  // token-efficient context compaction. Sticky: disabled permanently on
+  // 400/409/529 errors referencing the hint. Users can opt out via
+  // token_economy.context_hint = false.
+  const isFirstPartyProvider = provider !== "vertex" && provider !== "bedrock" && provider !== "mantle";
+  // Mimicry note: real CC gates context-hint on querySource.startsWith("repl_main_thread").
+  // We infer main-thread from body shape via classifyRequestRole and pass it via
+  // tokenEconomy.__requestRole. Treat absent marker as "main" for backward compat.
+  const _isMainThread = te.__requestRole == null || te.__requestRole === "main";
+  if (isFirstPartyProvider && !/claude-3-/i.test(model) && te.context_hint !== false && _isMainThread) {
+    betas.push("context-hint-2026-04-09");
+  }
+
   // Files API — scoped to file endpoints/references
   if (isFilesEndpoint || hasFileReferences) {
     betas.push("files-api-2025-04-14");
@@ -6900,6 +7401,92 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       parsed.messages = stripSlashCommandMessages(parsed.messages);
     }
 
+    // === Token economy: layered message/history compaction ===
+    // Only applies to main-thread requests (subagents/title-gen stay untouched).
+    // Strategies stack in order: TTL thinking strip → proactive microcompact →
+    // trailing-summary trim → tool_result dedupe. Each is independently gated.
+    const te = config?.token_economy || {};
+    const tes = runtime?.tokenEconomySession;
+    const isMainRole = runtime?.requestRole === "main" || runtime?.requestRole == null;
+
+    if (isMainRole && Array.isArray(parsed.messages) && tes) {
+      // (1) TTL-based thinking strip
+      if (te.ttl_thinking_strip !== false) {
+        const ttlMs = signature?.cachePolicy?.ttl === "5m" ? 5 * 60_000 : 60 * 60_000;
+        const res = applyTtlThinkingStrip(parsed.messages, {
+          lastClearMs: tes.lastThinkingStripMs,
+          ttlMs,
+        });
+        if (res.changed) {
+          parsed.messages = res.messages;
+          tes.lastThinkingStripMs = res.ranStripAt;
+          tes.thinkingStripped += res.cleared;
+        }
+      }
+
+      // (2) Proactive microcompact (client-side, pre-422)
+      if (te.proactive_microcompact !== false) {
+        const estimated = estimatePromptTokensFromParsed(parsed);
+        const cw = 200_000; // conservative — 1M models still benefit
+        const res = applyProactiveMicrocompact(parsed.messages, {
+          estimatedTokens: estimated,
+          contextWindow: cw,
+          percent: te.microcompact_percent ?? 70,
+          keepRecent: te.microcompact_keep_recent ?? 8,
+        });
+        if (res.changed) {
+          parsed.messages = res.messages;
+          tes.lastMicrocompactMs = Date.now();
+          tes.toolResultsCompacted += res.cleared;
+        }
+      }
+
+      // (3) Trailing-summary trim (opt-in)
+      if (te.trailing_summary_trim === true) {
+        const res = applyTrailingSummaryTrim(parsed.messages);
+        if (res.changed) parsed.messages = res.messages;
+      }
+
+      // (4) Cross-turn tool_result dedupe (opt-in)
+      if (te.tool_result_dedupe === true) {
+        const SAFE_READ_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "BashOutput"]);
+        const res = applyToolResultDedupe(parsed.messages, {
+          seen: tes.seenContentHashes,
+          safeTools: SAFE_READ_TOOLS,
+        });
+        if (res.changed) parsed.messages = res.messages;
+      }
+    }
+
+    // === Token economy: tool-array transforms (stable ordering, deferral) ===
+    if (isMainRole && Array.isArray(parsed.tools)) {
+      if (te.stable_tool_ordering !== false) {
+        parsed.tools = applyStableToolOrdering(parsed.tools);
+      }
+      if (Array.isArray(te.deferred_tool_names) && te.deferred_tool_names.length > 0) {
+        // "Invoked" means any assistant message in the convo has used the tool.
+        const invoked = new Set();
+        if (Array.isArray(parsed.messages)) {
+          for (const m of parsed.messages) {
+            if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+            for (const b of m.content) {
+              if (b?.type === "tool_use" && typeof b.name === "string") invoked.add(b.name);
+            }
+          }
+        }
+        const res = applyToolSchemaDeferral(parsed.tools, {
+          deferred: new Set(te.deferred_tool_names),
+          invoked,
+        });
+        parsed.tools = res.tools;
+      }
+    }
+
+    // === Token economy: adaptive thinking zero-out for trivial follow-ups ===
+    if (isMainRole && te.adaptive_thinking_zero_simple !== false) {
+      applyAdaptiveThinkingZero(parsed);
+    }
+
     // QA fix H2: avoid mutating the signature parameter; capture modelId locally
     const modelId = parsed.model || "";
     // Extract first user message text for billing hash computation (cch)
@@ -7112,10 +7699,48 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       }
     }
 
+    // Context hint (CC v2.1.110+): pair the context-hint-2026-04-09 beta with
+    // the body field context_hint:{enabled:true}. Extracted from CC bundle
+    // buildRequestParams(): `{betaHeader, body:{context_hint:{enabled:!0}}}`.
+    // When active, the server responds with optional hints suggesting which
+    // messages to drop for token-efficient context compaction.
+    if (betaHeader && betaHeader.includes("context-hint-2026-04-09") && !parsed.context_hint) {
+      parsed.context_hint = { enabled: true };
+    }
+
     // Fast mode: inject speed parameter for Opus 4.6 only (v2.1.97 restriction).
     // Real CC v2.1.97 xJ() checks: model.includes("opus-4-6") — Sonnet is NOT eligible.
     const fastModeEnabled = signature.fastMode && !isFalsyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_FAST_MODE);
-    if (fastModeEnabled && parsed.model && isOpus46Model(parsed.model)) {
+    let fastModeAutoApplied = false;
+    if (
+      !fastModeEnabled &&
+      te.fast_mode_auto === true &&
+      isMainRole &&
+      parsed.model &&
+      isOpus46Model(parsed.model) &&
+      Array.isArray(parsed.messages) &&
+      parsed.messages.length >= 2
+    ) {
+      // Simple exchange heuristic: last user message is short, no tool_result,
+      // no file references. Suggests a follow-up question that doesn't need
+      // deep reasoning.
+      const last = parsed.messages[parsed.messages.length - 1];
+      if (last && last.role === "user") {
+        let txt = "";
+        let hasToolResult = false;
+        if (typeof last.content === "string") txt = last.content;
+        else if (Array.isArray(last.content)) {
+          for (const b of last.content) {
+            if (b?.type === "tool_result") hasToolResult = true;
+            if (b?.type === "text" && typeof b.text === "string") txt += b.text;
+          }
+        }
+        if (!hasToolResult && txt.length < 240 && !/\bfile:|\.md\b|\.mjs\b|\.ts\b/i.test(txt)) {
+          fastModeAutoApplied = true;
+        }
+      }
+    }
+    if ((fastModeEnabled || fastModeAutoApplied) && parsed.model && isOpus46Model(parsed.model)) {
       parsed.speed = "fast";
     }
 

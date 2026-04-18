@@ -421,6 +421,140 @@ describe("Fix #6: 529 overloaded responses are retried", () => {
   }, 15000);
 });
 
+describe("Context-hint protocol (CC v2.1.110+)", () => {
+  let client, fetchFn;
+
+  // Context-hint defaults off (partial server rollout). Opt it in per test via
+  // a config override. Body shape must classify as "main" (long system prompt
+  // + non-trivial max_tokens + real messages) to match CC's querySource gate.
+  async function setupWithCtxHint() {
+    const original = await vi.importActual("../../lib/config.mjs");
+    const cfgFactory = () => ({
+      ...original.DEFAULT_CONFIG,
+      account_selection_strategy: "sticky",
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+      override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+      custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+      idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: true },
+    });
+    loadConfig.mockImplementation(cfgFactory);
+    return setupFetchFn(client);
+  }
+
+  const MAIN_THREAD_BODY = (messages = [{ role: "user", content: "hello" }]) => ({
+    model: "claude-sonnet-4-5",
+    max_tokens: 8000,
+    system: "x".repeat(300),
+    messages,
+  });
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    fetchFn = await setupWithCtxHint();
+  });
+
+  it("sends context-hint beta + body field on first request", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(MAIN_THREAD_BODY()),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
+    expect(JSON.parse(init.body).context_hint).toEqual({ enabled: true });
+  });
+
+  it("skips context-hint for non-main-thread requests (title-gen shape)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 100, // title-gen signal
+        messages: [{ role: "user", content: "pick a title" }],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
+    expect(JSON.parse(init.body).context_hint).toBeUndefined();
+  });
+
+  it("disables context-hint after 400 'Unexpected value / anthropic-beta / context-hint' rejection", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: { message: 'Unexpected value "context-hint-2026-04-09" in anthropic-beta header' },
+          }),
+          { status: 400 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(MAIN_THREAD_BODY()),
+    });
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(MAIN_THREAD_BODY()),
+    });
+
+    const [, secondInit] = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
+    expect(secondInit.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
+    expect(JSON.parse(secondInit.body).context_hint).toBeUndefined();
+  }, 15000);
+
+  it("compacts messages and retries on 422", async () => {
+    const heavyMessages = [
+      { role: "user", content: [{ type: "text", text: "Start" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "x".repeat(5000) },
+          { type: "text", text: "Okay." },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "old tool output" }],
+      },
+      { role: "assistant", content: [{ type: "text", text: "Done" }] },
+      { role: "user", content: [{ type: "text", text: "Next" }] },
+    ];
+
+    mockFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "context too large" } }), { status: 422 }))
+      .mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(MAIN_THREAD_BODY(heavyMessages)),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const [, retryInit] = mockFetch.mock.calls[1];
+    const retryBody = JSON.parse(retryInit.body);
+    const asst = retryBody.messages.find((m) => m.role === "assistant");
+    expect(asst.content.some((b) => b.type === "thinking")).toBe(false);
+  }, 15000);
+});
+
 describe("Fix #7: Telemetry session ID matches API session ID", () => {
   it("sessionId from API request matches (both derived from signatureSessionId)", async () => {
     // QA fix C5: replaced tautological test with real assertion.
@@ -931,7 +1065,7 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
-describe("E2E: Version is 2.1.107", () => {
+describe("E2E: Version is 2.1.114", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -940,17 +1074,17 @@ describe("E2E: Version is 2.1.107", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.107", async () => {
+  it("User-Agent contains 2.1.114", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.107");
+    expect(headers.get("user-agent")).toContain("2.1.114");
   });
 
-  it("billing header contains 2.1.107", async () => {
+  it("billing header contains 2.1.114", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.107");
+    expect(body.system[0].text).toContain("2.1.114");
   });
 });
 

@@ -2,6 +2,61 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.10] — 2026-04-17
+
+### Token-Economy Overhaul
+
+After benchmarking opencode vs. official Claude Code post-v2.1.110, opencode
+showed higher per-turn token usage. Re-reading CC 2.1.112's
+`createContextHintController` (`d6A`) revealed that context-hint is **purely
+error-driven** — there is no success-path hint parser in CC. The real source
+of the gap was missing client-side compaction strategies. This release ships
+eight new `token_economy` knobs (most default on) that match what CC does
+internally:
+
+| Flag                            | Default | What it does                                      |
+| ------------------------------- | ------- | ------------------------------------------------- |
+| `ttl_thinking_strip`            | `true`  | Strips stale `thinking` blocks past cache TTL     |
+| `proactive_microcompact`        | `true`  | Client-side compaction at `microcompact_percent`  |
+| `microcompact_percent`          | `70`    | Usage threshold for proactive compaction          |
+| `microcompact_keep_recent`      | `10`    | Recent turns preserved during compaction          |
+| `stable_tool_ordering`          | `true`  | Canonical tool array order for prefix-cache hits  |
+| `deferred_tool_names`           | `[…]`   | Tools replaced with name-only stubs until needed  |
+| `adaptive_thinking_zero_simple` | `true`  | Zeros thinking budget for trivial follow-ups      |
+| `tool_result_dedupe`            | `true`  | Cross-turn dedupe of identical tool_result blocks |
+| `fast_mode_auto`                | `false` | Opus 4.6 short-message auto fast-mode (opt-in)    |
+| `trailing_summary_trim`         | `true`  | Trims repetitive trailing summary blocks          |
+
+Transformer order in `transformRequestBody` (line ~7412): TTL strip →
+proactive microcompact → trailing summary trim → tool_result dedupe → stable
+tool ordering → schema deferral → adaptive thinking zero. All gated on the
+request classifying as `"main"` (see below). Session state lives in a new
+`tokenEconomySession` closure (line ~195).
+
+### Context-Hint Hardening
+
+- **Default flipped to opt-out**: `token_economy.context_hint = false`. The
+  `context-hint-2026-04-09` beta's server rollout is partial — uninvited
+  clients receive `400 Unexpected value(s) 'context-hint-2026-04-09' for the
+'anthropic-beta' header`, which was disrupting live sessions.
+- **querySource-style gate added**: real CC only sends context-hint when
+  `querySource.startsWith("repl_main_thread")`. We classify via body shape
+  in new `classifyRequestRole(parsed)` (line ~5907). Title-gen / subagent
+  shapes are now excluded even when the user opts in.
+- Role is threaded via `_tokenEconomy.__requestRole` so both
+  `buildAnthropicBetaHeader` call sites (latch + `buildRequestHeaders`) see
+  the same decision.
+
+### Tests
+
+- `test/conformance/regression.test.mjs`: 4 tests in "Context-hint protocol
+  (CC v2.1.110+)" using new `setupWithCtxHint()` + `MAIN_THREAD_BODY()`
+  helpers. Covers opt-in + main-thread body, title-gen exclusion, disable
+  state machine, and 422-retry compaction.
+- `index.test.mjs:2906`: default-off guard — asserts no beta + no body field
+  in the default config.
+- Full suite: **998/998 pass**.
+
 ## [0.1.1] — 2026-04-08
 
 ### Emulation Sync — Claude Code v2.1.97
