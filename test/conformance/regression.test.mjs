@@ -555,19 +555,56 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
   }, 15000);
 });
 
-describe("Role-scoped cache TTL (CC v2.1.110+ MoY parity)", () => {
-  // Real CC's MoY(querySource) emits `ttl:"1h"` only for an allowlist of query
-  // sources (repl_main_thread*, sdk, auto_mode). Everything else falls back to
-  // the 5m tier. We mirror this via classifyRequestRole: main → 1h, else → 5m.
+describe("Role-scoped cache TTL (opt-in; CC v2.1.110+ MoY parity)", () => {
+  // Default is 1h for all roles (user preference: long-running opencode sessions
+  // benefit from longer TTL even on title/small requests). Opting in via
+  // `role_scoped_cache_ttl: true` mirrors CC's MoY(querySource) allowlist:
+  // main-thread-shape → 1h, everything else → 5m (cheaper write tier).
   let client, fetchFn;
+
+  async function setupWithRoleScoped() {
+    const original = await vi.importActual("../../lib/config.mjs");
+    loadConfig.mockImplementation(() => ({
+      ...original.DEFAULT_CONFIG,
+      account_selection_strategy: "sticky",
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+      override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+      custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+      idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      token_economy: { ...original.DEFAULT_CONFIG.token_economy, role_scoped_cache_ttl: true },
+    }));
+    return setupFetchFn(client);
+  }
 
   beforeEach(async () => {
     vi.resetAllMocks();
     client = makeClient();
-    fetchFn = await setupFetchFn(client);
   });
 
-  it("uses ttl:1h on main-thread-shaped requests", async () => {
+  it("default (flag off): uses ttl:1h regardless of request shape", async () => {
+    fetchFn = await setupFetchFn(client);
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 512, // would classify as "small"
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    });
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    const lastUser = body.messages[body.messages.length - 1];
+    const lastBlock = Array.isArray(lastUser.content) ? lastUser.content[lastUser.content.length - 1] : null;
+    expect(lastBlock?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  it("opt-in: uses ttl:1h on main-thread-shaped requests", async () => {
+    fetchFn = await setupWithRoleScoped();
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -586,14 +623,15 @@ describe("Role-scoped cache TTL (CC v2.1.110+ MoY parity)", () => {
     expect(lastBlock?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
-  it("downgrades to ttl:5m for small/one-shot requests", async () => {
+  it("opt-in: downgrades to ttl:5m for small/one-shot requests", async () => {
+    fetchFn = await setupWithRoleScoped();
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
-        max_tokens: 512, // "small" signal
+        max_tokens: 512,
         messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
       }),
     });

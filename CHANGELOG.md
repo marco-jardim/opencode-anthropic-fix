@@ -2,6 +2,17 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.12] — 2026-04-17
+
+### `role_scoped_cache_ttl` default flipped off
+
+Per user feedback, long-running opencode sessions benefit from 1h TTL on all
+requests, not just main-thread. The role-scoped 5m downgrade was saving
+marginal cache-write cost on title/small requests at the expense of shorter
+cache lifetime for workflows that reuse those prefixes across multiple
+minutes. Flag stays available (opt-in) for users who want the CC-accurate
+`MoY` behavior.
+
 ## [0.1.11] — 2026-04-17
 
 ### Role-Scoped Cache TTL (CC v2.1.110+ `MoY` parity)
