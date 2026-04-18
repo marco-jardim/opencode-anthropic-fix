@@ -2913,8 +2913,12 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   _adaptiveOverride,
                   _tokenEconomy,
                 );
-                // v2.1.107: cch attestation via xxHash64(body, seed) & 0xFFFFF
-                const finalBody = await computeAndReplaceCCH(body);
+                // cch stays as the static "00000" placeholder — cc-107 and cc-108
+                // JS bundles both emit `cch=00000;` unconditionally in the billing
+                // header. The Bun-binary Attestation.zig xxHash64 mechanism lives in
+                // a SEPARATE header path, not in this body field. Re-hashing here
+                // mutates system[0] each turn, invalidating the prompt cache.
+                const finalBody = body;
 
                 // Opt-in: dump the OUTGOING body (post-cch) so diagnostics reflect
                 // exactly what went on the wire. Previously dumped `body` which

@@ -2,6 +2,48 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.19] — 2026-04-18
+
+### Fix — revert `cch` to static `00000` (restore prompt cache)
+
+The v2.1.107 "mimesis" commit (Apr 14, c59b80d) re-enabled dynamic
+`xxHash64(body, seed) & 0xFFFFF` computation for the `cch=` field inside
+`x-anthropic-billing-header`, injected into `system[0]`. Every request
+produced a different 5-hex `cch` → `system[0].text` mutated every turn
+→ Anthropic prompt cache invalidated on every request (cache_creation
+charged 1.25× on the full prefix, instead of cache_read at 0.1×).
+
+**Root-cause evidence** (both cli.js bundles):
+
+```
+cc-107/package/cli.js:  A=!(z==="bedrock"||z==="anthropicAws"||z==="mantle")?" cch=00000;":""
+cc-108/package/cli.js:  (identical)
+```
+
+Real Claude Code emits `cch=00000;` as a **string literal, unconditionally**
+for every non-Bedrock/AWS/Mantle provider. There is no hash computation
+in the cli.js path. The xxHash64 machinery lives in the Bun binary's
+`Attestation.zig`, which is a **separate attestation header** — not the
+`cch=` field in the billing header.
+
+The v0.1.1 CHANGELOG (Apr 8) already documented this:
+
+> "sending a computed `cch` with the server expecting `00000` caused
+> request rejection. This was the root cause of the v2.1.97 breakage."
+
+Mimesis means matching the bytes the real client emits, not computing
+everything that _looks_ computable. A hardcoded `"00000"` in cli.js is
+**more** faithful than any dynamic hash — dynamic diverges from real CC.
+
+**Fix** (`index.mjs:2917`): bypass `computeAndReplaceCCH` and ship the
+body with its static `cch=00000;` placeholder intact. `system[0]` is now
+byte-stable across turns within a session, so the prompt cache hits on
+every follow-up request.
+
+**Test update** (`test/conformance/regression.test.mjs`): the assertion
+now checks `toContain("cch=00000;")` instead of the `/cch=[0-9a-f]{5};/`
+regex. All 1060 tests pass across 46 files.
+
 ## [0.1.18] — 2026-04-18
 
 ### Fix — context-hint 400 rejection

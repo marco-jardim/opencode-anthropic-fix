@@ -97,11 +97,13 @@ var DEFAULT_CONFIG = {
     redact_thinking: false,
     /** Enable context-hint-2026-04-09 beta (CC v2.1.110+). When on, the server
      *  MAY reject 422/424 and trigger client-side compaction retries.
-     *  Server-side rollout is partial — many accounts 400-reject the beta.
-     *  Off by default; the plugin still mimics CC's error-handling semantics
-     *  when a user opts in. Even when on, the beta is only sent for requests
-     *  classified as "main-thread" (see classifyRequestRole). */
-    context_hint: false,
+     *  Default ON (Phase C2). Server-side gating + contextHintState.disabled
+     *  latching means compatible servers use it and incompatible ones fall
+     *  back cleanly via the 400/409/529 error paths. Explicit opt-out via
+     *  `token_economy.context_hint: false` is respected. Even when on, the
+     *  beta is only sent for requests classified as "main-thread" (see
+     *  classifyRequestRole). */
+    context_hint: true,
     /** Dump outgoing request bodies to
      *  `~/.opencode/opencode-anthropic-fix/request-dumps/` (rotating, last 10).
      *  Diagnostic tool — enable, run 3-4 conversation turns, ship the files
@@ -186,7 +188,12 @@ var DEFAULT_CONFIG = {
     /** Tool description compaction (strip example output). Default OFF. */
     tool_description_compaction: false,
     /** Adaptive tool set (main vs subagent roles). Default OFF. */
-    adaptive_tool_set: false
+    adaptive_tool_set: false,
+    /** Replace old reproducible-tool results (Read/Grep/Glob/LS) with stubs
+     *  when a later call with identical args produces a fresh result. Saves
+     *  10-20% on long sessions. Pure over message history → cache-stable.
+     *  Off by default (conservative mode territory). */
+    tool_result_dedupe_session_wide: false
   },
   /** Output cap: default max_tokens to save context window. */
   output_cap: {
@@ -560,7 +567,8 @@ function validateConfig(raw) {
       ),
       tool_deferral: typeof tes.tool_deferral === "boolean" ? tes.tool_deferral : DEFAULT_CONFIG.token_economy_strategies.tool_deferral,
       tool_description_compaction: typeof tes.tool_description_compaction === "boolean" ? tes.tool_description_compaction : DEFAULT_CONFIG.token_economy_strategies.tool_description_compaction,
-      adaptive_tool_set: typeof tes.adaptive_tool_set === "boolean" ? tes.adaptive_tool_set : DEFAULT_CONFIG.token_economy_strategies.adaptive_tool_set
+      adaptive_tool_set: typeof tes.adaptive_tool_set === "boolean" ? tes.adaptive_tool_set : DEFAULT_CONFIG.token_economy_strategies.adaptive_tool_set,
+      tool_result_dedupe_session_wide: typeof tes.tool_result_dedupe_session_wide === "boolean" ? tes.tool_result_dedupe_session_wide : DEFAULT_CONFIG.token_economy_strategies.tool_result_dedupe_session_wide
     };
   }
   if (raw.output_cap && typeof raw.output_cap === "object") {

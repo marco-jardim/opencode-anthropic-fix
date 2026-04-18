@@ -316,7 +316,8 @@ function validateConfig(raw) {
       ),
       tool_deferral: typeof tes.tool_deferral === "boolean" ? tes.tool_deferral : DEFAULT_CONFIG.token_economy_strategies.tool_deferral,
       tool_description_compaction: typeof tes.tool_description_compaction === "boolean" ? tes.tool_description_compaction : DEFAULT_CONFIG.token_economy_strategies.tool_description_compaction,
-      adaptive_tool_set: typeof tes.adaptive_tool_set === "boolean" ? tes.adaptive_tool_set : DEFAULT_CONFIG.token_economy_strategies.adaptive_tool_set
+      adaptive_tool_set: typeof tes.adaptive_tool_set === "boolean" ? tes.adaptive_tool_set : DEFAULT_CONFIG.token_economy_strategies.adaptive_tool_set,
+      tool_result_dedupe_session_wide: typeof tes.tool_result_dedupe_session_wide === "boolean" ? tes.tool_result_dedupe_session_wide : DEFAULT_CONFIG.token_economy_strategies.tool_result_dedupe_session_wide
     };
   }
   if (raw.output_cap && typeof raw.output_cap === "object") {
@@ -679,11 +680,13 @@ var init_config = __esm({
         redact_thinking: false,
         /** Enable context-hint-2026-04-09 beta (CC v2.1.110+). When on, the server
          *  MAY reject 422/424 and trigger client-side compaction retries.
-         *  Server-side rollout is partial — many accounts 400-reject the beta.
-         *  Off by default; the plugin still mimics CC's error-handling semantics
-         *  when a user opts in. Even when on, the beta is only sent for requests
-         *  classified as "main-thread" (see classifyRequestRole). */
-        context_hint: false,
+         *  Default ON (Phase C2). Server-side gating + contextHintState.disabled
+         *  latching means compatible servers use it and incompatible ones fall
+         *  back cleanly via the 400/409/529 error paths. Explicit opt-out via
+         *  `token_economy.context_hint: false` is respected. Even when on, the
+         *  beta is only sent for requests classified as "main-thread" (see
+         *  classifyRequestRole). */
+        context_hint: true,
         /** Dump outgoing request bodies to
          *  `~/.opencode/opencode-anthropic-fix/request-dumps/` (rotating, last 10).
          *  Diagnostic tool — enable, run 3-4 conversation turns, ship the files
@@ -768,7 +771,12 @@ var init_config = __esm({
         /** Tool description compaction (strip example output). Default OFF. */
         tool_description_compaction: false,
         /** Adaptive tool set (main vs subagent roles). Default OFF. */
-        adaptive_tool_set: false
+        adaptive_tool_set: false,
+        /** Replace old reproducible-tool results (Read/Grep/Glob/LS) with stubs
+         *  when a later call with identical args produces a fresh result. Saves
+         *  10-20% on long sessions. Pure over message history → cache-stable.
+         *  Off by default (conservative mode territory). */
+        tool_result_dedupe_session_wide: false
       },
       /** Output cap: default max_tokens to save context window. */
       output_cap: {
@@ -2902,8 +2910,8 @@ var init_cli = __esm({
 import { createInterface as createInterface2 } from "node:readline/promises";
 import { stdin as stdin2, stdout as stdout2 } from "node:process";
 import { randomBytes as randomBytes5, randomUUID, createHash as createHashCrypto } from "node:crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join5, resolve, basename } from "node:path";
+import { existsSync as existsSync5, mkdirSync as mkdirSync3, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join6, resolve, basename } from "node:path";
 
 // node_modules/xxhash-wasm/esm/xxhash-wasm.js
 var t = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 48, 8, 96, 3, 127, 127, 127, 1, 127, 96, 3, 127, 127, 127, 0, 96, 2, 127, 127, 0, 96, 1, 127, 1, 127, 96, 3, 127, 127, 126, 1, 126, 96, 3, 126, 127, 127, 1, 126, 96, 2, 127, 126, 0, 96, 1, 127, 1, 126, 3, 11, 10, 0, 0, 2, 1, 3, 4, 5, 6, 1, 7, 5, 3, 1, 0, 1, 7, 85, 9, 3, 109, 101, 109, 2, 0, 5, 120, 120, 104, 51, 50, 0, 0, 6, 105, 110, 105, 116, 51, 50, 0, 2, 8, 117, 112, 100, 97, 116, 101, 51, 50, 0, 3, 8, 100, 105, 103, 101, 115, 116, 51, 50, 0, 4, 5, 120, 120, 104, 54, 52, 0, 5, 6, 105, 110, 105, 116, 54, 52, 0, 7, 8, 117, 112, 100, 97, 116, 101, 54, 52, 0, 8, 8, 100, 105, 103, 101, 115, 116, 54, 52, 0, 9, 10, 251, 22, 10, 242, 1, 1, 4, 127, 32, 0, 32, 1, 106, 33, 3, 32, 1, 65, 16, 79, 4, 127, 32, 3, 65, 16, 107, 33, 6, 32, 2, 65, 168, 136, 141, 161, 2, 106, 33, 3, 32, 2, 65, 137, 235, 208, 208, 7, 107, 33, 4, 32, 2, 65, 207, 140, 162, 142, 6, 106, 33, 5, 3, 64, 32, 3, 32, 0, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 33, 3, 32, 4, 32, 0, 65, 4, 106, 34, 0, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 33, 4, 32, 2, 32, 0, 65, 4, 106, 34, 0, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 33, 2, 32, 5, 32, 0, 65, 4, 106, 34, 0, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 33, 5, 32, 6, 32, 0, 65, 4, 106, 34, 0, 79, 13, 0, 11, 32, 2, 65, 12, 119, 32, 5, 65, 18, 119, 106, 32, 4, 65, 7, 119, 106, 32, 3, 65, 1, 119, 106, 5, 32, 2, 65, 177, 207, 217, 178, 1, 106, 11, 32, 1, 106, 32, 0, 32, 1, 65, 15, 113, 16, 1, 11, 146, 1, 0, 32, 1, 32, 2, 106, 33, 2, 3, 64, 32, 1, 65, 4, 106, 32, 2, 75, 69, 4, 64, 32, 0, 32, 1, 40, 2, 0, 65, 189, 220, 202, 149, 124, 108, 106, 65, 17, 119, 65, 175, 214, 211, 190, 2, 108, 33, 0, 32, 1, 65, 4, 106, 33, 1, 12, 1, 11, 11, 3, 64, 32, 1, 32, 2, 79, 69, 4, 64, 32, 0, 32, 1, 45, 0, 0, 65, 177, 207, 217, 178, 1, 108, 106, 65, 11, 119, 65, 177, 243, 221, 241, 121, 108, 33, 0, 32, 1, 65, 1, 106, 33, 1, 12, 1, 11, 11, 32, 0, 32, 0, 65, 15, 118, 115, 65, 247, 148, 175, 175, 120, 108, 34, 0, 65, 13, 118, 32, 0, 115, 65, 189, 220, 202, 149, 124, 108, 34, 0, 65, 16, 118, 32, 0, 115, 11, 63, 0, 32, 0, 65, 8, 106, 32, 1, 65, 168, 136, 141, 161, 2, 106, 54, 2, 0, 32, 0, 65, 12, 106, 32, 1, 65, 137, 235, 208, 208, 7, 107, 54, 2, 0, 32, 0, 65, 16, 106, 32, 1, 54, 2, 0, 32, 0, 65, 20, 106, 32, 1, 65, 207, 140, 162, 142, 6, 106, 54, 2, 0, 11, 195, 4, 1, 6, 127, 32, 1, 32, 2, 106, 33, 6, 32, 0, 65, 24, 106, 33, 4, 32, 0, 65, 40, 106, 40, 2, 0, 33, 3, 32, 0, 32, 0, 40, 2, 0, 32, 2, 106, 54, 2, 0, 32, 0, 65, 4, 106, 34, 5, 32, 5, 40, 2, 0, 32, 2, 65, 16, 79, 32, 0, 40, 2, 0, 65, 16, 79, 114, 114, 54, 2, 0, 32, 2, 32, 3, 106, 65, 16, 73, 4, 64, 32, 3, 32, 4, 106, 32, 1, 32, 2, 252, 10, 0, 0, 32, 0, 65, 40, 106, 32, 2, 32, 3, 106, 54, 2, 0, 15, 11, 32, 3, 4, 64, 32, 3, 32, 4, 106, 32, 1, 65, 16, 32, 3, 107, 34, 2, 252, 10, 0, 0, 32, 0, 65, 8, 106, 34, 3, 32, 3, 40, 2, 0, 32, 4, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 54, 2, 0, 32, 0, 65, 12, 106, 34, 3, 32, 3, 40, 2, 0, 32, 4, 65, 4, 106, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 54, 2, 0, 32, 0, 65, 16, 106, 34, 3, 32, 3, 40, 2, 0, 32, 4, 65, 8, 106, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 54, 2, 0, 32, 0, 65, 20, 106, 34, 3, 32, 3, 40, 2, 0, 32, 4, 65, 12, 106, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 54, 2, 0, 32, 0, 65, 40, 106, 65, 0, 54, 2, 0, 32, 1, 32, 2, 106, 33, 1, 11, 32, 1, 32, 6, 65, 16, 107, 77, 4, 64, 32, 6, 65, 16, 107, 33, 8, 32, 0, 65, 8, 106, 40, 2, 0, 33, 2, 32, 0, 65, 12, 106, 40, 2, 0, 33, 3, 32, 0, 65, 16, 106, 40, 2, 0, 33, 5, 32, 0, 65, 20, 106, 40, 2, 0, 33, 7, 3, 64, 32, 2, 32, 1, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 33, 2, 32, 3, 32, 1, 65, 4, 106, 34, 1, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 33, 3, 32, 5, 32, 1, 65, 4, 106, 34, 1, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 33, 5, 32, 7, 32, 1, 65, 4, 106, 34, 1, 40, 2, 0, 65, 247, 148, 175, 175, 120, 108, 106, 65, 13, 119, 65, 177, 243, 221, 241, 121, 108, 33, 7, 32, 8, 32, 1, 65, 4, 106, 34, 1, 79, 13, 0, 11, 32, 0, 65, 8, 106, 32, 2, 54, 2, 0, 32, 0, 65, 12, 106, 32, 3, 54, 2, 0, 32, 0, 65, 16, 106, 32, 5, 54, 2, 0, 32, 0, 65, 20, 106, 32, 7, 54, 2, 0, 11, 32, 1, 32, 6, 73, 4, 64, 32, 4, 32, 1, 32, 6, 32, 1, 107, 34, 1, 252, 10, 0, 0, 32, 0, 65, 40, 106, 32, 1, 54, 2, 0, 11, 11, 97, 1, 1, 127, 32, 0, 65, 16, 106, 40, 2, 0, 33, 1, 32, 0, 65, 4, 106, 40, 2, 0, 4, 127, 32, 1, 65, 12, 119, 32, 0, 65, 20, 106, 40, 2, 0, 65, 18, 119, 106, 32, 0, 65, 12, 106, 40, 2, 0, 65, 7, 119, 106, 32, 0, 65, 8, 106, 40, 2, 0, 65, 1, 119, 106, 5, 32, 1, 65, 177, 207, 217, 178, 1, 106, 11, 32, 0, 40, 2, 0, 106, 32, 0, 65, 24, 106, 32, 0, 65, 40, 106, 40, 2, 0, 16, 1, 11, 255, 3, 2, 3, 126, 1, 127, 32, 0, 32, 1, 106, 33, 6, 32, 1, 65, 32, 79, 4, 126, 32, 6, 65, 32, 107, 33, 6, 32, 2, 66, 214, 235, 130, 238, 234, 253, 137, 245, 224, 0, 124, 33, 3, 32, 2, 66, 177, 169, 172, 193, 173, 184, 212, 166, 61, 125, 33, 4, 32, 2, 66, 249, 234, 208, 208, 231, 201, 161, 228, 225, 0, 124, 33, 5, 3, 64, 32, 3, 32, 0, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 3, 32, 4, 32, 0, 65, 8, 106, 34, 0, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 4, 32, 2, 32, 0, 65, 8, 106, 34, 0, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 2, 32, 5, 32, 0, 65, 8, 106, 34, 0, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 5, 32, 6, 32, 0, 65, 8, 106, 34, 0, 79, 13, 0, 11, 32, 2, 66, 12, 137, 32, 5, 66, 18, 137, 124, 32, 4, 66, 7, 137, 124, 32, 3, 66, 1, 137, 124, 32, 3, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 32, 4, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 32, 2, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 32, 5, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 5, 32, 2, 66, 197, 207, 217, 178, 241, 229, 186, 234, 39, 124, 11, 32, 1, 173, 124, 32, 0, 32, 1, 65, 31, 113, 16, 6, 11, 134, 2, 0, 32, 1, 32, 2, 106, 33, 2, 3, 64, 32, 2, 32, 1, 65, 8, 106, 79, 4, 64, 32, 1, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 32, 0, 133, 66, 27, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 33, 0, 32, 1, 65, 8, 106, 33, 1, 12, 1, 11, 11, 32, 1, 65, 4, 106, 32, 2, 77, 4, 64, 32, 0, 32, 1, 53, 2, 0, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 23, 137, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 249, 243, 221, 241, 153, 246, 153, 171, 22, 124, 33, 0, 32, 1, 65, 4, 106, 33, 1, 11, 3, 64, 32, 1, 32, 2, 73, 4, 64, 32, 0, 32, 1, 49, 0, 0, 66, 197, 207, 217, 178, 241, 229, 186, 234, 39, 126, 133, 66, 11, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 0, 32, 1, 65, 1, 106, 33, 1, 12, 1, 11, 11, 32, 0, 32, 0, 66, 33, 136, 133, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 34, 0, 32, 0, 66, 29, 136, 133, 66, 249, 243, 221, 241, 153, 246, 153, 171, 22, 126, 34, 0, 32, 0, 66, 32, 136, 133, 11, 77, 0, 32, 0, 65, 8, 106, 32, 1, 66, 214, 235, 130, 238, 234, 253, 137, 245, 224, 0, 124, 55, 3, 0, 32, 0, 65, 16, 106, 32, 1, 66, 177, 169, 172, 193, 173, 184, 212, 166, 61, 125, 55, 3, 0, 32, 0, 65, 24, 106, 32, 1, 55, 3, 0, 32, 0, 65, 32, 106, 32, 1, 66, 249, 234, 208, 208, 231, 201, 161, 228, 225, 0, 124, 55, 3, 0, 11, 244, 4, 2, 3, 127, 4, 126, 32, 1, 32, 2, 106, 33, 5, 32, 0, 65, 40, 106, 33, 4, 32, 0, 65, 200, 0, 106, 40, 2, 0, 33, 3, 32, 0, 32, 0, 41, 3, 0, 32, 2, 173, 124, 55, 3, 0, 32, 2, 32, 3, 106, 65, 32, 73, 4, 64, 32, 3, 32, 4, 106, 32, 1, 32, 2, 252, 10, 0, 0, 32, 0, 65, 200, 0, 106, 32, 2, 32, 3, 106, 54, 2, 0, 15, 11, 32, 3, 4, 64, 32, 3, 32, 4, 106, 32, 1, 65, 32, 32, 3, 107, 34, 2, 252, 10, 0, 0, 32, 0, 65, 8, 106, 34, 3, 32, 3, 41, 3, 0, 32, 4, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 55, 3, 0, 32, 0, 65, 16, 106, 34, 3, 32, 3, 41, 3, 0, 32, 4, 65, 8, 106, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 55, 3, 0, 32, 0, 65, 24, 106, 34, 3, 32, 3, 41, 3, 0, 32, 4, 65, 16, 106, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 55, 3, 0, 32, 0, 65, 32, 106, 34, 3, 32, 3, 41, 3, 0, 32, 4, 65, 24, 106, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 55, 3, 0, 32, 0, 65, 200, 0, 106, 65, 0, 54, 2, 0, 32, 1, 32, 2, 106, 33, 1, 11, 32, 1, 65, 32, 106, 32, 5, 77, 4, 64, 32, 5, 65, 32, 107, 33, 2, 32, 0, 65, 8, 106, 41, 3, 0, 33, 6, 32, 0, 65, 16, 106, 41, 3, 0, 33, 7, 32, 0, 65, 24, 106, 41, 3, 0, 33, 8, 32, 0, 65, 32, 106, 41, 3, 0, 33, 9, 3, 64, 32, 6, 32, 1, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 6, 32, 7, 32, 1, 65, 8, 106, 34, 1, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 7, 32, 8, 32, 1, 65, 8, 106, 34, 1, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 8, 32, 9, 32, 1, 65, 8, 106, 34, 1, 41, 3, 0, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 124, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 33, 9, 32, 2, 32, 1, 65, 8, 106, 34, 1, 79, 13, 0, 11, 32, 0, 65, 8, 106, 32, 6, 55, 3, 0, 32, 0, 65, 16, 106, 32, 7, 55, 3, 0, 32, 0, 65, 24, 106, 32, 8, 55, 3, 0, 32, 0, 65, 32, 106, 32, 9, 55, 3, 0, 11, 32, 1, 32, 5, 73, 4, 64, 32, 4, 32, 1, 32, 5, 32, 1, 107, 34, 1, 252, 10, 0, 0, 32, 0, 65, 200, 0, 106, 32, 1, 54, 2, 0, 11, 11, 188, 2, 1, 5, 126, 32, 0, 65, 24, 106, 41, 3, 0, 33, 1, 32, 0, 41, 3, 0, 34, 2, 66, 32, 90, 4, 126, 32, 0, 65, 8, 106, 41, 3, 0, 34, 3, 66, 1, 137, 32, 0, 65, 16, 106, 41, 3, 0, 34, 4, 66, 7, 137, 124, 32, 1, 66, 12, 137, 32, 0, 65, 32, 106, 41, 3, 0, 34, 5, 66, 18, 137, 124, 124, 32, 3, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 32, 4, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 32, 1, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 32, 5, 66, 207, 214, 211, 190, 210, 199, 171, 217, 66, 126, 66, 31, 137, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 133, 66, 135, 149, 175, 175, 152, 182, 222, 155, 158, 127, 126, 66, 157, 163, 181, 234, 131, 177, 141, 138, 250, 0, 125, 5, 32, 1, 66, 197, 207, 217, 178, 241, 229, 186, 234, 39, 124, 11, 32, 2, 124, 32, 0, 65, 40, 106, 32, 2, 66, 31, 131, 167, 16, 6, 11]);
@@ -3915,13 +3923,58 @@ var AccountManager = class _AccountManager {
 // index.mjs
 init_oauth();
 init_config();
+
+// lib/context-hint-persist.mjs
+init_config();
+import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3, join as join4 } from "node:path";
+var FLAG_FILENAME = "context-hint-disabled.flag";
+var FLAG_VERSION = 1;
+function getContextHintFlagPath() {
+  return join4(getConfigDir(), FLAG_FILENAME);
+}
+function loadContextHintDisabledFlag() {
+  const p = getContextHintFlagPath();
+  if (!existsSync4(p)) return { disabled: false };
+  try {
+    const raw = readFileSync4(p, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.disabled === true) {
+      return {
+        disabled: true,
+        reason: typeof parsed.reason === "string" ? parsed.reason : void 0,
+        status: typeof parsed.status === "number" ? parsed.status : void 0,
+        timestamp: typeof parsed.timestamp === "number" ? parsed.timestamp : void 0
+      };
+    }
+  } catch {
+  }
+  return { disabled: false };
+}
+function saveContextHintDisabledFlag({ reason, status }) {
+  const p = getContextHintFlagPath();
+  try {
+    mkdirSync2(dirname3(p), { recursive: true });
+    const payload = {
+      disabled: true,
+      reason,
+      status,
+      timestamp: Date.now(),
+      version: FLAG_VERSION
+    };
+    writeFileSync3(p, JSON.stringify(payload, null, 2), "utf-8");
+  } catch {
+  }
+}
+
+// index.mjs
 init_storage();
 
 // lib/refresh-lock.mjs
 init_storage();
 import { promises as fs2 } from "node:fs";
 import { createHash as createHash4, randomBytes as randomBytes4 } from "node:crypto";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { dirname as dirname4, join as join5 } from "node:path";
 var DEFAULT_LOCK_TIMEOUT_MS = 2e3;
 var DEFAULT_LOCK_BACKOFF_MS = 50;
 var DEFAULT_STALE_LOCK_MS = 2e4;
@@ -3930,14 +3983,14 @@ function delay(ms) {
 }
 function getLockPath(accountId) {
   const hash = createHash4("sha1").update(accountId).digest("hex").slice(0, 24);
-  return join4(dirname3(getStoragePath()), "locks", `refresh-${hash}.lock`);
+  return join5(dirname4(getStoragePath()), "locks", `refresh-${hash}.lock`);
 }
 async function acquireRefreshLock(accountId, options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
   const backoffMs = options.backoffMs ?? DEFAULT_LOCK_BACKOFF_MS;
   const staleMs = options.staleMs ?? DEFAULT_STALE_LOCK_MS;
   const lockPath = getLockPath(accountId);
-  const lockDir = dirname3(lockPath);
+  const lockDir = dirname4(lockPath);
   const deadline = Date.now() + Math.max(0, timeoutMs);
   const owner = randomBytes4(12).toString("hex");
   await fs2.mkdir(lockDir, { recursive: true });
@@ -4135,12 +4188,20 @@ async function AnthropicAuthPlugin({ client, project, directory, worktree, serve
     /** @type {string | null} The last computed beta header string (for latching). */
     lastHeader: null
   };
+  const _persistedCtxHint = loadContextHintDisabledFlag();
   const contextHintState = {
     /** Permanently disabled for this session after a server rejection. */
-    disabled: false,
+    disabled: _persistedCtxHint.disabled === true,
     /** Number of 422/424 compactions applied this session (for telemetry). */
     compactionsApplied: 0
   };
+  if (contextHintState.disabled) {
+    debugLog(
+      "context-hint: loaded persisted disable flag",
+      _persistedCtxHint.status ? `status=${_persistedCtxHint.status}` : "",
+      _persistedCtxHint.timestamp ? `ts=${new Date(_persistedCtxHint.timestamp).toISOString()}` : ""
+    );
+  }
   const tokenEconomySession = {
     /** When thinking was last stripped (TTL-based strategy). 0 = never. */
     lastThinkingStripMs: 0,
@@ -5189,13 +5250,13 @@ ${errMsg}`);
             return;
           }
           const resolvedPath = resolve(filePath);
-          if (!existsSync4(resolvedPath)) {
+          if (!existsSync5(resolvedPath)) {
             await sendCommandMessage(input.sessionID, `\u25A3 Anthropic Files (error)
 
 File not found: ${resolvedPath}`);
             return;
           }
-          const content = readFileSync4(resolvedPath);
+          const content = readFileSync5(resolvedPath);
           const filename = basename(resolvedPath);
           const blob = new Blob([content]);
           const form = new FormData();
@@ -5335,7 +5396,7 @@ Download failed (HTTP ${res.status}): ${errBody}`
             return;
           }
           const buffer = Buffer.from(await res.arrayBuffer());
-          writeFileSync3(savePath, buffer);
+          writeFileSync4(savePath, buffer);
           const sizeKB = (buffer.length / 1024).toFixed(1);
           await sendCommandMessage(
             input.sessionID,
@@ -6328,22 +6389,6 @@ ${message}`);
                     cacheBreakState._pendingHashes = currentHashes;
                   }
                 }
-                if (config.token_economy?.debug_dump_bodies === true && typeof body === "string") {
-                  try {
-                    const fs3 = await import("node:fs");
-                    const path = await import("node:path");
-                    const os = await import("node:os");
-                    const dir = path.join(os.homedir(), ".opencode", "opencode-anthropic-fix", "request-dumps");
-                    fs3.mkdirSync(dir, { recursive: true });
-                    const existing = fs3.readdirSync(dir).filter((f) => f.startsWith("req-") && f.endsWith(".json")).sort();
-                    while (existing.length >= 10) {
-                      fs3.unlinkSync(path.join(dir, existing.shift()));
-                    }
-                    const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-                    fs3.writeFileSync(path.join(dir, `req-${ts}.json`), body);
-                  } catch {
-                  }
-                }
                 const requestHeaders = buildRequestHeaders(
                   input,
                   requestInit,
@@ -6360,7 +6405,23 @@ ${message}`);
                   _adaptiveOverride,
                   _tokenEconomy
                 );
-                const finalBody = await computeAndReplaceCCH(body);
+                const finalBody = body;
+                if (config.token_economy?.debug_dump_bodies === true && typeof finalBody === "string") {
+                  try {
+                    const fs3 = await import("node:fs");
+                    const path = await import("node:path");
+                    const os = await import("node:os");
+                    const dir = path.join(os.homedir(), ".opencode", "opencode-anthropic-fix", "request-dumps");
+                    fs3.mkdirSync(dir, { recursive: true });
+                    const existing = fs3.readdirSync(dir).filter((f) => f.startsWith("req-") && f.endsWith(".json")).sort();
+                    while (existing.length >= 10) {
+                      fs3.unlinkSync(path.join(dir, existing.shift()));
+                    }
+                    const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+                    fs3.writeFileSync(path.join(dir, `req-${ts}.json`), finalBody);
+                  } catch {
+                  }
+                }
                 let response;
                 try {
                   response = await fetch(requestInput, {
@@ -6426,9 +6487,9 @@ ${message}`);
                   );
                   debugLog("ALL response headers:", allHeaders);
                   try {
-                    const { writeFileSync: writeFileSync4 } = await import("node:fs");
-                    const { join: join6 } = await import("node:path");
-                    const debugFile = join6(getConfigDir(), "debug-headers.log");
+                    const { writeFileSync: writeFileSync5 } = await import("node:fs");
+                    const { join: join7 } = await import("node:path");
+                    const debugFile = join7(getConfigDir(), "debug-headers.log");
                     const ts = (/* @__PURE__ */ new Date()).toISOString();
                     const entry = [
                       `
@@ -6437,7 +6498,7 @@ ${message}`);
                       `All headers: ${JSON.stringify(allHeaders, null, 2)}`,
                       ""
                     ].join("\n");
-                    writeFileSync4(debugFile, entry, { flag: "a" });
+                    writeFileSync5(debugFile, entry, { flag: "a" });
                   } catch (e2) {
                     debugLog("failed to write debug-headers.log", e2);
                   }
@@ -6615,15 +6676,25 @@ ${message}`);
                     if (response.status === 400 && errorBody && errorBody.includes("Unexpected value") && errorBody.includes("anthropic-beta") && errorBody.includes("context-hint")) {
                       contextHintState.disabled = true;
                       betaLatchState.dirty = true;
-                      debugLog("context-hint: beta rejected by server (400), disabling for session");
+                      saveContextHintDisabledFlag({
+                        reason: "beta_unsupported_400",
+                        status: 400
+                      });
+                      debugLog("context-hint: beta rejected by server (400), disabling + persisting");
+                      attempt--;
+                      continue;
                     } else if (response.status === 409) {
                       contextHintState.disabled = true;
                       betaLatchState.dirty = true;
                       debugLog("context-hint: 409 conflict, disabling for session");
+                      attempt--;
+                      continue;
                     } else if (response.status === 529 && errorBody && errorBody.includes("context_hint")) {
                       contextHintState.disabled = true;
                       betaLatchState.dirty = true;
                       debugLog("context-hint: 529 overloaded referencing hint, disabling for session");
+                      attempt--;
+                      continue;
                     } else if ((response.status === 422 || response.status === 424) && !requestInit._contextHintCompactAttempted) {
                       try {
                         const hintBody = JSON.parse(requestInit.body);
@@ -7781,7 +7852,7 @@ function getAverageCacheHitRate() {
 }
 function writeCacheStatsFile(usage, model, hitRate) {
   try {
-    const statsPath = join5(getConfigDir(), "cache-stats.json");
+    const statsPath = join6(getConfigDir(), "cache-stats.json");
     const avgHitRate = getAverageCacheHitRate();
     const totalPrompt = sessionMetrics.totalInput + sessionMetrics.totalCacheRead + sessionMetrics.totalCacheWrite;
     const sessionHitRate = totalPrompt > 0 ? sessionMetrics.totalCacheRead / totalPrompt : 0;
@@ -7819,7 +7890,7 @@ function writeCacheStatsFile(usage, model, hitRate) {
       },
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     };
-    writeFileSync3(statsPath, JSON.stringify(stats, null, 2));
+    writeFileSync4(statsPath, JSON.stringify(stats, null, 2));
   } catch {
   }
 }
@@ -7988,20 +8059,10 @@ var CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claud
 var CLAUDE_CODE_BUILD_TIME = "2026-04-17T22:37:24Z";
 var BILLING_HASH_SALT = "59cf53e54c78";
 var BILLING_HASH_INDICES = [4, 7, 20];
-var CCH_SEED = 0x6e52736ac806831en;
 var _xxh64Raw = null;
 var _xxhashReady = e().then((h) => {
   _xxh64Raw = h.h64Raw;
 });
-async function computeAndReplaceCCH(body) {
-  if (typeof body !== "string" || !body.includes("cch=00000")) return body;
-  await _xxhashReady;
-  if (!_xxh64Raw) return body;
-  const bodyBytes = Buffer.from(body, "utf-8");
-  const hash = _xxh64Raw(bodyBytes, CCH_SEED);
-  const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
-  return body.replace("cch=00000", `cch=${cch}`);
-}
 function computeBillingCacheHash(firstUserMessage, version) {
   const chars = BILLING_HASH_INDICES.map((i) => firstUserMessage[i] || "0").join("");
   const input = `${BILLING_HASH_SALT}${chars}${version}`;
@@ -8064,6 +8125,99 @@ function applyContextHintCompaction(messages, opts = {}) {
     changed: thinkingCleared > 0 || toolResultsCleared > 0,
     stats: { thinkingCleared, toolResultsCleared }
   };
+}
+var REPRODUCIBLE_TOOL_NAMES = /* @__PURE__ */ new Set(["read", "grep", "glob", "ls", "list", "find"]);
+function titleCaseToolName(name) {
+  if (typeof name !== "string" || name.length === 0) return "";
+  return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+}
+function stableStringifyForDedupe(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return "[" + value.map((v) => stableStringifyForDedupe(v)).join(",") + "]";
+  }
+  const keys = Object.keys(value).sort();
+  const parts = [];
+  for (const k of keys) {
+    parts.push(JSON.stringify(k) + ":" + stableStringifyForDedupe(value[k]));
+  }
+  return "{" + parts.join(",") + "}";
+}
+function applySessionToolResultDedupe(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { messages, changed: false, stats: { deduped: 0 } };
+  }
+  const idToMeta = /* @__PURE__ */ new Map();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block?.type !== "tool_use") continue;
+      const name = typeof block.name === "string" ? block.name : "";
+      if (!REPRODUCIBLE_TOOL_NAMES.has(name.toLowerCase())) continue;
+      const argsKey = stableStringifyForDedupe(block.input ?? {});
+      idToMeta.set(block.id, { name, argsKey });
+    }
+  }
+  const groups = /* @__PURE__ */ new Map();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "user" || !Array.isArray(msg.content)) continue;
+    for (let j = 0; j < msg.content.length; j++) {
+      const block = msg.content[j];
+      if (block?.type !== "tool_result") continue;
+      const meta = idToMeta.get(block.tool_use_id);
+      if (!meta) continue;
+      const groupKey = meta.name.toLowerCase() + "\0" + meta.argsKey;
+      let arr = groups.get(groupKey);
+      if (!arr) {
+        arr = [];
+        groups.set(groupKey, arr);
+      }
+      arr.push({
+        msgIdx: i,
+        blockIdx: j,
+        toolUseId: block.tool_use_id,
+        name: meta.name,
+        argsKey: meta.argsKey
+      });
+    }
+  }
+  const supersedeStubs = /* @__PURE__ */ new Map();
+  let deduped = 0;
+  const sortedEntries = Array.from(groups.entries()).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  for (const [, occurrences] of sortedEntries) {
+    if (occurrences.length < 2) continue;
+    const latest = occurrences[occurrences.length - 1];
+    const stub = "[" + titleCaseToolName(latest.name) + " of " + latest.argsKey + " superseded by later read at msg #" + latest.msgIdx + "]";
+    for (let k = 0; k < occurrences.length - 1; k++) {
+      const occ = occurrences[k];
+      supersedeStubs.set(occ.msgIdx + ":" + occ.blockIdx, stub);
+      deduped += 1;
+    }
+  }
+  if (deduped === 0) {
+    return { messages, changed: false, stats: { deduped: 0 } };
+  }
+  const out = messages.map((msg, i) => {
+    if (msg?.role !== "user" || !Array.isArray(msg.content)) return msg;
+    let mutated = false;
+    const newContent = msg.content.map((block, j) => {
+      if (block?.type !== "tool_result") return block;
+      const stub = supersedeStubs.get(i + ":" + j);
+      if (!stub) return block;
+      mutated = true;
+      return { ...block, content: stub };
+    });
+    return mutated ? { ...msg, content: newContent } : msg;
+  });
+  return { messages: out, changed: true, stats: { deduped } };
+}
+function maybeApplySessionToolResultDedupe(messages, config) {
+  const flag = config?.token_economy_strategies?.tool_result_dedupe_session_wide;
+  if (flag !== true) return messages;
+  const result = applySessionToolResultDedupe(messages);
+  return result.messages;
 }
 function applyTtlThinkingStrip(messages, ctx) {
   const now = ctx.now ?? Date.now();
@@ -8432,18 +8586,18 @@ var ANTI_VERBOSITY_SYSTEM_PROMPT = [
 var NUMERIC_LENGTH_ANCHORS_PROMPT = "Length limits: keep text between tool calls to \u226425 words. Keep final responses to \u2264100 words unless the task requires more detail.";
 function getOrCreateDeviceId() {
   const configDir = getConfigDir();
-  const userIdPath = join5(configDir, USER_ID_STORAGE_FILE);
+  const userIdPath = join6(configDir, USER_ID_STORAGE_FILE);
   try {
-    if (existsSync4(userIdPath)) {
-      const existing = readFileSync4(userIdPath, "utf-8").trim();
+    if (existsSync5(userIdPath)) {
+      const existing = readFileSync5(userIdPath, "utf-8").trim();
       if (existing && /^[0-9a-f]{64}$/.test(existing)) return existing;
     }
   } catch {
   }
   const generated = randomBytes5(32).toString("hex");
   try {
-    mkdirSync2(configDir, { recursive: true });
-    writeFileSync3(userIdPath, `${generated}
+    mkdirSync3(configDir, { recursive: true });
+    writeFileSync4(userIdPath, `${generated}
 `, { encoding: "utf-8", mode: 384 });
   } catch {
   }
@@ -9199,6 +9353,10 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
           tes.thinkingStripped += res.cleared;
         }
       }
+      if (config?.token_economy_strategies?.tool_result_dedupe_session_wide === true) {
+        const res = applySessionToolResultDedupe(parsed.messages);
+        if (res.changed) parsed.messages = res.messages;
+      }
       if (te.proactive_microcompact !== false) {
         const estimated = estimatePromptTokensFromParsed(parsed);
         const cw = 2e5;
@@ -9875,6 +10033,11 @@ AnthropicAuthPlugin.__testing__ = {
   buildSystemPromptBlocks,
   stripMcpPrefixFromParsedEvent,
   CORE_TOOL_NAMES,
+  // exposed for determinism regression tests (phase C1)
+  applyContextHintCompaction,
+  // exposed for session-dedupe regression tests (phase C3)
+  applySessionToolResultDedupe,
+  maybeApplySessionToolResultDedupe,
   get cachedCCPrompt() {
     return cachedCCPrompt;
   },

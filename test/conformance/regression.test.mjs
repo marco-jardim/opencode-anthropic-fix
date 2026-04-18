@@ -1097,9 +1097,10 @@ describe("E2E: System prompt block ordering invariants", () => {
     expect(body.system.length).toBeGreaterThanOrEqual(3);
     // Block 0: billing
     expect(body.system[0].text).toContain("x-anthropic-billing-header:");
-    // cch starts as "00000" placeholder, replaced post-serialization by computeAndReplaceCCH()
-    // In test context (no xxhash-wasm), the placeholder may remain
-    expect(body.system[0].text).toMatch(/cch=[0-9a-f]{5};/);
+    // cch is the static "00000" placeholder — matches cc-107/108 cli.js bundles,
+    // which emit `cch=00000;` unconditionally. Any per-request mutation of
+    // system[0] would break the prompt cache on every turn.
+    expect(body.system[0].text).toContain("cch=00000;");
     expect(body.system[0].cache_control).toBeUndefined();
     // Block 1: identity (same TTL as other cached blocks)
     expect(body.system[1].text).toContain("Claude Code");
