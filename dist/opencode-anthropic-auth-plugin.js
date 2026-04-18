@@ -317,7 +317,8 @@ function validateConfig(raw) {
       tool_deferral: typeof tes.tool_deferral === "boolean" ? tes.tool_deferral : DEFAULT_CONFIG.token_economy_strategies.tool_deferral,
       tool_description_compaction: typeof tes.tool_description_compaction === "boolean" ? tes.tool_description_compaction : DEFAULT_CONFIG.token_economy_strategies.tool_description_compaction,
       adaptive_tool_set: typeof tes.adaptive_tool_set === "boolean" ? tes.adaptive_tool_set : DEFAULT_CONFIG.token_economy_strategies.adaptive_tool_set,
-      tool_result_dedupe_session_wide: typeof tes.tool_result_dedupe_session_wide === "boolean" ? tes.tool_result_dedupe_session_wide : DEFAULT_CONFIG.token_economy_strategies.tool_result_dedupe_session_wide
+      tool_result_dedupe_session_wide: typeof tes.tool_result_dedupe_session_wide === "boolean" ? tes.tool_result_dedupe_session_wide : DEFAULT_CONFIG.token_economy_strategies.tool_result_dedupe_session_wide,
+      haiku_rolling_summary: typeof tes.haiku_rolling_summary === "boolean" ? tes.haiku_rolling_summary : DEFAULT_CONFIG.token_economy_strategies.haiku_rolling_summary
     };
   }
   if (raw.output_cap && typeof raw.output_cap === "object") {
@@ -776,7 +777,13 @@ var init_config = __esm({
          *  when a later call with identical args produces a fresh result. Saves
          *  10-20% on long sessions. Pure over message history → cache-stable.
          *  Off by default (conservative mode territory). */
-        tool_result_dedupe_session_wide: false
+        tool_result_dedupe_session_wide: false,
+        /** Haiku rolling-summary compaction: when a matching opencode fork
+         *  exposes the `experimental.session.summarize` hook, the plugin calls
+         *  claude-haiku-4-5-20251001 at temperature 0 to produce the compaction
+         *  summary, bypassing the main model. Requires opencode fork support
+         *  — no-op without it. Off by default. */
+        haiku_rolling_summary: false
       },
       /** Output cap: default max_tokens to save context window. */
       output_cap: {
@@ -4074,6 +4081,172 @@ async function releaseRefreshLock(lock) {
 
 // index.mjs
 init_backoff();
+
+// lib/haiku-call.mjs
+var MODEL = "claude-haiku-4-5-20251001";
+var TEMPERATURE = 0;
+var MAX_TOKENS = 2048;
+var ANTHROPIC_VERSION = "2023-06-01";
+var API_URL = "https://api.anthropic.com/v1/messages";
+var PRICE_INPUT_PER_MTOK = 1;
+var PRICE_OUTPUT_PER_MTOK = 5;
+async function callHaiku({ prompt, fetch: fetch2, getAccessToken }) {
+  const token = await getAccessToken();
+  const res = await fetch2(API_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+      "anthropic-version": ANTHROPIC_VERSION
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      temperature: TEMPERATURE,
+      max_tokens: MAX_TOKENS,
+      messages: [{ role: "user", content: [{ type: "text", text: prompt }] }]
+    })
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Haiku call failed: HTTP ${res.status} ${body}`);
+  }
+  const json = await res.json();
+  const textBlock = (json.content ?? []).find((b) => b.type === "text");
+  if (!textBlock || typeof textBlock.text !== "string" || textBlock.text.length === 0) {
+    throw new Error("Haiku response has no text content");
+  }
+  const input = json.usage?.input_tokens ?? 0;
+  const output = json.usage?.output_tokens ?? 0;
+  const cost = input / 1e6 * PRICE_INPUT_PER_MTOK + output / 1e6 * PRICE_OUTPUT_PER_MTOK;
+  return { text: textBlock.text, tokens: { input, output }, cost };
+}
+
+// lib/rolling-summarizer.mjs
+var MODEL2 = "claude-haiku-4-5-20251001";
+var TEMPERATURE2 = 0;
+var DEFAULT_MAX_CHARS = 2e3;
+var TEMPLATE = [
+  "<session-summary>",
+  "Previous conversation summarized for context efficiency.",
+  "",
+  "Key topics covered:",
+  "{topics}",
+  "",
+  "Outstanding state:",
+  "{outstanding}",
+  "",
+  "Files touched:",
+  "{files}",
+  "</session-summary>"
+].join("\n");
+var SECTIONS = ["TOPICS", "OUTSTANDING", "FILES"];
+var EMPTY_SECTION = "(none)";
+function stableStringify(obj) {
+  const keys = Object.keys(obj).sort();
+  const parts = keys.map((k) => JSON.stringify(k) + ":" + JSON.stringify(obj[k]));
+  return "{" + parts.join(",") + "}";
+}
+function buildPrompt(messages, maxChars) {
+  const rendered = messages.map((m) => {
+    const norm = stableStringify({ role: String(m.role ?? ""), content: String(m.content ?? "") });
+    const parsed = JSON.parse(norm);
+    return `${parsed.role}: ${parsed.content}`;
+  });
+  let body = rendered.join("\n");
+  let dropped = 0;
+  while (body.length > maxChars && rendered.length - dropped > 1) {
+    dropped += 1;
+    body = rendered.slice(dropped).join("\n");
+  }
+  const header = [
+    "Summarize the conversation below for context compaction.",
+    "Respond with EXACTLY these three sections, in this order:",
+    "TOPICS:",
+    "- <bullet per topic>",
+    "OUTSTANDING:",
+    "- <bullet per outstanding item, or (none)>",
+    "FILES:",
+    "- <bullet per touched file, or (none)>",
+    "Do not include dates, times, IDs, greetings, or apologies.",
+    "---"
+  ].join("\n");
+  return `${header}
+${body}`;
+}
+function parseHaikuResponse(raw) {
+  const buckets = {};
+  for (const name of SECTIONS) buckets[name] = [];
+  let current = (
+    /** @type {string | null} */
+    null
+  );
+  const lines = String(raw ?? "").split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^([A-Z]+)\s*:\s*$/);
+    if (match && SECTIONS.includes(match[1])) {
+      current = match[1];
+      continue;
+    }
+    if (current && line.trim() !== "") {
+      buckets[current].push(line);
+    }
+  }
+  const pick = (name) => {
+    const arr = buckets[name];
+    if (!arr || arr.length === 0) return EMPTY_SECTION;
+    return arr.join("\n");
+  };
+  return {
+    topics: pick("TOPICS"),
+    outstanding: pick("OUTSTANDING"),
+    files: pick("FILES")
+  };
+}
+function formatTemplate(parsed, maxChars) {
+  let current = {
+    topics: parsed.topics || EMPTY_SECTION,
+    outstanding: parsed.outstanding || EMPTY_SECTION,
+    files: parsed.files || EMPTY_SECTION
+  };
+  const render = (sec) => TEMPLATE.replace("{topics}", sec.topics).replace("{outstanding}", sec.outstanding).replace("{files}", sec.files);
+  let out = render(current);
+  let guard = 0;
+  while (out.length > maxChars && guard < 1e3) {
+    guard += 1;
+    const names = (
+      /** @type {(keyof ParsedSections)[]} */
+      ["topics", "outstanding", "files"]
+    );
+    let longestName = names[0];
+    for (const n of names) {
+      if (current[n].length > current[longestName].length) longestName = n;
+    }
+    const longest = current[longestName];
+    if (longest.length <= EMPTY_SECTION.length) break;
+    const chop = Math.max(8, Math.floor(longest.length * 0.1));
+    current = { ...current, [longestName]: longest.slice(0, Math.max(EMPTY_SECTION.length, longest.length - chop)) };
+    out = render(current);
+  }
+  if (out.length > maxChars) {
+    const closing = "\n</session-summary>";
+    const head = out.slice(0, Math.max(0, maxChars - closing.length));
+    out = head + closing;
+  }
+  return out;
+}
+async function summarize(messages, opts) {
+  if (!opts || typeof opts.haikuCall !== "function") {
+    throw new Error("summarize() requires opts.haikuCall");
+  }
+  const maxChars = typeof opts.maxChars === "number" ? opts.maxChars : DEFAULT_MAX_CHARS;
+  const prompt = buildPrompt(Array.isArray(messages) ? messages : [], maxChars);
+  const request = { model: MODEL2, prompt, temperature: TEMPERATURE2 };
+  const raw = await opts.haikuCall(request);
+  const parsed = parseHaikuResponse(String(raw ?? ""));
+  return formatTemplate(parsed, maxChars);
+}
+
+// index.mjs
 async function promptAccountMenu(accountManager) {
   const accounts = accountManager.getAccountsSnapshot();
   const currentIndex = accountManager.getCurrentIndex();
@@ -4138,6 +4311,35 @@ async function promptManageAccounts(accountManager) {
     }
   } finally {
     rl.close();
+  }
+}
+async function runHaikuSessionSummarize({ config, getAccessToken, fetchFn, callHaikuFn, rollingSummarizeFn, logger }, input, output) {
+  if (!config?.token_economy_strategies?.haiku_rolling_summary) return;
+  try {
+    let capturedTokens = { input: 0, output: 0 };
+    let capturedCost = 0;
+    const haikuCall = async (request) => {
+      const r = await callHaikuFn({
+        prompt: request.prompt,
+        fetch: fetchFn,
+        getAccessToken
+      });
+      capturedTokens = r.tokens;
+      capturedCost = r.cost;
+      return r.text;
+    };
+    const summaryText = await rollingSummarizeFn(input.messages, { haikuCall });
+    if (typeof summaryText !== "string" || summaryText.length === 0) return;
+    output.summary = summaryText;
+    output.modelID = "claude-haiku-4-5-20251001";
+    output.providerID = "anthropic";
+    output.tokens = capturedTokens;
+    output.cost = capturedCost;
+  } catch (err) {
+    if (logger && typeof logger.warn === "function") {
+      const msg = err && typeof err === "object" && "message" in err ? err.message : String(err);
+      logger.warn(`[opencode-anthropic-fix] haiku rolling summary failed; falling back to default compaction: ${msg}`);
+    }
   }
 }
 async function AnthropicAuthPlugin({ client, project, directory, worktree, serverUrl, $ }) {
@@ -7247,6 +7449,38 @@ ${message}`);
         );
       }
       output.context.push(contextParts.join("\n"));
+    },
+    /**
+     * B3 L2 Option C: Plugin-generated compaction summary via Haiku.
+     * Gated on token_economy_strategies.haiku_rolling_summary. See
+     * runHaikuSessionSummarize at the top of this file for the full driver
+     * — the closure here only binds account/token/config state.
+     */
+    "experimental.session.summarize": async (input, output) => {
+      if (!config?.token_economy_strategies?.haiku_rolling_summary) return;
+      if (!accountManager) return;
+      const account = accountManager.getCurrentAccount();
+      if (!account) return;
+      const getAccessToken = async () => {
+        let tok = account.access;
+        if (!tok || !account.expires || account.expires < Date.now()) {
+          tok = await refreshAccountTokenSingleFlight(account);
+        }
+        if (!tok) throw new Error("no access token available for Haiku call");
+        return tok;
+      };
+      await runHaikuSessionSummarize(
+        {
+          config,
+          getAccessToken,
+          fetchFn: globalThis.fetch,
+          callHaikuFn: callHaiku,
+          rollingSummarizeFn: summarize,
+          logger: typeof console !== "undefined" ? console : void 0
+        },
+        input,
+        output
+      );
     }
   };
 }
@@ -10038,6 +10272,8 @@ AnthropicAuthPlugin.__testing__ = {
   // exposed for session-dedupe regression tests (phase C3)
   applySessionToolResultDedupe,
   maybeApplySessionToolResultDedupe,
+  // exposed for experimental.session.summarize integration tests
+  runHaikuSessionSummarize,
   get cachedCCPrompt() {
     return cachedCCPrompt;
   },

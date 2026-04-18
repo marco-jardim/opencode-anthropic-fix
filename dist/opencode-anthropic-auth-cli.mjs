@@ -193,7 +193,13 @@ var DEFAULT_CONFIG = {
      *  when a later call with identical args produces a fresh result. Saves
      *  10-20% on long sessions. Pure over message history → cache-stable.
      *  Off by default (conservative mode territory). */
-    tool_result_dedupe_session_wide: false
+    tool_result_dedupe_session_wide: false,
+    /** Haiku rolling-summary compaction: when a matching opencode fork
+     *  exposes the `experimental.session.summarize` hook, the plugin calls
+     *  claude-haiku-4-5-20251001 at temperature 0 to produce the compaction
+     *  summary, bypassing the main model. Requires opencode fork support
+     *  — no-op without it. Off by default. */
+    haiku_rolling_summary: false
   },
   /** Output cap: default max_tokens to save context window. */
   output_cap: {
@@ -568,7 +574,8 @@ function validateConfig(raw) {
       tool_deferral: typeof tes.tool_deferral === "boolean" ? tes.tool_deferral : DEFAULT_CONFIG.token_economy_strategies.tool_deferral,
       tool_description_compaction: typeof tes.tool_description_compaction === "boolean" ? tes.tool_description_compaction : DEFAULT_CONFIG.token_economy_strategies.tool_description_compaction,
       adaptive_tool_set: typeof tes.adaptive_tool_set === "boolean" ? tes.adaptive_tool_set : DEFAULT_CONFIG.token_economy_strategies.adaptive_tool_set,
-      tool_result_dedupe_session_wide: typeof tes.tool_result_dedupe_session_wide === "boolean" ? tes.tool_result_dedupe_session_wide : DEFAULT_CONFIG.token_economy_strategies.tool_result_dedupe_session_wide
+      tool_result_dedupe_session_wide: typeof tes.tool_result_dedupe_session_wide === "boolean" ? tes.tool_result_dedupe_session_wide : DEFAULT_CONFIG.token_economy_strategies.tool_result_dedupe_session_wide,
+      haiku_rolling_summary: typeof tes.haiku_rolling_summary === "boolean" ? tes.haiku_rolling_summary : DEFAULT_CONFIG.token_economy_strategies.haiku_rolling_summary
     };
   }
   if (raw.output_cap && typeof raw.output_cap === "object") {

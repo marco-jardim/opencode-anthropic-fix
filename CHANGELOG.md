@@ -2,6 +2,52 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.20] — 2026-04-18
+
+### Feature — Haiku rolling summary (opt-in, requires opencode fork with `experimental.session.summarize`)
+
+When the opencode fork exposes the new `experimental.session.summarize`
+hook (added this week as a sibling to `experimental.session.compacting`),
+the plugin can now generate session compaction summaries using
+`claude-haiku-4-5-20251001` at `temperature: 0` instead of the main model
+the user's session is running on. This short-circuits opencode's internal
+model-based summarizer entirely on the compaction turn.
+
+**Why it saves money:** Opus/Sonnet summarizing a large session costs
+~$0.50–$2.00 per compaction turn. Haiku costs ~$0.001–$0.005 for the
+same summarization. Beyond the per-turn cost, Haiku at temp 0 with the
+deterministic template in `lib/rolling-summarizer.mjs` produces
+byte-identical summaries for identical input, so the Anthropic prompt
+cache can reuse the summary prefix across the post-compaction session.
+
+**Enable** in `anthropic-auth.json`:
+
+```json
+{
+  "token_economy_strategies": {
+    "haiku_rolling_summary": true
+  }
+}
+```
+
+Default is `false` because the feature requires a matching version of the
+opencode fork (the `experimental.session.summarize` hook must exist). On
+forks without the hook, the handler is simply never called — zero overhead.
+Plugin gracefully falls through to opencode's default summarization when
+Haiku is unreachable (rate limit, network, OAuth) — users never get stuck
+without a summary.
+
+**New files:**
+
+- `lib/haiku-call.mjs` — OAuth-authenticated Anthropic Messages API caller
+  pinned to `claude-haiku-4-5-20251001`, `temperature: 0`,
+  `max_tokens: 2048`. Pure + dependency-injected for offline tests.
+
+**Schema additions:**
+
+- `token_economy_strategies.haiku_rolling_summary` (boolean, default
+  `false`).
+
 ## [0.1.19] — 2026-04-18
 
 ### Fix — revert `cch` to static `00000` (restore prompt cache)
