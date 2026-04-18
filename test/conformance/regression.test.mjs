@@ -1235,6 +1235,150 @@ describe("E2E: Thinking normalization", () => {
   });
 });
 
+describe("E2E: systemPromptTailing default (A2)", () => {
+  let client, fetchFn;
+
+  async function setupWithTailing(tailingOverride /* undefined = rely on default */) {
+    const original = await vi.importActual("../../lib/config.mjs");
+    // Override key only when the caller passes an explicit boolean, so the
+    // "default" test exercises the real DEFAULT_CONFIG.token_economy_strategies.
+    const strategies = { ...original.DEFAULT_CONFIG.token_economy_strategies };
+    if (typeof tailingOverride === "boolean") {
+      strategies.system_prompt_tailing = tailingOverride;
+      strategies.system_prompt_tail_turns = 6;
+      strategies.system_prompt_tail_max_chars = 2000;
+    }
+    const cfgFactory = () => ({
+      ...original.DEFAULT_CONFIG,
+      account_selection_strategy: "sticky",
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+      override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+      custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+      idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      token_economy_strategies: strategies,
+    });
+    loadConfig.mockImplementation(cfgFactory);
+    return setupFetchFn(client);
+  }
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    // sessionMetrics is a module-level singleton — reset turns so each test
+    // starts from a known state. Mock responses in this suite don't produce
+    // SSE usage callbacks, so we drive the counter explicitly via the test hook.
+    AnthropicAuthPlugin.__testing__.resetSessionMetricsForTest();
+    client = makeClient();
+  });
+
+  afterEach(() => {
+    AnthropicAuthPlugin.__testing__.resetSessionMetricsForTest();
+  });
+
+  // Build a realistic-looking multi-line system prompt large enough to exceed
+  // maxChars*2 (4000) and trigger tailing. `tailSystemBlock` splits on `\n`
+  // so a single-line blob is essentially uncompressable — simulate paragraphs.
+  function buildLongSystemText() {
+    const paragraph = "X".repeat(200);
+    const lines = [];
+    lines.push(paragraph); // first paragraph (identity) preserved
+    lines.push("");
+    for (let i = 0; i < 40; i++) {
+      // Neutral body text — no MUST/NEVER/CRITICAL/# headers/list markers, so
+      // tailing logic drops these lines and the block shrinks to first para + marker.
+      lines.push(paragraph);
+      lines.push("");
+    }
+    const text = lines.join("\n");
+    // Sanity: > 4000 so tailing condition (length > maxChars * 2) triggers.
+    if (text.length < 5000) throw new Error("test fixture too small: " + text.length);
+    return text;
+  }
+
+  async function setupWithoutStrategies() {
+    // User on an older config version with NO token_economy_strategies block
+    // → `config.token_economy_strategies?.system_prompt_tailing` is undefined.
+    // This is what catches regressions in the OPERATOR check (!== false would
+    // treat undefined as opt-in; === true treats undefined as opt-out).
+    const original = await vi.importActual("../../lib/config.mjs");
+    const cfgFactory = () => {
+      const c = {
+        ...original.DEFAULT_CONFIG,
+        account_selection_strategy: "sticky",
+        signature_emulation: {
+          ...original.DEFAULT_CONFIG.signature_emulation,
+          fetch_claude_code_version_on_startup: false,
+        },
+        override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+        custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+        idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      };
+      delete c.token_economy_strategies;
+      return c;
+    };
+    loadConfig.mockImplementation(cfgFactory);
+    return setupFetchFn(client);
+  }
+
+  it("long system prompt is NOT tailed at turn 6 when no strategies config is present", async () => {
+    // Guards the operator check: `=== true` (new) vs `!== false` (old).
+    // With no token_economy_strategies key, signature.systemPromptTailing is
+    // undefined; new operator → OFF, old operator → ON (implicit-on bug).
+    fetchFn = await setupWithoutStrategies();
+    AnthropicAuthPlugin.__testing__.setSessionTurnsForTest(6);
+    const longText = buildLongSystemText();
+    const { body } = await sendRequest(fetchFn, {
+      system: [{ type: "text", text: longText }],
+    });
+    for (const b of body.system) {
+      if (b.type === "text") {
+        expect(b.text).not.toContain("Verbose instructions trimmed");
+      }
+    }
+  });
+
+  it("long system prompt is NOT tailed at turn 6 by default (DEFAULT_CONFIG)", async () => {
+    // Do NOT pass any override — exercise the real DEFAULT_CONFIG path so
+    // this test fails if a future edit re-introduces implicit-on behavior
+    // by flipping the default from false back to true.
+    fetchFn = await setupWithTailing(undefined);
+    AnthropicAuthPlugin.__testing__.setSessionTurnsForTest(6);
+    const longText = buildLongSystemText();
+    const { body } = await sendRequest(fetchFn, {
+      system: [{ type: "text", text: longText }],
+    });
+    const textBlock = body.system.find((b) => b.type === "text" && b.text.includes("X".repeat(200)));
+    expect(textBlock).toBeDefined();
+    // Default is OFF — the huge X-block must survive at roughly its original size.
+    expect(textBlock.text.length).toBeGreaterThanOrEqual(longText.length - 200);
+    // And the tailing truncation marker must NOT appear anywhere.
+    for (const b of body.system) {
+      if (b.type === "text") {
+        expect(b.text).not.toContain("Verbose instructions trimmed");
+      }
+    }
+  });
+
+  it("systemPromptTailing: true opts back in", async () => {
+    fetchFn = await setupWithTailing(true);
+    AnthropicAuthPlugin.__testing__.setSessionTurnsForTest(6);
+
+    const longText = buildLongSystemText();
+    const { body } = await sendRequest(fetchFn, {
+      system: [{ type: "text", text: longText }],
+    });
+    // With opt-in, the long block must have been truncated below its original size.
+    const textBlock = body.system.find(
+      (b) => b.type === "text" && typeof b.text === "string" && b.text.startsWith("X".repeat(100)),
+    );
+    expect(textBlock).toBeDefined();
+    expect(textBlock.text.length).toBeLessThan(longText.length);
+    expect(textBlock.text).toContain("Verbose instructions trimmed");
+  });
+});
+
 describe("E2E: Version is 2.1.114", () => {
   let client, fetchFn;
 

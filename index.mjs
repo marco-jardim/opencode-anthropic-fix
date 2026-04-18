@@ -7602,7 +7602,7 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     // Preserves: first paragraph (identity/role), lines containing MUST/NEVER/CRITICAL/
     // IMPORTANT, section headers, and short blocks. Drops verbose body paragraphs.
     const tailThreshold = signature.systemPromptTailTurns ?? 6;
-    if (signature.systemPromptTailing !== false && runtime.turns >= tailThreshold && Array.isArray(parsed.system)) {
+    if (signature.systemPromptTailing === true && runtime.turns >= tailThreshold && Array.isArray(parsed.system)) {
       const maxChars = signature.systemPromptTailMaxChars ?? 2000;
       for (let i = 0; i < parsed.system.length; i++) {
         const block = parsed.system[i];
@@ -8619,6 +8619,21 @@ AnthropicAuthPlugin.__testing__ = {
   },
   SUBAGENT_CC_ANCHOR,
   CLAUDE_CODE_IDENTITY_STRING,
+  /** Test-only: drive the session turn counter so code paths gated on
+   *  `sessionMetrics.turns >= N` can be exercised without a real SSE stream. */
+  setSessionTurnsForTest(n) {
+    sessionMetrics.turns = n;
+  },
+  /** Test-only: reset session metrics between tests. */
+  resetSessionMetricsForTest() {
+    sessionMetrics.turns = 0;
+    sessionMetrics.totalInput = 0;
+    sessionMetrics.totalOutput = 0;
+    sessionMetrics.totalCacheRead = 0;
+    sessionMetrics.totalCacheWrite = 0;
+    sessionMetrics.totalWebSearchRequests = 0;
+    sessionMetrics.recentCacheRates = [];
+  },
 };
 
 export default AnthropicAuthPlugin;
