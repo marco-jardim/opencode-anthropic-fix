@@ -8621,6 +8621,8 @@ AnthropicAuthPlugin.__testing__ = {
   buildSystemPromptBlocks,
   stripMcpPrefixFromParsedEvent,
   CORE_TOOL_NAMES,
+  // exposed for determinism regression tests (phase C1)
+  applyContextHintCompaction,
   get cachedCCPrompt() {
     return cachedCCPrompt;
   },
