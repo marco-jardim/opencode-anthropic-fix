@@ -4016,49 +4016,59 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 /** Module-level config ref for functions outside AnthropicAuthPlugin closure. */
 let _pluginConfig = null;
 
-const sessionMetrics = {
-  turns: 0,
-  totalInput: 0,
-  totalOutput: 0,
-  totalCacheRead: 0,
-  totalCacheWrite: 0,
-  totalWebSearchRequests: 0,
-  recentCacheRates: [], // rolling window of last 5 turns
-  sessionCostUsd: 0,
-  costBreakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  sessionStartTime: Date.now(),
-  lastQuota: {
-    tokens: 0,
-    requests: 0,
-    inputTokens: 0,
-    updatedAt: 0,
-    // Window-based unified headers from response
-    fiveHour: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
-    sevenDay: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
-    // Overall/fallback/overage from response headers
-    overallStatus: null,
-    representativeClaim: null,
-    fallback: null,
-    fallbackPercentage: null,
-    overageStatus: null,
-    overageReason: null,
-    // Usage endpoint polling (A6)
-    lastPollAt: 0,
-  },
-  lastStopReason: null, // tracks most recent stop_reason for output cap escalation
-  perModel: {}, // Map<modelId, { input, output, cacheRead, cacheWrite, costUsd, turns }>
-  lastModelId: null,
-  lastRequestBody: null, // Last intercepted request body (JSON string, capped 2MB) for /anthropic context
-  /** Token budget tracking (A9) */
-  tokenBudget: {
-    limit: 0, // 0 = unset
-    used: 0, // accumulated output tokens
-    continuations: 0,
-    outputHistory: [], // last 5 output token deltas
-  },
-  /** Tools used in this session (populated from assistant tool_use blocks in messages) */
-  usedTools: new Set(),
-};
+/**
+ * Factory for the initial sessionMetrics shape. Returns a fresh object each
+ * call so the reset helper (and any future test hook) doesn't alias nested
+ * state (lastQuota, perModel, costBreakdown, tokenBudget, usedTools Set).
+ * Keep this in sync with the type annotation above.
+ */
+function createInitialSessionMetrics() {
+  return {
+    turns: 0,
+    totalInput: 0,
+    totalOutput: 0,
+    totalCacheRead: 0,
+    totalCacheWrite: 0,
+    totalWebSearchRequests: 0,
+    recentCacheRates: [], // rolling window of last 5 turns
+    sessionCostUsd: 0,
+    costBreakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    sessionStartTime: Date.now(),
+    lastQuota: {
+      tokens: 0,
+      requests: 0,
+      inputTokens: 0,
+      updatedAt: 0,
+      // Window-based unified headers from response
+      fiveHour: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
+      sevenDay: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
+      // Overall/fallback/overage from response headers
+      overallStatus: null,
+      representativeClaim: null,
+      fallback: null,
+      fallbackPercentage: null,
+      overageStatus: null,
+      overageReason: null,
+      // Usage endpoint polling (A6)
+      lastPollAt: 0,
+    },
+    lastStopReason: null, // tracks most recent stop_reason for output cap escalation
+    perModel: {}, // Map<modelId, { input, output, cacheRead, cacheWrite, costUsd, turns }>
+    lastModelId: null,
+    lastRequestBody: null, // Last intercepted request body (JSON string, capped 2MB) for /anthropic context
+    /** Token budget tracking (A9) */
+    tokenBudget: {
+      limit: 0, // 0 = unset
+      used: 0, // accumulated output tokens
+      continuations: 0,
+      outputHistory: [], // last 5 output token deltas
+    },
+    /** Tools used in this session (populated from assistant tool_use blocks in messages) */
+    usedTools: new Set(),
+  };
+}
+
+const sessionMetrics = createInitialSessionMetrics();
 
 // ---------------------------------------------------------------------------
 // Adaptive 1M context state
@@ -8624,15 +8634,18 @@ AnthropicAuthPlugin.__testing__ = {
   setSessionTurnsForTest(n) {
     sessionMetrics.turns = n;
   },
-  /** Test-only: reset session metrics between tests. */
+  /** Test-only: reset session metrics between tests.
+   *  Uses createInitialSessionMetrics() so every tracked field — including
+   *  nested objects (lastQuota, perModel, costBreakdown, tokenBudget) and the
+   *  usedTools Set — is restored to its initial value. Mutates the existing
+   *  sessionMetrics object in place because many module-level references
+   *  close over it. */
   resetSessionMetricsForTest() {
-    sessionMetrics.turns = 0;
-    sessionMetrics.totalInput = 0;
-    sessionMetrics.totalOutput = 0;
-    sessionMetrics.totalCacheRead = 0;
-    sessionMetrics.totalCacheWrite = 0;
-    sessionMetrics.totalWebSearchRequests = 0;
-    sessionMetrics.recentCacheRates = [];
+    const fresh = createInitialSessionMetrics();
+    for (const key of Object.keys(sessionMetrics)) {
+      delete sessionMetrics[key];
+    }
+    Object.assign(sessionMetrics, fresh);
   },
 };
 

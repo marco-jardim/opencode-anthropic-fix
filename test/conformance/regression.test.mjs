@@ -1337,6 +1337,11 @@ describe("E2E: systemPromptTailing default (A2)", () => {
         expect(b.text).not.toContain("Verbose instructions trimmed");
       }
     }
+    // Positive assertion: the long X-block must have survived intact
+    // (tolerance accounts for any CC identity-prefix injection).
+    const textBlock = body.system.find((b) => b.type === "text" && b.text.includes("X".repeat(200)));
+    expect(textBlock).toBeDefined();
+    expect(textBlock.text.length).toBeGreaterThanOrEqual(longText.length - 200);
   });
 
   it("long system prompt is NOT tailed at turn 6 by default (DEFAULT_CONFIG)", async () => {
