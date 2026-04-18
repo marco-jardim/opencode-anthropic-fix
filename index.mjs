@@ -2882,6 +2882,32 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   }
                 }
 
+                // Opt-in: dump outgoing request bodies to disk so the user can
+                // diff them across turns and see what's invalidating the cache.
+                // Rotates at 10 files to cap disk usage. Files live under
+                // ~/.opencode/opencode-anthropic-fix/request-dumps/.
+                if (config.token_economy?.debug_dump_bodies === true && typeof body === "string") {
+                  try {
+                    const fs = await import("node:fs");
+                    const path = await import("node:path");
+                    const os = await import("node:os");
+                    const dir = path.join(os.homedir(), ".opencode", "opencode-anthropic-fix", "request-dumps");
+                    fs.mkdirSync(dir, { recursive: true });
+                    // Rotate: keep last 10
+                    const existing = fs
+                      .readdirSync(dir)
+                      .filter((f) => f.startsWith("req-") && f.endsWith(".json"))
+                      .sort();
+                    while (existing.length >= 10) {
+                      fs.unlinkSync(path.join(dir, existing.shift()));
+                    }
+                    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+                    fs.writeFileSync(path.join(dir, `req-${ts}.json`), body);
+                  } catch {
+                    // Disk full, permissions, whatever — never block the request.
+                  }
+                }
+
                 // Build headers with the selected account's token
                 const requestHeaders = buildRequestHeaders(
                   input,

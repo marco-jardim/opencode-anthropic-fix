@@ -2,6 +2,18 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.15] — 2026-04-18
+
+### `token_economy.debug_dump_bodies` — opt-in request dumper
+
+Diagnostic tool for the ongoing "why is spend still above CC" investigation.
+When enabled, writes every outgoing request body to
+`~/.opencode/opencode-anthropic-fix/request-dumps/req-<timestamp>.json`,
+rotating at 10 files. Contains raw conversation content (user messages,
+tool results) — do not enable on shared hosts. Intended flow: enable, run
+3–4 turns, share the dump files for a byte-level diff of what's changing
+between turns.
+
 ## [0.1.14] — 2026-04-18
 
 ### Cache-break detector: add `messages_prefix` + fix minus-sign typo
