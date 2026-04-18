@@ -1207,6 +1207,24 @@ describe("E2E: Thinking normalization", () => {
     expect(body.thinking).toEqual({ type: "adaptive" });
   });
 
+  it("Opus 4.7 gets adaptive thinking", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-7",
+      thinking: { type: "enabled", budget_tokens: 10000 },
+    });
+
+    expect(body.thinking).toEqual({ type: "adaptive" });
+  });
+
+  it("Opus 4.7 dotted variant gets adaptive thinking", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4.7",
+      thinking: { type: "enabled", budget_tokens: 10000 },
+    });
+
+    expect(body.thinking).toEqual({ type: "adaptive" });
+  });
+
   it("older model keeps original thinking config", async () => {
     const { body } = await sendRequest(fetchFn, {
       model: "claude-sonnet-4-5",

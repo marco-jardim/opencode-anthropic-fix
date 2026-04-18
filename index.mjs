@@ -2364,7 +2364,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
             if (
               config.override_model_limits.enabled &&
               !isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT) &&
-              (hasOneMillionContext(model.id) || isOpus46Model(model.id))
+              (hasOneMillionContext(model.id) || isOpus46Model(model.id) || isOpus47Model(model.id))
             ) {
               model.limit = {
                 ...(model.limit ?? {}),
@@ -6139,6 +6139,16 @@ function isOpus46Model(model) {
 }
 
 /**
+ * Detects claude-opus-4.7 / claude-opus-4-7 model IDs.
+ * @param {string | undefined} model
+ * @returns {boolean}
+ */
+function isOpus47Model(model) {
+  if (!model) return false;
+  return /claude-opus-4[._-]7|opus[._-]4[._-]7/i.test(model);
+}
+
+/**
  * Detects claude-sonnet-4.6 / claude-sonnet-4-6 model IDs.
  * @param {string | undefined} body
  * @returns {boolean}
@@ -6150,12 +6160,12 @@ function isSonnet46Model(model) {
 
 /**
  * Detects models that support adaptive thinking ({type: "adaptive"}).
- * Currently: Opus 4.6 and Sonnet 4.6.
+ * Currently: Opus 4.6, Opus 4.7, and Sonnet 4.6.
  * @param {string | undefined} body
  * @returns {boolean}
  */
 function isAdaptiveThinkingModel(model) {
-  return isOpus46Model(model) || isSonnet46Model(model);
+  return isOpus46Model(model) || isOpus47Model(model) || isSonnet46Model(model);
 }
 
 /**
@@ -6169,8 +6179,9 @@ function isEligibleFor1MContext(model) {
   if (!model) return false;
   // Explicit 1m suffix/tag in model name
   if (/(^|[-_ ])1m($|[-_ ])|context[-_]?1m|\[1m\]/i.test(model)) return true;
-  // CC v2.1.97 U01: claude-sonnet-4* (any Sonnet 4.x) or opus-4-6
-  return /claude-sonnet-4|sonnet[._-]4/i.test(model) || isOpus46Model(model);
+  // CC v2.1.97 U01: claude-sonnet-4* (any Sonnet 4.x) or opus-4-6.
+  // Opus 4.7 (successor to 4.6) is also 1M-context eligible.
+  return /claude-sonnet-4|sonnet[._-]4/i.test(model) || isOpus46Model(model) || isOpus47Model(model);
 }
 
 /**
@@ -6835,8 +6846,12 @@ function buildSystemPromptBlocks(system, signature) {
   }
 
   // Anti-verbosity injection (CC v2.1.100 quiet_salted_ember equivalent).
-  // Only for Opus 4.6 and non-title-generator requests.
-  if (!titleGeneratorRequest && signature.modelId && isOpus46Model(signature.modelId)) {
+  // Applies to Opus 4.6 / 4.7 for non-title-generator requests.
+  if (
+    !titleGeneratorRequest &&
+    signature.modelId &&
+    (isOpus46Model(signature.modelId) || isOpus47Model(signature.modelId))
+  ) {
     const avConfig = signature.antiVerbosity;
     if (avConfig?.enabled !== false) {
       sanitized.push({ type: "text", text: ANTI_VERBOSITY_SYSTEM_PROMPT });
@@ -7805,6 +7820,10 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
 
     // Fast mode: inject speed parameter for Opus 4.6 only (v2.1.97 restriction).
     // Real CC v2.1.97 xJ() checks: model.includes("opus-4-6") — Sonnet is NOT eligible.
+    // NOTE: Deliberately NOT extended to Opus 4.7. xJ() is a fingerprint-sensitive
+    // check tied to the exact real-CC version we mirror; blindly enabling
+    // speed:"fast" for 4.7 could diverge from real CC's behavior for that model.
+    // Revisit once a real-CC dump confirms xJ() matches opus-4-7.
     const fastModeEnabled = signature.fastMode && !isFalsyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_FAST_MODE);
     let fastModeAutoApplied = false;
     if (
