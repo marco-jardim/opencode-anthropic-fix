@@ -112,6 +112,58 @@ async function promptManageAccounts(accountManager) {
   }
 }
 
+/**
+ * Pure driver for experimental.session.summarize. Extracted from the handler
+ * closure so it can be unit-tested without bootstrapping the full plugin.
+ * All external dependencies are injected.
+ *
+ * @param {object} deps
+ * @param {object|null} deps.config - Plugin config; handler no-ops if config.token_economy_strategies.haiku_rolling_summary is not true.
+ * @param {() => Promise<string>} deps.getAccessToken - Resolves to a Bearer OAuth token (or throws).
+ * @param {typeof globalThis.fetch} deps.fetchFn - HTTP transport.
+ * @param {typeof callHaiku} deps.callHaikuFn - Haiku API caller.
+ * @param {typeof rollingSummarize} deps.rollingSummarizeFn - Deterministic summarizer.
+ * @param {{warn: (msg: string) => void}} [deps.logger] - For fall-through warnings.
+ * @param {{sessionID: string, messages: unknown[], model: unknown}} input
+ * @param {{summary?: string, modelID?: string, providerID?: string, tokens?: {input: number, output: number}, cost?: number}} output
+ */
+async function runHaikuSessionSummarize(
+  { config, getAccessToken, fetchFn, callHaikuFn, rollingSummarizeFn, logger },
+  input,
+  output,
+) {
+  if (!config?.token_economy_strategies?.haiku_rolling_summary) return;
+
+  try {
+    let capturedTokens = { input: 0, output: 0 };
+    let capturedCost = 0;
+    const haikuCall = async (request) => {
+      const r = await callHaikuFn({
+        prompt: request.prompt,
+        fetch: fetchFn,
+        getAccessToken,
+      });
+      capturedTokens = r.tokens;
+      capturedCost = r.cost;
+      return r.text;
+    };
+
+    const summaryText = await rollingSummarizeFn(input.messages, { haikuCall });
+    if (typeof summaryText !== "string" || summaryText.length === 0) return;
+
+    output.summary = summaryText;
+    output.modelID = "claude-haiku-4-5-20251001";
+    output.providerID = "anthropic";
+    output.tokens = capturedTokens;
+    output.cost = capturedCost;
+  } catch (err) {
+    if (logger && typeof logger.warn === "function") {
+      const msg = err && typeof err === "object" && "message" in err ? err.message : String(err);
+      logger.warn(`[opencode-anthropic-fix] haiku rolling summary failed; falling back to default compaction: ${msg}`);
+    }
+  }
+}
+
 export async function AnthropicAuthPlugin({ client, project, directory, worktree, serverUrl, $ }) {
   const config = loadConfig();
   _pluginConfig = config; // expose to module-level functions (cache stats, response headers)
@@ -4048,68 +4100,39 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
       // behind config.token_economy.rolling_summarizer when messages are available.
     },
     /**
-     * B3 L2 Option C: Plugin-generated compaction summary.
-     *
-     * When the opencode fork exposes `experimental.session.summarize` (added
-     * as a sibling to experimental.session.compacting in the fork's plugin
-     * interface), and the user has opted into
-     * token_economy_strategies.haiku_rolling_summary, this handler calls
-     * claude-haiku-4-5-20251001 at temperature 0 to produce a deterministic,
-     * byte-stable summary — short-circuiting opencode's model-based
-     * summarizer entirely. On ANY failure (OAuth, network, rate limit,
-     * Haiku error, malformed response), leaves output.summary undefined so
-     * opencode falls through to its default path.
+     * B3 L2 Option C: Plugin-generated compaction summary via Haiku.
+     * Gated on token_economy_strategies.haiku_rolling_summary. See
+     * runHaikuSessionSummarize at the top of this file for the full driver
+     * — the closure here only binds account/token/config state.
      */
     "experimental.session.summarize": async (input, output) => {
       if (!config?.token_economy_strategies?.haiku_rolling_summary) return;
       if (!accountManager) return;
 
-      try {
-        const account = accountManager.getCurrentAccount();
-        if (!account) return;
+      const account = accountManager.getCurrentAccount();
+      if (!account) return;
 
-        const getAccessToken = async () => {
-          let tok = account.access;
-          if (!tok || !account.expires || account.expires < Date.now()) {
-            tok = await refreshAccountTokenSingleFlight(account);
-          }
-          if (!tok) throw new Error("no access token available for Haiku call");
-          return tok;
-        };
-
-        // Capture tokens/cost via closure — rollingSummarize only returns
-        // the summary string, but we want the per-call telemetry too.
-        let capturedTokens = { input: 0, output: 0 };
-        let capturedCost = 0;
-        const haikuCall = async (request) => {
-          const r = await callHaiku({
-            prompt: request.prompt,
-            fetch: globalThis.fetch,
-            getAccessToken,
-          });
-          capturedTokens = r.tokens;
-          capturedCost = r.cost;
-          return r.text;
-        };
-
-        const summaryText = await rollingSummarize(input.messages, { haikuCall });
-        if (typeof summaryText !== "string" || summaryText.length === 0) return;
-
-        output.summary = summaryText;
-        output.modelID = "claude-haiku-4-5-20251001";
-        output.providerID = "anthropic";
-        output.tokens = capturedTokens;
-        output.cost = capturedCost;
-      } catch (err) {
-        // Fall-through: leave output.summary undefined so opencode uses
-        // its default model-based summarizer. Log for the user's benefit.
-        if (typeof console !== "undefined" && console.warn) {
-          const msg = err && typeof err === "object" && "message" in err ? err.message : String(err);
-          console.warn(
-            `[opencode-anthropic-fix] haiku rolling summary failed; falling back to default compaction: ${msg}`,
-          );
+      const getAccessToken = async () => {
+        let tok = account.access;
+        if (!tok || !account.expires || account.expires < Date.now()) {
+          tok = await refreshAccountTokenSingleFlight(account);
         }
-      }
+        if (!tok) throw new Error("no access token available for Haiku call");
+        return tok;
+      };
+
+      await runHaikuSessionSummarize(
+        {
+          config,
+          getAccessToken,
+          fetchFn: globalThis.fetch,
+          callHaikuFn: callHaiku,
+          rollingSummarizeFn: rollingSummarize,
+          logger: typeof console !== "undefined" ? console : undefined,
+        },
+        input,
+        output,
+      );
     },
   };
 }
@@ -8909,6 +8932,8 @@ AnthropicAuthPlugin.__testing__ = {
   // exposed for session-dedupe regression tests (phase C3)
   applySessionToolResultDedupe,
   maybeApplySessionToolResultDedupe,
+  // exposed for experimental.session.summarize integration tests
+  runHaikuSessionSummarize,
   get cachedCCPrompt() {
     return cachedCCPrompt;
   },
