@@ -7,6 +7,7 @@ import xxhashInit from "xxhash-wasm";
 import { AccountManager } from "./lib/accounts.mjs";
 import { authorize as oauthAuthorize, exchange as oauthExchange, refreshToken } from "./lib/oauth.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, CLIENT_ID, getConfigDir } from "./lib/config.mjs";
+import { loadContextHintDisabledFlag, saveContextHintDisabledFlag } from "./lib/context-hint-persist.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { applyOAuthCredentials, resetAccountTracking } from "./lib/account-state.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
@@ -192,12 +193,25 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
   //   - 529 / overloaded → disable for session (temporary overload)
   // When disabled, we strip context-hint from betas + body on subsequent requests so
   // we don't keep triggering the same rejection and churning the cache.
+  // Persisted disable: if a prior session saw a 400 rejecting the context-hint
+  // beta (account lacks access), skip the beta from turn 1 of every subsequent
+  // session. Delete ~/.config/opencode/context-hint-disabled.flag (or the
+  // %APPDATA%\opencode equivalent on Windows) to re-enable once access is
+  // granted. See lib/context-hint-persist.mjs.
+  const _persistedCtxHint = loadContextHintDisabledFlag();
   const contextHintState = {
     /** Permanently disabled for this session after a server rejection. */
-    disabled: false,
+    disabled: _persistedCtxHint.disabled === true,
     /** Number of 422/424 compactions applied this session (for telemetry). */
     compactionsApplied: 0,
   };
+  if (contextHintState.disabled) {
+    debugLog(
+      "context-hint: loaded persisted disable flag",
+      _persistedCtxHint.status ? `status=${_persistedCtxHint.status}` : "",
+      _persistedCtxHint.timestamp ? `ts=${new Date(_persistedCtxHint.timestamp).toISOString()}` : "",
+    );
+  }
 
   // Token economy — session state for layered compaction strategies.
   const tokenEconomySession = {
@@ -3262,15 +3276,31 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     ) {
                       contextHintState.disabled = true;
                       betaLatchState.dirty = true;
-                      debugLog("context-hint: beta rejected by server (400), disabling for session");
+                      // Persist across sessions: a 400 "Unexpected value" on the
+                      // context-hint beta means the account lacks access to the
+                      // beta entirely. Re-attempting next session would burn
+                      // another turn to the same rejection.
+                      saveContextHintDisabledFlag({
+                        reason: "beta_unsupported_400",
+                        status: 400,
+                      });
+                      debugLog("context-hint: beta rejected by server (400), disabling + persisting");
+                      // Retry without the beta. The latch above drops the header
+                      // and the body field on the rebuilt request.
+                      attempt--;
+                      continue;
                     } else if (response.status === 409) {
                       contextHintState.disabled = true;
                       betaLatchState.dirty = true;
                       debugLog("context-hint: 409 conflict, disabling for session");
+                      attempt--;
+                      continue;
                     } else if (response.status === 529 && errorBody && errorBody.includes("context_hint")) {
                       contextHintState.disabled = true;
                       betaLatchState.dirty = true;
                       debugLog("context-hint: 529 overloaded referencing hint, disabling for session");
+                      attempt--;
+                      continue;
                     } else if (
                       (response.status === 422 || response.status === 424) &&
                       !requestInit._contextHintCompactAttempted

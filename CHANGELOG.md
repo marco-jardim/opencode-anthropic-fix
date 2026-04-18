@@ -2,6 +2,38 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.18] — 2026-04-18
+
+### Fix — context-hint 400 rejection
+
+Accounts without access to the `context-hint-2026-04-09` beta received a
+user-visible `Unexpected value(s)` error on the first request of every
+session. The latch at `index.mjs:3255` correctly marked the beta as
+disabled for the session but did not retry the request, so the 400
+bubbled to opencode. Now:
+
+- **Transparent retry.** On `400` (unsupported beta), `409`, and `529`
+  rejections that reference `context_hint`, the plugin decrements
+  `attempt` and `continue`s. The next iteration rebuilds the headers
+  with the beta stripped from both `anthropic-beta` and the
+  `context_hint:{enabled:true}` body field. The user sees a successful
+  response on the retry, not the 400.
+- **Cross-session persistence** (`lib/context-hint-persist.mjs`). When
+  a 400 unsupported-beta rejection fires, the plugin writes
+  `<config-dir>/context-hint-disabled.flag` with `{disabled, reason,
+status, timestamp, version}`. Subsequent sessions load this flag at
+  init and never attempt the beta. Delete the file to re-enable once
+  account access is granted. Only the permanent 400 family writes the
+  flag — 409 and 529 stay session-local (transient).
+- Tests: new `test/context-hint-persist.test.mjs` (6 cases) covering
+  round-trip, corrupted-file tolerance, and strict-true disabled gate.
+  The regression test for the 400 path now asserts the retry shape
+  (3 fetch calls: original → retry without beta → next user request)
+  and that `saveContextHintDisabledFlag` was called.
+
+Config dir: `%APPDATA%\opencode` on Windows, `$XDG_CONFIG_HOME/opencode`
+(default `~/.config/opencode`) elsewhere.
+
 ## [0.1.17] — 2026-04-18
 
 ### Phase B + Phase C — structural + CC-parity token-economy work

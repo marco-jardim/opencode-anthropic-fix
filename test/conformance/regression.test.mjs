@@ -65,6 +65,12 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
   };
 });
 
+vi.mock("../../lib/context-hint-persist.mjs", () => ({
+  loadContextHintDisabledFlag: vi.fn(() => ({ disabled: false })),
+  saveContextHintDisabledFlag: vi.fn(),
+  getContextHintFlagPath: vi.fn(() => "/tmp/test-context-hint-disabled.flag"),
+}));
+
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
@@ -490,7 +496,10 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
     expect(JSON.parse(init.body).context_hint).toBeUndefined();
   });
 
-  it("disables context-hint after 400 'Unexpected value / anthropic-beta / context-hint' rejection", async () => {
+  it("disables context-hint after 400 'Unexpected value / anthropic-beta / context-hint' rejection + retries without the beta + persists the flag", async () => {
+    const { saveContextHintDisabledFlag } = await import("../../lib/context-hint-persist.mjs");
+    saveContextHintDisabledFlag.mockClear();
+
     mockFetch
       .mockResolvedValueOnce(
         new Response(
@@ -500,6 +509,7 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
           { status: 400 },
         ),
       )
+      .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -513,9 +523,23 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
       body: JSON.stringify(MAIN_THREAD_BODY()),
     });
 
-    const [, secondInit] = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
+    // 3 calls: initial (400) → retry (200) → next user request (200)
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const [, firstInit] = mockFetch.mock.calls[0];
+    expect(firstInit.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
+
+    const [, retryInit] = mockFetch.mock.calls[1];
+    expect(retryInit.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
+    expect(JSON.parse(retryInit.body).context_hint).toBeUndefined();
+
+    const [, secondInit] = mockFetch.mock.calls[2];
     expect(secondInit.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
     expect(JSON.parse(secondInit.body).context_hint).toBeUndefined();
+
+    expect(saveContextHintDisabledFlag).toHaveBeenCalledWith({
+      reason: "beta_unsupported_400",
+      status: 400,
+    });
   }, 15000);
 
   it("compacts messages and retries on 422", async () => {
