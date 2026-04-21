@@ -2,6 +2,34 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.22] — 2026-04-21
+
+### Upstream tracking — Claude Code v2.1.114 → v2.1.116
+
+Cosmetic bump only. Full binary diff (native `claude.exe`, first-party Anthropic only) found **zero breaking mimicry changes**. Plugin was already compatible with 2.1.116; this release keeps our advertised CC version and build time from drifting.
+
+**Applied:**
+
+- `FALLBACK_CLAUDE_CLI_VERSION`: `"2.1.114"` → `"2.1.116"` (`index.mjs:5393`)
+- `CLAUDE_CODE_BUILD_TIME`: `"2026-04-17T22:37:24Z"` → `"2026-04-20T13:57:26Z"` (`index.mjs:5395`)
+- Added `2.1.116` and `2.1.115` to `CLI_TO_SDK_VERSION` map, both still mapped to SDK `0.81.0` (verified by strings extraction from native binary — literal `D6H="0.81.0"` in 2.1.116 vs `C8H="0.81.0"` in 2.1.114, same value, different minifier symbol).
+- Conformance-regression test pins updated to 2.1.116.
+
+**Intentionally not applied:**
+
+- `oidc-federation-2026-04-01` — new in 2.1.116, but scoped to the OAuth token endpoint (`/v1/oauth/token`, JWT-bearer grant). Not advertised on `/v1/messages`. Adding it could trip the 400-unexpected-beta latch.
+
+**Other findings (no action needed):**
+
+- Beta const block byte-identical in shape between 2.1.114 and 2.1.116 (same 15 named slots + 1 reserved empty slot). The empty slot is **not new**.
+- `context-hint-2026-04-09`, `managed-agents-2026-04-01`, `skills-2025-10-02`, `environments-2025-11-01` all unchanged.
+- No cache-hit / prompt-caching-scope changes. No maturing/graduating betas.
+- HTTP headers, billing-header template, UA template, identity preambles, body-shape markers (`context_management`, `thinking`, `metadata.user_id`, `ephemeral_*`) all identical.
+
+**Note on upstream packaging:** since ≈v2.1.110 the npm `@anthropic-ai/claude-code` tarball is a thin installer (`cli-wrapper.cjs` + `install.cjs`). Real code lives in the platform-specific `@anthropic-ai/claude-code-{platform}-{arch}` packages as a Bun-compiled native binary (~245 MB). Future diffs must target those.
+
+See `docs/claude-code-reverse-engineering.md` §16 for the full per-version changelog entry.
+
 ## [0.1.21] — 2026-04-18
 
 ### Feature — Stateless message-list transforms migrated from opencode fork

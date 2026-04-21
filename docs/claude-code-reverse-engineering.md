@@ -1,11 +1,11 @@
 # Claude Code Reverse Engineering — Complete Analysis
 
-**Package:** `@anthropic-ai/claude-code` v2.1.107 (latest reviewed; see §16 for per-version drift)
-**Source:** `cli.js` (bundled/minified)
-**Build Time:** `2026-04-14T03:13:25Z` (v2.1.107)
+**Package:** `@anthropic-ai/claude-code` v2.1.116 (latest reviewed; see §16 for per-version drift)
+**Source:** `claude.exe` (native Bun-compiled binary from `@anthropic-ai/claude-code-win32-x64@2.1.116`; as of ≈v2.1.110 the npm `cli.js` was replaced by a platform-specific native binary)
+**Build Time:** `2026-04-20T13:57:26Z` (v2.1.116)
 **Internal Codename:** `tengu`
 **Purpose:** Full reverse-engineering for OpenCode plugin mimicry of Claude Code authentication and API calls
-**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90, v2.1.100, v2.1.104, v2.1.105, v2.1.107
+**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90, v2.1.100, v2.1.104, v2.1.105, v2.1.107, v2.1.114, v2.1.116
 
 ---
 
@@ -1923,6 +1923,49 @@ task-budgets-2026-03-13       (if task budget present)
 Tracks server-side enforcement changes observed at Anthropic's OAuth and API endpoints.
 These are inferred from behavioral changes (requests that previously succeeded but now fail),
 not from official announcements.
+
+### 2026-04-20 — v2.1.116 Diff (2.1.114 → 2.1.116)
+
+**Type:** Upstream client release. No OAuth/auth, header, body, or beta-header breaking changes for first-party `/v1/messages` mimicry.
+
+**Scope of review:** Binary diff of `@anthropic-ai/claude-code-win32-x64` 2.1.114 → 2.1.116 (Bun-compiled `claude.exe`, ~245 MB each). String-extraction and clustered-beta analysis via `_analysis/extract-mimicry.mjs`, `_analysis/find-default-betas.mjs`, `_analysis/diff-v2.mjs`. Bedrock/Vertex-only changes intentionally excluded — plugin targets first-party Anthropic only.
+
+**Mimicry verdict:** **Plugin is compatible with 2.1.116 as-is. Only cosmetic version/build-time bumps applied.**
+
+**Key findings:**
+
+| Change                                     | Detail                                                                                                                                                                                                                                                                                    | Mimicry Impact                                                                                                                                   |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Beta const block**                       | Structurally identical to 2.1.114. Same 16 slots (15 named + 1 reserved empty string), same literal values. Only minifier-symbol mangling changed (e.g., `G08→MT8`, `DXq→HGq`, `MqH→FqH`, `WXq→KGq`). The empty-slot literal (`KGq=""`) is **not new** — 2.1.114 also had it as `WXq=""`. | NONE                                                                                                                                             |
+| **New beta: `oidc-federation-2026-04-01`** | Defined adjacent to `urn:ietf:params:oauth:grant-type:jwt-bearer` and `POST /v1/oauth/token`. Used only in OIDC-federated token-exchange flows on the OAuth token endpoint. Never advertised on `/v1/messages`.                                                                           | NONE — do not add to `/v1/messages` betas; OAuth-CLI never hits the JWT-bearer refresh path. Adding it could trip the 400-unexpected-beta latch. |
+| **`context-hint-2026-04-09`**              | Still present in both binaries. Plugin's retry-and-persist-on-400 gating logic at `index.mjs:7369` unchanged.                                                                                                                                                                             | NONE                                                                                                                                             |
+| **HTTP headers on `/v1/messages`**         | Zero added, zero removed, zero renamed. `x-app`, `x-client-request-id`, `X-Claude-Code-Session-Id`, `x-anthropic-billing-header` all identical in shape.                                                                                                                                  | NONE                                                                                                                                             |
+| **User-Agent template**                    | Unchanged: `claude-cli/${VERSION} (external, ${entrypoint}${, agent-sdk/X}${, client-app/X}${, workload/X})`. `VERSION` embedded literal is now `"2.1.116"`.                                                                                                                              | Version bump only                                                                                                                                |
+| **Billing header template**                | Identical: `cc_version=${V}; cc_entrypoint=${E};[ cch=${hash};][ cc_workload=${w};]`. Provider-suppression logic identical.                                                                                                                                                               | NONE                                                                                                                                             |
+| **Bundled `@anthropic-ai/sdk` version**    | Still `0.81.0` in 2.1.116 (minifier-renamed from `C8H` → `D6H`). Verified via `_analysis/sdk-version.mjs`. Plugin's `x-stainless-package-version = "0.81.0"` remains correct.                                                                                                             | NONE                                                                                                                                             |
+| **Identity preamble strings**              | All three variants unchanged (verified against `KNOWN_IDENTITY_STRINGS` in `index.mjs:6185-6190`).                                                                                                                                                                                        | NONE                                                                                                                                             |
+| **Body-shape markers**                     | `context_management`, `thinking:{type:"adaptive"}`, `metadata.user_id`, `"effort"`, `budget_tokens`, `ephemeral_5m`/`ephemeral_1h`, `cache_control` all present in identical shape.                                                                                                       | NONE                                                                                                                                             |
+| **`CLAUDE_CODE_BUILD_TIME`**               | 2.1.114 = `2026-04-17T22:37:24Z`; 2.1.116 = `2026-04-20T13:57:26Z`.                                                                                                                                                                                                                       | Cosmetic bump                                                                                                                                    |
+| **Removed internal markers**               | Build dist-ID (`claude-code-dist-86c565f3-…`) and SDK-scaffold prefix strings (`anthropic-additional-` / `x-anthropic-additional-`) disappeared. Never keys the plugin emits anyway.                                                                                                      | NONE                                                                                                                                             |
+| **Cache-hit / agent-performance changes**  | None detected. No new `prompt-caching-scope-*`, no change to `ephemeral` cache_control placement, no change to `context_management` body-field shape. Sticky-vs-round-robin gate at `index.mjs:7342` remains correct.                                                                     | NONE                                                                                                                                             |
+| **Maturing / graduating betas**            | None. No beta moved out of the first-party experimental set between 2.1.114 and 2.1.116.                                                                                                                                                                                                  | NONE                                                                                                                                             |
+
+**Plugin actions applied in v0.1.22:**
+
+- Bumped `FALLBACK_CLAUDE_CLI_VERSION` → `"2.1.116"` (`index.mjs:5393`).
+- Bumped `CLAUDE_CODE_BUILD_TIME` → `"2026-04-20T13:57:26Z"` (`index.mjs:5395`).
+- Added `["2.1.116", "0.81.0"]` and `["2.1.115", "0.81.0"]` to `CLI_TO_SDK_VERSION` (`index.mjs:5405`).
+- Updated conformance regression test pins to 2.1.116 (`test/conformance/regression.test.mjs:1412-1431`) and UA assertion (`index.test.mjs:738`).
+
+**Do-not-do notes:**
+
+- **Do not** advertise `oidc-federation-2026-04-01` on `/v1/messages`. It is OAuth-token-endpoint scoped.
+- **Do not** treat the empty-slot const literal (`KGq=""`) as a missing beta. It's been a reserved slot since at least 2.1.114.
+
+**OAuth/Auth:** STABLE.
+**Beta headers:** STABLE.
+**API request shape:** STABLE.
+**Monitoring note:** starting at ≈v2.1.110 the npm `@anthropic-ai/claude-code` tarball is a thin installer (`cli-wrapper.cjs` + `install.cjs`, ~130 KB unpacked); real code lives in the platform-specific `@anthropic-ai/claude-code-{win32-x64,linux-x64,darwin-arm64,…}` binaries. All future diffs must pull the native binary.
 
 ### 2026-04-14 — v2.1.107 Breaking Changes (Tool Name Blocklist + CCH Algorithm Change)
 
