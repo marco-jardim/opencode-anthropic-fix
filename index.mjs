@@ -5390,19 +5390,20 @@ process.once("beforeExit", _beforeExitHandler);
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.116";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.117";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-04-20T13:57:26Z";
+const CLAUDE_CODE_BUILD_TIME = "2026-04-21T17:58:52Z";
 
 // The @anthropic-ai/sdk version bundled with Claude Code.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
 // v2.1.107 switched from @anthropic-ai/sdk v0.208.0 to v0.81.0 (confirmed via bundle var x$H="0.81.0").
-// Still 0.81.0 in v2.1.116 (verified via strings extraction from native Bun binary:
-// 2.1.116 has `D6H="0.81.0"`, 2.1.114 had `C8H="0.81.0"` — same literal, different minifier symbol).
+// Still 0.81.0 in v2.1.117 (verified via strings extraction from native Bun binary;
+// 84 beta flags + x-headers byte-identical to 2.1.116 — cosmetic bump).
 const ANTHROPIC_SDK_VERSION = "0.81.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.117", "0.81.0"],
   ["2.1.116", "0.81.0"],
   ["2.1.115", "0.81.0"],
   ["2.1.114", "0.81.0"],
@@ -6937,13 +6938,28 @@ function isTitleGeneratorSystemBlocks(system) {
  * @param {any[] | undefined} system
  * @returns {Array<{type: string, text: string, cache_control?: {type: string}}>}
  */
+// Env-context fingerprint rewrite: opencode emits
+//   "Here is some useful information about the environment you are running in:"
+// Real CC 2.1.117 emits
+//   "Here is useful information about the environment you are running in:"
+// Removing "some " gives byte-level parity with the CC fingerprint and saves
+// ~1 token in the non-cached portion. Unconditional, every request.
+const OPENCODE_ENV_CONTEXT_PREFIX = "Here is some useful information about the environment you are running in:";
+const CC_ENV_CONTEXT_PREFIX = "Here is useful information about the environment you are running in:";
+
+function rewriteEnvContextPhrasing(text) {
+  if (typeof text !== "string" || text.length === 0) return text;
+  if (text.indexOf(OPENCODE_ENV_CONTEXT_PREFIX) === -1) return text;
+  return text.split(OPENCODE_ENV_CONTEXT_PREFIX).join(CC_ENV_CONTEXT_PREFIX);
+}
+
 function normalizeSystemTextBlocks(system) {
   const output = [];
   if (!Array.isArray(system)) return output;
 
   for (const item of system) {
     if (typeof item === "string") {
-      output.push({ type: "text", text: item });
+      output.push({ type: "text", text: rewriteEnvContextPhrasing(item) });
       continue;
     }
 
@@ -6952,7 +6968,7 @@ function normalizeSystemTextBlocks(system) {
 
     const normalized = {
       type: typeof item.type === "string" ? item.type : "text",
-      text: item.text,
+      text: rewriteEnvContextPhrasing(item.text),
     };
 
     // Intentionally strip cache_control from incoming system blocks.

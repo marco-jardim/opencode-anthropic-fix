@@ -735,7 +735,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.116");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.117");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -3417,6 +3417,50 @@ describe("header handling", () => {
     expect(parsed.system[2].text).toContain("Use Claude Code defaults");
     expect(parsed.system[2].text).not.toMatch(/opencode/i);
     expect(parsed.system[2].text).not.toContain("\n\n\n");
+  });
+
+  it("rewrites opencode env-context phrasing to real CC phrasing", async () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "hello" }],
+        system: [
+          {
+            type: "text",
+            text: "Here is some useful information about the environment you are running in:\n<cwd>/tmp</cwd>",
+          },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    const joined = parsed.system.map((b) => b.text).join("\n");
+    expect(joined).toContain("Here is useful information about the environment you are running in:");
+    expect(joined).not.toContain("Here is some useful information about the environment");
+  });
+
+  it("leaves system blocks without the opencode env-context phrase untouched", async () => {
+    process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "hello" }],
+        system: [{ type: "text", text: "Plain user instructions without env context." }],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    const joined = parsed.system.map((b) => b.text).join("\n");
+    expect(joined).toContain("Plain user instructions without env context.");
   });
 
   it("does not inject billing block when CLAUDE_CODE_ATTRIBUTION_HEADER=0", async () => {

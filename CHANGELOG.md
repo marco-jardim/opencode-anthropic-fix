@@ -2,6 +2,33 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.23] — 2026-04-21
+
+### Upstream tracking — Claude Code v2.1.116 → v2.1.117 + env-context fingerprint rewrite
+
+Cosmetic version bump + one new mimicry fix.
+
+**Upstream diff (2.1.116 → 2.1.117):** zero wire-protocol changes. 84 beta flags and all `x-*` headers byte-identical. SDK pinned at `0.81.0`. Only the version string, `BUILD_TIME`, and client-side telemetry events moved.
+
+**Applied:**
+
+- `FALLBACK_CLAUDE_CLI_VERSION`: `"2.1.116"` → `"2.1.117"` (`index.mjs:5393`)
+- `CLAUDE_CODE_BUILD_TIME`: `"2026-04-20T13:57:26Z"` → `"2026-04-21T17:58:52Z"` (extracted from real binary: `VERSION:"2.1.117"` + `BUILD_TIME:"2026-04-21T17:58:52Z"`)
+- Added `2.1.117 → 0.81.0` to `CLI_TO_SDK_VERSION`
+- Version pins in `index.test.mjs` and `test/conformance/regression.test.mjs` bumped to 2.1.117
+
+**New: env-context fingerprint rewrite** (`index.mjs`, `normalizeSystemTextBlocks` helper):
+
+- Opencode emits `"Here is some useful information about the environment you are running in:"` in its system prompt.
+- Real CC 2.1.117 binary emits `"Here is useful information about the environment you are running in:"` (note: **no "some"**).
+- The plugin now rewrites opencode's phrasing to match CC's byte-for-byte, unconditionally, on every request. Non-matching blocks pass through untouched. Saves ~1 token per request in the non-cached portion and closes a literal-string classifier fingerprint.
+- Helper: `rewriteEnvContextPhrasing(text)`. Hot path: `normalizeSystemTextBlocks`. Two new tests in `index.test.mjs`.
+
+**Not applied:**
+
+- Client-side telemetry event additions (`tengu_advisor_strip_retry`, `tengu_fork_subagent_enabled`, etc.) — these are Datadog events, not wire protocol. No action.
+- No beta additions, no header additions.
+
 ## [0.1.22] — 2026-04-21
 
 ### Upstream tracking — Claude Code v2.1.114 → v2.1.116
