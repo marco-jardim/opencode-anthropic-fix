@@ -2,6 +2,14 @@
   "name": "opencode-anthropic-fix",
   "version": "0.1.23",
   "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marco-jardim/opencode-anthropic-fix.git"
+  },
+  "homepage": "https://github.com/marco-jardim/opencode-anthropic-fix#readme",
+  "bugs": {
+    "url": "https://github.com/marco-jardim/opencode-anthropic-fix/issues"
+  },
   "main": "./index.mjs",
   "files": [
     "index.mjs",
