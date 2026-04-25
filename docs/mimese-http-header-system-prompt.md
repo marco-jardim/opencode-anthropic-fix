@@ -1,5 +1,31 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
+<!-- Last verified against: Claude Code 2.1.119 (build 2026-04-23T19:08:52Z, git 6f68554) -->
+
+## Version history (mimicry-relevant changes)
+
+| CC version | SDK bundled | Beta additions             | Beta removals | OAuth change |
+| ---------- | ----------- | -------------------------- | ------------- | ------------ |
+| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07 | none          | none         |
+| 2.1.117    | 0.81.0      | (baseline for this doc)    | none          | none         |
+
+### cache-diagnosis-2026-04-07 (added in 2.1.119)
+
+- Flag constant: `SeH = "cache-diagnosis-2026-04-07"`.
+- NOT always-on. Gated by GrowthBook flag `tengu_prompt_cache_diagnostics` (default `false`).
+- Eligibility guard observed upstream: account type must be `firstParty` (standard CC OAuth) or
+  `anthropicAws` without `ANTHROPIC_AWS_BASE_URL` override; fails silently if neither. This plugin
+  targets first-party OAuth only, so the `anthropicAws` branch is documented for parity but is out
+  of operational scope here.
+- When active, the request builder appends `cache-diagnosis-2026-04-07` to `anthropic-beta`
+  and injects `{ diagnostics: { previous_message_id: <id> } }` only when all of the following
+  hold: beta active, previous_message_id known, conversation is live, and not in zero-shot mode.
+- Retry path: if the server returns HTTP 400 and the response body mentions both
+  `cache-diagnosis-2026-04-07` and `anthropic-beta`, the latch is cleared and the request
+  is retried without the beta.
+- Plugin support: listed in `EXPERIMENTAL_BETA_FLAGS`; shortcuts `cache-diagnosis` and
+  `cache-diag` are registered in `BETA_SHORTCUTS`. NOT included in any always-on header list.
+
 This document explains, at implementation level, how the plugin mimics Claude Code signature behavior for Anthropic requests, with focus on:
 
 - HTTP header composition

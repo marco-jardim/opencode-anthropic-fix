@@ -5390,19 +5390,21 @@ process.once("beforeExit", _beforeExitHandler);
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.117";
+const FALLBACK_CLAUDE_CLI_VERSION = "2.1.119";
 const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-04-21T17:58:52Z";
+const CLAUDE_CODE_BUILD_TIME = "2026-04-23T19:08:52Z";
 
 // The @anthropic-ai/sdk version bundled with Claude Code.
 // This is distinct from the CLI version and goes in X-Stainless-Package-Version.
 // v2.1.107 switched from @anthropic-ai/sdk v0.208.0 to v0.81.0 (confirmed via bundle var x$H="0.81.0").
-// Still 0.81.0 in v2.1.117 (verified via strings extraction from native Bun binary;
-// 84 beta flags + x-headers byte-identical to 2.1.116 — cosmetic bump).
+// Still 0.81.0 in v2.1.119 (verified via strings extraction from native Bun binary;
+// adds cache-diagnosis-2026-04-07 beta gated by GrowthBook tengu_prompt_cache_diagnostics;
+// no other beta additions/removals vs 2.1.117; OAuth flow unchanged).
 const ANTHROPIC_SDK_VERSION = "0.81.0";
 
 // Map of CLI version → bundled SDK version (update when CLI version changes)
 const CLI_TO_SDK_VERSION = new Map([
+  ["2.1.119", "0.81.0"],
   ["2.1.117", "0.81.0"],
   ["2.1.116", "0.81.0"],
   ["2.1.115", "0.81.0"],
@@ -6219,6 +6221,7 @@ const EXPERIMENTAL_BETA_FLAGS = new Set([
   "advanced-tool-use-2025-11-20",
   "advisor-tool-2026-03-01",
   "afk-mode-2026-01-31",
+  "cache-diagnosis-2026-04-07",
   "code-execution-2025-08-25",
   "compact-2026-01-12",
   "context-1m-2025-08-07",
@@ -6238,6 +6241,8 @@ const BETA_SHORTCUTS = new Map([
   ["1m", "context-1m-2025-08-07"],
   ["1m-context", "context-1m-2025-08-07"],
   ["context-1m", "context-1m-2025-08-07"],
+  ["cache-diagnosis", "cache-diagnosis-2026-04-07"],
+  ["cache-diag", "cache-diagnosis-2026-04-07"],
   ["context-hint", "context-hint-2026-04-09"],
   ["hint", "context-hint-2026-04-09"],
   ["fast", "fast-mode-2026-02-01"],

@@ -1,4 +1,46 @@
-# Claude Code Reverse Engineering — Complete Analysis
+# Claude Code Reverse Engineering
+
+<!-- Current baseline: 2.1.119 (build 2026-04-23T19:08:52Z, git 6f68554839756189e277b8285a18fe47acd9a5a1) -->
+
+## 2.1.119 findings summary (2026-04-23)
+
+Compared win32-x64 binary 2.1.119 against 2.1.117.
+
+| Area           | Change                                                         |
+| -------------- | -------------------------------------------------------------- |
+| Version        | 2.1.119; build 2026-04-23T19:08:52Z; git 6f68554               |
+| SDK bundled    | 0.81.0 (unchanged)                                             |
+| Beta additions | cache-diagnosis-2026-04-07                                     |
+| Beta removals  | none                                                           |
+| OAuth flow     | unchanged (token URL, PKCE, scopes, profile URL all identical) |
+| Header shape   | unchanged except optional anthropic-beta append when gated on  |
+| Body shape     | optional diagnostics.previous_message_id when beta active      |
+
+### cache-diagnosis-2026-04-07
+
+Decompiled key identifiers:
+
+```
+SeH = "cache-diagnosis-2026-04-07"
+
+K59() {
+  if (!kn()) return false;           // feature-flags enabled?
+  let H = e$();                      // account type
+  if (!(H === "firstParty" && JM()
+     || H === "anthropicAws" && !process.env.ANTHROPIC_AWS_BASE_URL))
+    return false;
+  return k8("tengu_prompt_cache_diagnostics", false);  // GrowthBook gate
+}
+
+// request builder (simplified):
+if (r && !lH.includes(SeH)) lH.push(SeH);                 // add beta header
+if (r && M && z && F && !z8)
+  body.diagnostics = { previous_message_id: z };          // inject diagnostics
+
+// retry path (simplified):
+if (status === 400 && body.includes(SeH) && body.includes("anthropic-beta"))
+  latch = false;   // drop beta, retry without it
+```
 
 **Package:** `@anthropic-ai/claude-code` v2.1.116 (latest reviewed; see §16 for per-version drift)
 **Source:** `claude.exe` (native Bun-compiled binary from `@anthropic-ai/claude-code-win32-x64@2.1.116`; as of ≈v2.1.110 the npm `cli.js` was replaced by a platform-specific native binary)
