@@ -5,7 +5,21 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import xxhashInit from "xxhash-wasm";
 import { AccountManager } from "./lib/accounts.mjs";
-import { authorize as oauthAuthorize, exchange as oauthExchange, refreshToken } from "./lib/oauth.mjs";
+import {
+  authorize as oauthAuthorize,
+  exchange as oauthExchange,
+  parseOAuthCallback,
+  refreshToken,
+} from "./lib/oauth.mjs";
+import {
+  FALLBACK_CLAUDE_CLI_VERSION,
+  CLAUDE_CODE_NPM_LATEST_URL,
+  CLAUDE_CODE_BUILD_TIME,
+  EXPERIMENTAL_BETA_FLAGS,
+  BETA_SHORTCUTS,
+  resolveBetaShortcut,
+  buildExtendedUserAgent,
+} from "./lib/request-headers.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, CLIENT_ID, getConfigDir } from "./lib/config.mjs";
 import { loadContextHintDisabledFlag, saveContextHintDisabledFlag } from "./lib/context-hint-persist.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
@@ -239,6 +253,15 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
     /** @type {string | null} The last computed beta header string (for latching). */
     lastHeader: null,
   };
+
+  // F4: Session-level latch for rejected custom betas.
+  // When a custom beta triggers a 400/anthropic-beta or 413-with-signal rejection,
+  // its canonical name is stored here so subsequent requests within
+  // SESSION_REJECTED_BETA_TTL_MS skip that beta without paying a first-fail each time.
+  // Memory only - not persisted to disk.
+  const SESSION_REJECTED_BETA_TTL_MS = 5 * 60 * 1000; // 5 minutes
+  /** @type {Map<string, number>} canonical-beta to rejected-at epoch ms */
+  const sessionRejectedBetas = new Map();
 
   // Context-hint controller (CC v2.1.110+). Mirrors real CC's `createContextHintController`:
   // sticky on across requests until the server responds with a specific error family.
@@ -491,8 +514,13 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 
     // Validate CSRF state parameter (RFC 6749 §10.12)
     // If we stored a state, the returned code MUST include a matching state (QA fix C2)
-    const codeParts = code.split("#");
-    const returnedState = codeParts[1];
+    // parseOAuthCallback splits "code#state" or a full callback URL into parts.
+    // _parsedCode is unused after F3 fix (exchange() re-parses internally); kept
+    // only to extract returnedState for the CSRF check below.
+    const { code: _parsedCode, state: returnedState } = parseOAuthCallback(code);
+    // F3: `exchange()` calls parseOAuthCallback() internally; pass the original
+    // user input so it can forward `state` to the token endpoint.
+    // CSRF validation already done above via returnedState === pending.state.
     if (pending.state) {
       if (!returnedState || returnedState !== pending.state) {
         pendingSlashOAuth.delete(sessionID);
@@ -2627,6 +2655,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
               let _adaptiveOverrideForRequest; // Cached adaptive override for all retry attempts
               let _overloadRecoveryAttempted = false; // Guard: only one quota-aware switch per request
               let _connectionResetRetries = 0; // Cap ECONNRESET/EPIPE retries to prevent infinite loop
+              let customBetasStripped = false; // One-shot latch: strip config.custom_betas once per logical request
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account — use pinned account on first attempt if available
                 const account =
@@ -2845,12 +2874,27 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   }
                 }
 
+                // F4: filter out session-rejected custom betas before building the header.
+                // This means the second+ request in the same plugin instance already omits
+                // a rejected beta without needing to pay a first-fail again.
+                const _sessionFilteredCustomBetas = customBetasStripped
+                  ? []
+                  : (config.custom_betas ?? []).filter((b) => {
+                      const canonical = resolveBetaShortcut(b);
+                      const rejectedAt = sessionRejectedBetas.get(canonical);
+                      if (rejectedAt == null) return true;
+                      if (Date.now() - rejectedAt > SESSION_REJECTED_BETA_TTL_MS) {
+                        sessionRejectedBetas.delete(canonical);
+                        return true;
+                      }
+                      return false;
+                    });
                 let computedBetaHeader = buildAnthropicBetaHeader(
                   "",
                   getSignatureEmulationEnabled(),
                   _reqModel,
                   _reqProvider,
-                  config.custom_betas,
+                  _sessionFilteredCustomBetas,
                   getEffectiveStrategy(),
                   requestUrl?.pathname,
                   _reqHasFileRefs,
@@ -2883,6 +2927,33 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   if (contextHintState.disabled) {
                     merged.delete("context-hint-2026-04-09");
                     betaLatchState.sent.delete("context-hint-2026-04-09");
+                  }
+                  // Custom-beta strip kill switch: when the server rejected our custom
+                  // betas (customBetasStripped latch fired), evict them from the latch so
+                  // they do not re-appear on the retry attempt.
+                  // F1: delete both the raw alias AND the canonical form so that aliases
+                  // like "cache-diag" (cache-diagnosis-2026-04-07) are fully evicted.
+                  if (customBetasStripped && config.custom_betas?.length) {
+                    for (const b of config.custom_betas) {
+                      const canonical = resolveBetaShortcut(b);
+                      merged.delete(b);
+                      merged.delete(canonical);
+                      betaLatchState.sent.delete(b);
+                      betaLatchState.sent.delete(canonical);
+                    }
+                  }
+                  // F4: Evict session-rejected betas from the latch on every request so
+                  // they cannot re-enter the sent set from a prior latched header.
+                  if (sessionRejectedBetas.size > 0) {
+                    const _now = Date.now();
+                    for (const [_canonical, _rejectedAt] of sessionRejectedBetas) {
+                      if (_now - _rejectedAt <= SESSION_REJECTED_BETA_TTL_MS) {
+                        merged.delete(_canonical);
+                        betaLatchState.sent.delete(_canonical);
+                      } else {
+                        sessionRejectedBetas.delete(_canonical);
+                      }
+                    }
                   }
                   computedBetaHeader = [...merged].join(",");
                   betaLatchState.lastHeader = computedBetaHeader;
@@ -2961,7 +3032,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   {
                     enabled: getSignatureEmulationEnabled(),
                     claudeCliVersion,
-                    customBetas: config.custom_betas,
+                    customBetas: _sessionFilteredCustomBetas,
                     strategy: getEffectiveStrategy(),
                     sessionId: signatureSessionId,
                   },
@@ -3388,6 +3459,51 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                         // fall through to normal error handling
                       }
                     }
+                  }
+
+                  // Selective custom-beta retry: if the server rejects the request citing an
+                  // anthropic-beta issue not caught by the context-hint handler above, strip
+                  // config.custom_betas once and retry.
+                  // F2: 413 only triggers this path when the body contains an explicit signal
+                  // keyword (anthropic-beta, beta header, unsupported/unknown/invalid beta,
+                  // context_window, long context, 1m/million context) to avoid false positives
+                  // on generic 413s (e.g. plain upload-size limits with an empty body).
+                  // One retry per logical request (latch prevents loop).
+                  if (
+                    !customBetasStripped &&
+                    (config.custom_betas?.length ?? 0) > 0 &&
+                    ((response.status === 400 &&
+                      errorBody &&
+                      errorBody.includes("anthropic-beta") &&
+                      !errorBody.includes("context-hint")) ||
+                      (response.status === 413 &&
+                        errorBody &&
+                        /anthropic-beta|beta header|unsupported beta|unknown beta|invalid beta|context_window|long context|1m context|million context/i.test(
+                          errorBody,
+                        )))
+                  ) {
+                    customBetasStripped = true;
+                    // F4: record rejection in session latch so next logical request already
+                    // omits the rejected beta without needing a first-fail.
+                    // Only record betas explicitly mentioned in the error body (raw or canonical);
+                    // fall back to recording all custom betas if the body names none specifically.
+                    {
+                      const _allCustom = config.custom_betas ?? [];
+                      const _mentioned = _allCustom.filter((_sb) => {
+                        const _rawLc = _sb.toLowerCase();
+                        const _canLc = resolveBetaShortcut(_sb).toLowerCase();
+                        const _bodyLc = (errorBody || "").toLowerCase();
+                        return _bodyLc.includes(_rawLc) || _bodyLc.includes(_canLc);
+                      });
+                      const _toRecord = _mentioned.length > 0 ? _mentioned : _allCustom;
+                      const _recordedAt = Date.now();
+                      for (const _sb of _toRecord) {
+                        sessionRejectedBetas.set(resolveBetaShortcut(_sb), _recordedAt);
+                      }
+                    }
+                    attempt--;
+                    debugLog("custom beta/context rejection - retrying without custom betas");
+                    continue;
                   }
 
                   // Reactive compaction: on "prompt too long" error, trim oldest messages and retry once
@@ -5390,61 +5506,6 @@ process.once("beforeExit", _beforeExitHandler);
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
 
-const FALLBACK_CLAUDE_CLI_VERSION = "2.1.119";
-const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-const CLAUDE_CODE_BUILD_TIME = "2026-04-23T19:08:52Z";
-
-// The @anthropic-ai/sdk version bundled with Claude Code.
-// This is distinct from the CLI version and goes in X-Stainless-Package-Version.
-// v2.1.107 switched from @anthropic-ai/sdk v0.208.0 to v0.81.0 (confirmed via bundle var x$H="0.81.0").
-// Still 0.81.0 in v2.1.119 (verified via strings extraction from native Bun binary;
-// adds cache-diagnosis-2026-04-07 beta gated by GrowthBook tengu_prompt_cache_diagnostics;
-// no other beta additions/removals vs 2.1.117; OAuth flow unchanged).
-const ANTHROPIC_SDK_VERSION = "0.81.0";
-
-// Map of CLI version → bundled SDK version (update when CLI version changes)
-const CLI_TO_SDK_VERSION = new Map([
-  ["2.1.119", "0.81.0"],
-  ["2.1.117", "0.81.0"],
-  ["2.1.116", "0.81.0"],
-  ["2.1.115", "0.81.0"],
-  ["2.1.114", "0.81.0"],
-  ["2.1.113", "0.81.0"],
-  ["2.1.112", "0.81.0"],
-  ["2.1.111", "0.81.0"],
-  ["2.1.110", "0.81.0"],
-  ["2.1.109", "0.81.0"],
-  ["2.1.108", "0.81.0"],
-  ["2.1.107", "0.81.0"],
-  ["2.1.105", "0.81.0"],
-  ["2.1.97", "0.208.0"],
-  ["2.1.96", "0.208.0"],
-  ["2.1.95", "0.208.0"],
-  ["2.1.94", "0.208.0"],
-  ["2.1.93", "0.208.0"],
-  ["2.1.92", "0.208.0"],
-  ["2.1.91", "0.208.0"],
-  ["2.1.90", "0.208.0"],
-  ["2.1.89", "0.208.0"],
-  ["2.1.88", "0.208.0"],
-  ["2.1.87", "0.208.0"],
-  ["2.1.86", "0.208.0"],
-  ["2.1.85", "0.208.0"],
-  ["2.1.84", "0.208.0"],
-  ["2.1.83", "0.208.0"],
-  ["2.1.81", "0.208.0"],
-  ["2.1.80", "0.208.0"],
-]);
-
-/**
- * Get the SDK version corresponding to a CLI version.
- * Falls back to ANTHROPIC_SDK_VERSION constant.
- * @param {string} cliVersion
- * @returns {string}
- */
-function getSdkVersion(cliVersion) {
-  return CLI_TO_SDK_VERSION.get(cliVersion) ?? ANTHROPIC_SDK_VERSION;
-}
 const BILLING_HASH_SALT = "59cf53e54c78";
 const BILLING_HASH_INDICES = [4, 7, 20];
 
@@ -6216,42 +6277,6 @@ const CORE_TOOL_NAMES = new Set([
   "Compress",
 ]);
 const HOST_SDK_BETAS_BLOCKLIST = new Set(["fine-grained-tool-streaming-2025-05-14", "structured-outputs-2025-11-13"]);
-const EXPERIMENTAL_BETA_FLAGS = new Set([
-  "adaptive-thinking-2026-01-28",
-  "advanced-tool-use-2025-11-20",
-  "advisor-tool-2026-03-01",
-  "afk-mode-2026-01-31",
-  "cache-diagnosis-2026-04-07",
-  "code-execution-2025-08-25",
-  "compact-2026-01-12",
-  "context-1m-2025-08-07",
-  "context-hint-2026-04-09",
-  "context-management-2025-06-27",
-  "fast-mode-2026-02-01",
-  "files-api-2025-04-14",
-  "interleaved-thinking-2025-05-14",
-  "prompt-caching-scope-2026-01-05",
-  "redact-thinking-2026-02-12",
-  "structured-outputs-2025-12-15",
-  "task-budgets-2026-03-13",
-  "tool-search-tool-2025-10-19",
-  "web-search-2025-03-05",
-]);
-const BETA_SHORTCUTS = new Map([
-  ["1m", "context-1m-2025-08-07"],
-  ["1m-context", "context-1m-2025-08-07"],
-  ["context-1m", "context-1m-2025-08-07"],
-  ["cache-diagnosis", "cache-diagnosis-2026-04-07"],
-  ["cache-diag", "cache-diagnosis-2026-04-07"],
-  ["context-hint", "context-hint-2026-04-09"],
-  ["hint", "context-hint-2026-04-09"],
-  ["fast", "fast-mode-2026-02-01"],
-  ["fast-mode", "fast-mode-2026-02-01"],
-  ["opus-fast", "fast-mode-2026-02-01"],
-  ["task-budgets", "task-budgets-2026-03-13"],
-  ["budgets", "task-budgets-2026-03-13"],
-  ["redact-thinking", "redact-thinking-2026-02-12"],
-]);
 const STAINLESS_HELPER_KEYS = [
   "x_stainless_helper",
   "x-stainless-helper",
@@ -6356,38 +6381,11 @@ function isFalsyEnv(value) {
 }
 
 /**
- * @param {string | undefined} value
- * @returns {string}
- */
-function resolveBetaShortcut(value) {
-  if (!value) return "";
-  const trimmed = value.trim();
-  const mapped = BETA_SHORTCUTS.get(trimmed.toLowerCase());
-  return mapped || trimmed;
-}
-
-/**
  * @returns {boolean}
  */
 function isNonInteractiveMode() {
   if (isTruthyEnv(process.env.CI)) return true;
   return !process.stdout.isTTY;
-}
-
-/**
- * Build the extended User-Agent for API calls.
- * Real CC v96 sends "claude-cli/{version} (external, {entrypoint})" — confirmed via
- * proxy capture of real CC on Windows/Node.js.
- * @param {string} version
- * @returns {string}
- */
-function buildExtendedUserAgent(version) {
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT ?? "cli";
-  const sdkVersion = process.env.CLAUDE_AGENT_SDK_VERSION ? `, agent-sdk/${process.env.CLAUDE_AGENT_SDK_VERSION}` : "";
-  const clientApp = process.env.CLAUDE_AGENT_SDK_CLIENT_APP
-    ? `, client-app/${process.env.CLAUDE_AGENT_SDK_CLIENT_APP}`
-    : "";
-  return `claude-cli/${version} (external, ${entrypoint}${sdkVersion}${clientApp})`;
 }
 
 /**
@@ -8824,7 +8822,9 @@ async function refreshAccountToken(account, client, source = "foreground", { onT
   try {
     const diskAuthBeforeRefresh = await readDiskAccountAuth(account.id);
     const adopted = applyDiskAuthIfFresher(account, diskAuthBeforeRefresh);
-    if (source === "foreground" && adopted && account.access && account.expires && account.expires > Date.now()) {
+    // Apply fresher disk tokens for both foreground and idle paths — prevents an
+    // unnecessary HTTP refresh when another process already rotated the token.
+    if (adopted && account.access && account.expires && account.expires > Date.now()) {
       return account.access;
     }
 

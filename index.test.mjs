@@ -290,6 +290,36 @@ describe("plugin lifecycle", () => {
     );
   });
 
+  it("F3: callback forwards state to the token endpoint", async () => {
+    // F3: the plugin callback must pass the original user input (code#state) to
+    // exchange() so that `state` is included in the token-endpoint POST body.
+    // Without the fix, parsedCode (bare code) was forwarded and state was dropped.
+    let capturedBody;
+    mockFetch.mockImplementationOnce(async (_url, opts) => {
+      capturedBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        json: async () => ({
+          access_token: "at-f3",
+          refresh_token: "rt-f3",
+          expires_in: 3600,
+        }),
+      };
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const method = plugin.auth.methods[0];
+    const authResult = await method.authorize();
+
+    // Pass a code#state string as the user would paste.
+    await authResult.callback("myauthcode#mystatevalue");
+
+    // The token endpoint body must contain state=mystatevalue.
+    expect(capturedBody).toBeDefined();
+    expect(capturedBody.code).toBe("myauthcode");
+    expect(capturedBody.state).toBe("mystatevalue");
+  });
+
   it("loader bootstraps from auth.json and saves accounts file immediately", async () => {
     const plugin = await AnthropicAuthPlugin({ client });
     const provider = makeProvider();
@@ -1824,6 +1854,92 @@ describe("fetch interceptor — token refresh", () => {
       String(arg?.body?.message || "").includes("Disabled"),
     );
     expect(disabledToasts).toHaveLength(0);
+  });
+
+  // F5 (idle race): expanding the lock scope to cover disk adoption inside the
+  // refresh lock would require the disk token to be valid+fresh at lock time. This
+  // test already verifies the happy path (disk token is fresher, so no HTTP request).
+  // A race where a concurrent writer replaces the token *between* the pre-check
+  // and lock acquisition cannot be closed without a full lock-on-read refactor;
+  // accepted with this comment per QA finding F5.
+  it("idle refresh adopts disk-fresher token and skips HTTP refresh", async () => {
+    const accountId1 = "stable-idle-a1";
+    const accountId2 = "stable-idle-a2";
+    const staleAccess = "stale-access-2-idle";
+    const freshAccess = "disk-fresh-access-2-idle";
+    const refreshToken2 = "refresh-token-idle-2";
+
+    loadConfig.mockReturnValue({
+      ...DEFAULT_CONFIG,
+      signature_emulation: { ...DEFAULT_CONFIG.signature_emulation, fetch_claude_code_version_on_startup: false },
+      override_model_limits: { ...DEFAULT_CONFIG.override_model_limits },
+      idle_refresh: { ...DEFAULT_CONFIG.idle_refresh, enabled: true },
+    });
+
+    // Initial load: account-2 is near-expiry with a stale token (token_updated_at: 100)
+    loadAccounts.mockResolvedValue(
+      makeAccountsData([
+        { id: accountId1, access: "access-1", expires: Date.now() + 2 * 3600_000 },
+        {
+          id: accountId2,
+          refreshToken: refreshToken2,
+          access: staleAccess,
+          expires: Date.now() + 10 * 60_000,
+          token_updated_at: 100,
+        },
+      ]),
+    );
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 2 * 3600_000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    // Simulate another process having refreshed account-2 on disk before our idle refresh
+    // runs. readDiskAccountAuth (inside refreshAccountToken) calls loadAccounts, so switching
+    // the mock here is sufficient — no test-only seam needed.
+    loadAccounts.mockResolvedValue(
+      makeAccountsData([
+        { id: accountId1, access: "access-1", expires: Date.now() + 2 * 3600_000 },
+        {
+          id: accountId2,
+          refreshToken: refreshToken2,
+          access: freshAccess,
+          expires: Date.now() + 3_600_000,
+          token_updated_at: 999,
+        },
+      ]),
+    );
+
+    const loadCallsBeforeFetch = loadAccounts.mock.calls.length;
+
+    mockFetch.mockResolvedValue(new Response('{"content":[]}', { status: 200 }));
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+    expect(response.status).toBe(200);
+
+    // Wait until the background idle refresh has read from disk (proves it ran).
+    // readDiskAccountAuth always calls loadAccounts, so this is a reliable signal.
+    await waitForAssertion(() => {
+      expect(loadAccounts.mock.calls.length).toBeGreaterThan(loadCallsBeforeFetch);
+    });
+
+    // Allow the background task to fully settle before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // The idle refresh must NOT have issued an HTTP token request — disk had a valid
+    // fresher token (token_updated_at 999 > 100), so applyDiskAuthIfFresher returned
+    // early and the OAuth endpoint was never reached.
+    const oauthCalls = mockFetch.mock.calls.filter(([u]) => String(u).includes("/v1/oauth/token"));
+    expect(oauthCalls).toHaveLength(0);
   });
 
   it("disables account on 401 token refresh failure and retries with next account", async () => {
@@ -5002,5 +5118,536 @@ describe("orphaned tool_use repair", () => {
         ),
     );
     expect(syntheticResults).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// custom_betas retry latch
+// ---------------------------------------------------------------------------
+// Verify that a 400 response citing "anthropic-beta" (or a 413) triggers
+// exactly one retry that omits config.custom_betas while retaining the
+// mandatory always-on betas (oauth-2025-04-20, claude-code-20250219), and
+// that the latch (customBetasStripped) prevents infinite loops.
+//
+// Each test creates a fresh plugin instance via setupFetchFn so that
+// config.custom_betas is captured from the per-test loadConfig mock.
+// mockFetch is the backend; fetchFn() triggers the real retry loop.
+// ---------------------------------------------------------------------------
+describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
+  // Config that includes a custom beta so the retry latch code path fires.
+  const testConfig = {
+    ...DEFAULT_CONFIG,
+    account_selection_strategy: "sticky",
+    signature_emulation: {
+      ...DEFAULT_CONFIG.signature_emulation,
+      fetch_claude_code_version_on_startup: false,
+    },
+    override_model_limits: { ...DEFAULT_CONFIG.override_model_limits },
+    idle_refresh: { ...DEFAULT_CONFIG.idle_refresh, enabled: false },
+    adaptive_context: { ...DEFAULT_CONFIG.adaptive_context, enabled: false },
+    custom_betas: ["cache-diagnosis-2026-04-07"],
+  };
+
+  let fetchFn;
+
+  beforeEach(async () => {
+    mockFetch.mockReset();
+    vi.mocked(loadConfig).mockReturnValue(testConfig);
+    vi.mocked(loadConfigFresh).mockReturnValue(testConfig);
+    const client = makeClient();
+    fetchFn = await setupFetchFn(client);
+    // setupFetchFn may have triggered loadAccounts; reset so tests start clean.
+    mockFetch.mockReset();
+  });
+
+  afterEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it("first request includes configured custom beta; retry after 400/anthropic-beta omits it", async () => {
+    const body400 = JSON.stringify({
+      type: "error",
+      error: { type: "invalid_request_error", message: "Unknown beta flag in anthropic-beta header" },
+    });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        headers: { get: () => null },
+        json: async () => JSON.parse(body400),
+        text: async () => body400,
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (h) => (h === "content-type" ? "text/event-stream" : null) },
+        body: null,
+        text: async () => 'data: {"type":"message_stop"}\n\n',
+        clone() {
+          return this;
+        },
+      });
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-5",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 10,
+      }),
+    });
+
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const firstBetas = mockFetch.mock.calls[0][1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+    const secondBetas = mockFetch.mock.calls[1][1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+
+    expect(firstBetas).toContain("cache-diagnosis-2026-04-07");
+    expect(secondBetas).not.toContain("cache-diagnosis-2026-04-07");
+    expect(secondBetas).toContain("oauth-2025-04-20");
+    expect(secondBetas).toContain("claude-code-20250219");
+  });
+
+  it("413 response with beta/context signal body triggers single custom-beta strip and retry", async () => {
+    // F2: 413 only fires the strip latch when the body contains a specific keyword.
+    // "context_window" is an explicit signal; generic "context" alone is not.
+    const body413 = JSON.stringify({
+      error: { message: "Request too large: context_window limit exceeded" },
+    });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 413,
+        headers: { get: () => null },
+        json: async () => JSON.parse(body413),
+        text: async () => body413,
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (h) => (h === "content-type" ? "text/event-stream" : null) },
+        body: null,
+        text: async () => 'data: {"type":"message_stop"}\n\n',
+        clone() {
+          return this;
+        },
+      });
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-5",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 10,
+      }),
+    });
+
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const firstBetas = mockFetch.mock.calls[0][1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+    const secondBetas = mockFetch.mock.calls[1][1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+
+    expect(firstBetas).toContain("cache-diagnosis-2026-04-07");
+    expect(secondBetas).not.toContain("cache-diagnosis-2026-04-07");
+    expect(secondBetas).toContain("oauth-2025-04-20");
+  });
+
+  it("F2: 413 with empty body does NOT trigger custom-beta strip or retry", async () => {
+    // A plain 413 with no body text (e.g. upload-size limit) must not trigger
+    // the custom-beta strip latch - it is unrelated to betas.
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 413,
+      headers: { get: () => null },
+      json: async () => ({}),
+      text: async () => "",
+      clone() {
+        return this;
+      },
+    });
+
+    try {
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 10,
+        }),
+      });
+    } catch {
+      // May throw — we only care about call count.
+    }
+
+    // With an empty 413 body, no strip-and-retry occurs; the request is NOT
+    // duplicated by the custom-beta retry path (total calls still 1 per attempt,
+    // not 2 from a strip-triggered re-issue).
+    const betaCalls = mockFetch.mock.calls.filter((c) =>
+      String(c[0]).startsWith("https://api.anthropic.com/v1/messages"),
+    );
+    expect(betaCalls).toHaveLength(1);
+    // All calls use the same betas — the custom beta must still be present on
+    // the only attempt (no strip happened).
+    for (const call of betaCalls) {
+      const betas = call[1].headers
+        .get("anthropic-beta")
+        .split(",")
+        .map((s) => s.trim());
+      expect(betas).toContain("cache-diagnosis-2026-04-07");
+    }
+  });
+
+  it("F1: alias in custom_betas ('cache-diag') is evicted canonically on retry", async () => {
+    // F1: config.custom_betas may contain aliases. The eviction code must delete
+    // the canonical form (cache-diagnosis-2026-04-07), not just the raw alias.
+    const aliasConfig = {
+      ...testConfig,
+      custom_betas: ["cache-diag"], // alias for cache-diagnosis-2026-04-07
+    };
+    vi.mocked(loadConfig).mockReturnValue(aliasConfig);
+    vi.mocked(loadConfigFresh).mockReturnValue(aliasConfig);
+    const aliasClient = makeClient();
+    const aliasFetchFn = await setupFetchFn(aliasClient);
+    mockFetch.mockReset();
+
+    const body400 = JSON.stringify({
+      type: "error",
+      error: { type: "invalid_request_error", message: "Unknown beta flag in anthropic-beta header" },
+    });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        headers: { get: () => null },
+        json: async () => JSON.parse(body400),
+        text: async () => body400,
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: (h) => (h === "content-type" ? "text/event-stream" : null) },
+        body: null,
+        text: async () => 'data: {"type":"message_stop"}\n\n',
+        clone() {
+          return this;
+        },
+      });
+
+    await aliasFetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-5",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 10,
+      }),
+    });
+
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const firstBetas = mockFetch.mock.calls[0][1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+    const retryBetas = mockFetch.mock.calls[1][1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+
+    // First attempt must include the canonical beta resolved from the alias.
+    expect(firstBetas).toContain("cache-diagnosis-2026-04-07");
+    // Retry must not include the canonical beta (alias eviction worked).
+    expect(retryBetas).not.toContain("cache-diagnosis-2026-04-07");
+    // Mandatory betas must still be present on the retry.
+    expect(retryBetas).toContain("oauth-2025-04-20");
+    expect(retryBetas).toContain("claude-code-20250219");
+  });
+
+  it("F4: second request in same plugin instance skips a previously rejected custom beta", async () => {
+    // F4: session latch — after a custom beta is rejected, the NEXT logical request
+    // (new fetchFn call) must already omit that beta without paying a first-fail.
+    const body400 = JSON.stringify({
+      type: "error",
+      error: { type: "invalid_request_error", message: "Unknown beta flag in anthropic-beta header" },
+    });
+    const successResponse = () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (h) => (h === "content-type" ? "text/event-stream" : null) },
+      body: null,
+      text: async () => 'data: {"type":"message_stop"}\n\n',
+      clone() {
+        return this;
+      },
+    });
+    // First request: 400, then retry and succeed.
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        headers: { get: () => null },
+        json: async () => JSON.parse(body400),
+        text: async () => body400,
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce(successResponse())
+      // Second request should go straight through (no 400 needed).
+      .mockResolvedValueOnce(successResponse());
+
+    const makeReq = () =>
+      fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 10,
+        }),
+      });
+
+    // First request: triggers strip latch and succeeds on retry (2 fetch calls).
+    await makeReq();
+    const callsAfterFirst = mockFetch.mock.calls.length;
+    expect(callsAfterFirst).toBeGreaterThanOrEqual(2);
+
+    // Second request: session latch already active — must omit the custom beta
+    // from the very first attempt (no 400 retry needed = exactly 1 new fetch call).
+    await makeReq();
+    const secondReqCalls = mockFetch.mock.calls.slice(callsAfterFirst);
+    expect(secondReqCalls.length).toBe(1); // No retry needed.
+
+    const secondReqBetas = secondReqCalls[0][1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+    // Session latch must have evicted the custom beta before the request was sent.
+    expect(secondReqBetas).not.toContain("cache-diagnosis-2026-04-07");
+    // Mandatory betas must still be present.
+    expect(secondReqBetas).toContain("oauth-2025-04-20");
+    expect(secondReqBetas).toContain("claude-code-20250219");
+  });
+
+  it("F4-selective: when error body names one custom beta, only that beta is session-latched", async () => {
+    // Two custom betas configured; the 400 body explicitly names only the first.
+    // The second request must omit the named beta but retain the other.
+    const twoBetaConfig = {
+      ...testConfig,
+      custom_betas: ["cache-diagnosis-2026-04-07", "interleaved-thinking-2025-05-14"],
+    };
+    vi.mocked(loadConfig).mockReturnValue(twoBetaConfig);
+    vi.mocked(loadConfigFresh).mockReturnValue(twoBetaConfig);
+    const twoBetaClient = makeClient();
+    const twoBetaFetchFn = await setupFetchFn(twoBetaClient);
+    mockFetch.mockReset();
+
+    // Body only names the first beta.
+    const body400 = JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "Unknown beta flag: cache-diagnosis-2026-04-07 is not supported in anthropic-beta",
+      },
+    });
+    const successResponse = () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (h) => (h === "content-type" ? "text/event-stream" : null) },
+      body: null,
+      text: async () => 'data: {"type":"message_stop"}\n\n',
+      clone() {
+        return this;
+      },
+    });
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        headers: { get: () => null },
+        json: async () => JSON.parse(body400),
+        text: async () => body400,
+        clone() {
+          return this;
+        },
+      })
+      .mockResolvedValueOnce(successResponse())
+      // Second logical request goes straight through.
+      .mockResolvedValueOnce(successResponse());
+
+    const makeReq = () =>
+      twoBetaFetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 10,
+        }),
+      });
+
+    // First request: 400 → strip all custom betas for this retry, session-latch only cache-diagnosis.
+    await makeReq();
+    const callsAfterFirst = mockFetch.mock.calls.length;
+    expect(callsAfterFirst).toBeGreaterThanOrEqual(2);
+
+    // Second logical request: session latch filters cache-diagnosis; interleaved-thinking passes.
+    await makeReq();
+    const secondReqBetas = mockFetch.mock.calls[callsAfterFirst][1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+
+    // Only the mentioned beta is suppressed.
+    expect(secondReqBetas).not.toContain("cache-diagnosis-2026-04-07");
+    // The un-mentioned beta must still be present.
+    expect(secondReqBetas).toContain("interleaved-thinking-2025-05-14");
+    // Mandatory betas must always be present.
+    expect(secondReqBetas).toContain("oauth-2025-04-20");
+    expect(secondReqBetas).toContain("claude-code-20250219");
+  });
+
+  it("F4-TTL: session-rejected beta is re-included after the 5-minute TTL expires", async () => {
+    // After a beta is rejected and session-latched, requests within the TTL omit it.
+    // Once the TTL elapses, the beta must be re-tried (latch entry expires).
+    const body400 = JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "Unknown beta flag: cache-diagnosis-2026-04-07 in anthropic-beta header",
+      },
+    });
+    const successResponse = () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (h) => (h === "content-type" ? "text/event-stream" : null) },
+      body: null,
+      text: async () => 'data: {"type":"message_stop"}\n\n',
+      clone() {
+        return this;
+      },
+    });
+
+    let fakeNow = Date.now();
+    const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => fakeNow);
+
+    try {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          headers: { get: () => null },
+          json: async () => JSON.parse(body400),
+          text: async () => body400,
+          clone() {
+            return this;
+          },
+        })
+        .mockResolvedValueOnce(successResponse())
+        // Second request (TTL still active): omits beta, succeeds.
+        .mockResolvedValueOnce(successResponse())
+        // Third request (after TTL): beta re-included, succeeds.
+        .mockResolvedValueOnce(successResponse());
+
+      const makeReq = () =>
+        fetchFn("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-opus-4-5",
+            messages: [{ role: "user", content: "hi" }],
+            max_tokens: 10,
+          }),
+        });
+
+      // Request 1: 400 → strip + session-latch, then retry succeeds.
+      await makeReq();
+      const callsAfterFirst = mockFetch.mock.calls.length;
+      expect(callsAfterFirst).toBeGreaterThanOrEqual(2);
+
+      // Request 2: TTL not elapsed → beta is still suppressed.
+      await makeReq();
+      const callsAfterSecond = mockFetch.mock.calls.length;
+      const secondBetas = mockFetch.mock.calls[callsAfterFirst][1].headers
+        .get("anthropic-beta")
+        .split(",")
+        .map((s) => s.trim());
+      expect(secondBetas).not.toContain("cache-diagnosis-2026-04-07");
+
+      // Advance fake time past the 5-minute TTL.
+      fakeNow += 5 * 60 * 1000 + 1;
+
+      // Request 3: TTL expired → beta is back in the header.
+      await makeReq();
+      const thirdBetas = mockFetch.mock.calls[callsAfterSecond][1].headers
+        .get("anthropic-beta")
+        .split(",")
+        .map((s) => s.trim());
+      expect(thirdBetas).toContain("cache-diagnosis-2026-04-07");
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  it("latch prevents infinite loop: second 400/anthropic-beta does not re-strip", async () => {
+    // Always return 400/anthropic-beta — the latch must prevent infinite retry.
+    const latchBody = JSON.stringify({
+      type: "error",
+      error: { type: "invalid_request_error", message: "Unknown beta flag in anthropic-beta header" },
+    });
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 400,
+      headers: { get: () => null },
+      json: async () => JSON.parse(latchBody),
+      text: async () => latchBody,
+      clone() {
+        return this;
+      },
+    });
+
+    try {
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-opus-4-5",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 10,
+        }),
+      });
+    } catch {
+      // Expected — all attempts exhaust with 400.
+    }
+
+    // Latch fires after first strip; subsequent 400/anthropic-beta responses
+    // are NOT re-stripped. Total calls are bounded, never infinite.
+    expect(mockFetch.mock.calls.length).toBeGreaterThan(0);
+    expect(mockFetch.mock.calls.length).toBeLessThan(30);
   });
 });
