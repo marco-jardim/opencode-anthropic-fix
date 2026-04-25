@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * CLI for managing Anthropic multi-account OAuth configuration.
  *
