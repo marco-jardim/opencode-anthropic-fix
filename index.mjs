@@ -7408,6 +7408,12 @@ function buildAnthropicBetaHeader(
     betas.push("context-hint-2026-04-09");
   }
 
+  // extended-cache-ttl-2025-04-11 — found in CC v2.1.133. Extends server-side
+  // prompt cache TTL. Auto-on for 1P + Claude 4+ to improve cache hit rates.
+  if (isFirstPartyProvider && !/claude-3-/i.test(model)) {
+    betas.push("extended-cache-ttl-2025-04-11");
+  }
+
   // Files API — scoped to file endpoints/references
   if (isFilesEndpoint || hasFileReferences) {
     betas.push("files-api-2025-04-14");
@@ -7796,6 +7802,18 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       // Non-adaptive models never carry a top-level effort in real CC — strip it
       // to avoid polluting the fingerprint for models like Haiku.
       delete parsed.effort;
+    }
+
+    // Claude Code v2.1.117+: default effort for Pro/Max on adaptive models is
+    // "high" (was "medium"). If the host omits effort entirely, inject the
+    // default so the wire shape matches real CC.
+    if (parsed.model && isAdaptiveThinkingModel(parsed.model)) {
+      if (!parsed.output_config || typeof parsed.output_config !== "object") {
+        parsed.output_config = {};
+      }
+      if (!("effort" in parsed.output_config)) {
+        parsed.output_config.effort = "high";
+      }
     }
 
     // Claude Code temperature rule: when extended thinking is active (any type),

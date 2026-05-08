@@ -765,7 +765,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.119");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.133");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -3203,6 +3203,40 @@ describe("header handling", () => {
     const parsed = JSON.parse(init.body);
     expect(parsed.effort).toBeUndefined();
     // Haiku never gets output_config.effort in real CC, don't fabricate it.
+    expect(parsed.output_config?.effort).toBeUndefined();
+  });
+
+  it("injects default effort 'high' for adaptive models when effort is absent (v2.1.117+)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4-6",
+        messages: [],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    expect(parsed.output_config).toEqual({ effort: "high" });
+  });
+
+  it("does not inject default effort for non-adaptive models", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        messages: [],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
     expect(parsed.output_config?.effort).toBeUndefined();
   });
 

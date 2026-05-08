@@ -1,13 +1,14 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
-<!-- Last verified against: Claude Code 2.1.119 (build 2026-04-23T19:08:52Z, git 6f68554) -->
+<!-- Last verified against: Claude Code 2.1.133 (build 2026-05-07T18:26:46Z, git cba57ff) -->
 
 ## Version history (mimicry-relevant changes)
 
-| CC version | SDK bundled | Beta additions             | Beta removals | OAuth change |
-| ---------- | ----------- | -------------------------- | ------------- | ------------ |
-| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07 | none          | none         |
-| 2.1.117    | 0.81.0      | (baseline for this doc)    | none          | none         |
+| CC version | SDK bundled | Beta additions                                         | Beta removals | OAuth change |
+| ---------- | ----------- | ------------------------------------------------------ | ------------- | ------------ |
+| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01 | none          | none         |
+| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                             | none          | none         |
+| 2.1.117    | 0.81.0      | (baseline for this doc)                                | none          | none         |
 
 ### cache-diagnosis-2026-04-07 (added in 2.1.119)
 
@@ -25,6 +26,27 @@
   is retried without the beta.
 - Plugin support: listed in `EXPERIMENTAL_BETA_FLAGS`; shortcuts `cache-diagnosis` and
   `cache-diag` are registered in `BETA_SHORTCUTS`. NOT included in any always-on header list.
+
+### extended-cache-ttl-2025-04-11 (found in 2.1.133)
+
+- New beta for extended cache TTL duration.
+- NOT always-on. Likely gated by a GrowthBook feature flag (flag name unknown).
+- When active, extends the TTL for prompt cache entries beyond the default.
+- Plugin support: listed in `EXPERIMENTAL_BETA_FLAGS`; shortcuts `extended-cache-ttl` and
+  `cache-ttl` are registered in `BETA_SHORTCUTS`. NOT included in any always-on header list.
+
+### environments-2025-11-01 (found in 2.1.133)
+
+- New environments support beta.
+- NOT always-on. Purpose and gating mechanism unknown from binary analysis.
+- Plugin support: listed in `EXPERIMENTAL_BETA_FLAGS`. NOT included in any always-on header list.
+
+### context_management edit type compact_20260112 (found in 2.1.133)
+
+- New `context_management.edits` type `compact_20260112` found alongside existing `clear_thinking_20251015`.
+- Used during full server-side context compaction (not just thinking management).
+- Plugin currently injects `clear_thinking_20251015` only, which remains valid.
+- Not a fingerprint drift since the plugin doesn't trigger server-side compaction flows.
 
 This document explains, at implementation level, how the plugin mimics Claude Code signature behavior for Anthropic requests, with focus on:
 
@@ -265,6 +287,8 @@ Automatically enabled by Claude Code (functional reference):
 - `oauth-2025-04-20`
 - `token-counting-2024-11-01` (preflight `/v1/messages/count_tokens`)
 - `task-budgets-2026-03-13` (conditional on task budget presence)
+- `extended-cache-ttl-2025-04-11` (conditional on feature flag, not always-on)
+- `environments-2025-11-01` (conditional on feature flag, not always-on)
 
 Now auto-included by the plugin:
 
@@ -280,6 +304,8 @@ Available via `/anthropic betas add` or `ANTHROPIC_BETAS`:
 - `compact-2026-01-12`
 - `mcp-servers-2025-12-04`
 - `code-execution-2025-08-25`
+- `extended-cache-ttl-2025-04-11`
+- `environments-2025-11-01`
 
 Platform-specific betas (not cross-provider defaults):
 
@@ -304,6 +330,11 @@ No dedicated automatic composition yet for:
 - `cli-internal-2026-02-09` (ant-only)
 
 `task-budgets-2026-03-13` is available as a BETA_SHORTCUTS shortcut (`task-budgets` / `budgets`) and propagates `output_config` body injection when active.
+
+Newly identified in v2.1.133 (not yet auto-included):
+
+- `extended-cache-ttl-2025-04-11` (registered in EXPERIMENTAL_BETA_FLAGS and BETA_SHORTCUTS)
+- `environments-2025-11-01` (registered in EXPERIMENTAL_BETA_FLAGS)
 
 Remaining gaps can be injected manually through `ANTHROPIC_BETAS` or `/anthropic betas add` when operationally required.
 
@@ -557,6 +588,8 @@ When extended thinking is active (`thinking.type` is `"adaptive"` or `"enabled"`
 ```
 
 This tells the API how to handle thinking blocks during context management operations. Only injected when the field is not already present in the request body.
+
+**v2.1.133 addition:** A new edit type `compact_20260112` was found in the binary, used for full context compaction flows. The plugin continues to use `clear_thinking_20251015` which remains valid for the thinking-management path. The `compact_20260112` type is only relevant when the server triggers micro-compaction with `context-hint-2026-04-09`, which the plugin handles through separate context-hint logic.
 
 ### 7.3 `speed` body field (fast mode)
 

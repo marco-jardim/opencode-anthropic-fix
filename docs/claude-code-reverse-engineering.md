@@ -42,12 +42,12 @@ if (status === 400 && body.includes(SeH) && body.includes("anthropic-beta"))
   latch = false;   // drop beta, retry without it
 ```
 
-**Package:** `@anthropic-ai/claude-code` v2.1.116 (latest reviewed; see §16 for per-version drift)
-**Source:** `claude.exe` (native Bun-compiled binary from `@anthropic-ai/claude-code-win32-x64@2.1.116`; as of ≈v2.1.110 the npm `cli.js` was replaced by a platform-specific native binary)
-**Build Time:** `2026-04-20T13:57:26Z` (v2.1.116)
+**Package:** `@anthropic-ai/claude-code` v2.1.123 (latest reviewed; see §16 for per-version drift)
+**Source:** `claude.exe` (native Bun-compiled binary from `@anthropic-ai/claude-code-win32-x64@2.1.123`; as of ≈v2.1.110 the npm `cli.js` was replaced by a platform-specific native binary)
+**Build Time:** `2026-04-29T03:29:00Z` (v2.1.123)
 **Internal Codename:** `tengu`
 **Purpose:** Full reverse-engineering for OpenCode plugin mimicry of Claude Code authentication and API calls
-**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90, v2.1.100, v2.1.104, v2.1.105, v2.1.107, v2.1.114, v2.1.116
+**Previous versions analyzed:** v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90, v2.1.100, v2.1.104, v2.1.105, v2.1.107, v2.1.114, v2.1.116, v2.1.119, v2.1.123
 
 ---
 
@@ -2009,6 +2009,44 @@ not from official announcements.
 **API request shape:** STABLE.
 **Monitoring note:** starting at ≈v2.1.110 the npm `@anthropic-ai/claude-code` tarball is a thin installer (`cli-wrapper.cjs` + `install.cjs`, ~130 KB unpacked); real code lives in the platform-specific `@anthropic-ai/claude-code-{win32-x64,linux-x64,darwin-arm64,…}` binaries. All future diffs must pull the native binary.
 
+### 2026-04-30 — v2.1.123 Diff (2.1.119 → 2.1.123)
+
+**Type:** Upstream client release. Changelog-based review (2.1.117–2.1.123). No binary diff — changes are OAuth/MCP/Bedrock fixes plus one default-effort behavioral change.
+
+**Mimicry verdict:** **Default effort changed from `medium` to `high` for adaptive models (Opus 4.6, Sonnet 4.6). Plugin updated to inject `output_config.effort = "high"` when effort is absent.**
+
+**Key findings:**
+
+| Change                                     | Version | Detail                                                                                                                                           | Mimicry Impact                                                 |
+| ------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| **Default effort → `high`**                | 2.1.117 | Pro/Max subscribers on Opus 4.6 and Sonnet 4.6 now default to `effort: "high"` (was `"medium"`). Applied server-side via `output_config.effort`. | **MEDIUM** — plugin now injects default `output_config.effort` |
+| **New beta: `cache-diagnosis-2026-04-07`** | 2.1.119 | Gated by GrowthBook `tengu_prompt_cache_diagnostics`. Not always-on. Diagnoses prompt cache hit/miss.                                            | NONE — already in `BETA_SHORTCUTS` for opt-in                  |
+| **OAuth 401 retry loop fix**               | 2.1.123 | Fixed auth getting stuck in a 401 retry loop when `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is set.                                             | NONE — plugin already treats 401 as terminal                   |
+| **`X-Amzn-Bedrock-Service-Tier` header**   | 2.1.122 | New `ANTHROPIC_BEDROCK_SERVICE_TIER` env var for Bedrock (`default`, `flex`, `priority`).                                                        | NONE — Bedrock-only, plugin targets 1P                         |
+| **`output_config` fix for Vertex/Bedrock** | 2.1.122 | Fixed `output_config: Extra inputs are not permitted` on Vertex/Bedrock structured-output queries (session-title generation).                    | NONE — plugin targets 1P                                       |
+| **Plugin validation**                      | 2.1.120 | `claude plugin validate` accepts `$schema`, `version`, `description`. `plugin.json` accepts `$schema`.                                           | NONE — not runtime                                             |
+| **MCP changes**                            | 2.1.121 | `mcp_authenticate` supports `redirectUri`. `alwaysLoad` config. `FORK_SUBAGENT` works non-interactive.                                           | NONE — MCP not implemented                                     |
+| **OAuth fixes**                            | 2.1.118 | MCP token refresh, `expires_in` missing, cross-process lock, `/login` with `CLAUDE_CODE_OAUTH_TOKEN`.                                            | NONE — independent implementation                              |
+| **Beta headers**                           | —       | No new always-on betas added. All existing betas remain unchanged.                                                                               | NONE                                                           |
+| **SDK version**                            | —       | Still `0.81.0` through 2.1.123. No bump.                                                                                                         | NONE                                                           |
+
+**Plugin actions applied in v0.1.26:**
+
+- Bumped `FALLBACK_CLAUDE_CLI_VERSION` → `"2.1.123"` (`lib/request-headers.mjs:19`).
+- Bumped `CLAUDE_CODE_BUILD_TIME` → `"2026-04-29T03:29:00Z"` (`lib/request-headers.mjs:21`).
+- Added `["2.1.123", "0.81.0"]`, `["2.1.122", "0.81.0"]`, `["2.1.121", "0.81.0"]`, `["2.1.120", "0.81.0"]` to `CLI_TO_SDK_VERSION`.
+- Added default effort injection: when `effort` is absent for adaptive models, `output_config.effort = "high"` is injected (`index.mjs`).
+- Updated conformance regression test pins to 2.1.123 and added effort-injection tests.
+
+**Do-not-do notes:**
+
+- **Do not** inject effort for non-adaptive models (Haiku, older Sonnet). Only `isAdaptiveThinkingModel()` models get default effort.
+- **Do not** add `cache-diagnosis-2026-04-07` to always-on betas. It's GrowthBook-gated and may trip 400s.
+
+**OAuth/Auth:** STABLE.
+**Beta headers:** STABLE.
+**API request shape:** MINOR CHANGE (default effort injection).
+
 ### 2026-04-14 — v2.1.107 Breaking Changes (Tool Name Blocklist + CCH Algorithm Change)
 
 **Type:** Server-side enforcement + client-side breaking changes. **Plugin was broken until this fix.**
@@ -2435,5 +2473,5 @@ REVIEW.md violations are treated as nit-level findings.
 ---
 
 _Generated by reverse-engineering `@anthropic-ai/claude-code` cli.js bundle._
-_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90, v2.1.100, v2.1.104, v2.1.105, v2.1.107_
-_Last updated: 2026-04-14_
+_Versions analyzed: v2.1.80, v2.1.81, v2.1.83, v2.1.84, v2.1.85, v2.1.86, v2.1.87, v2.1.88, v2.1.89, v2.1.90, v2.1.100, v2.1.104, v2.1.105, v2.1.107, v2.1.114, v2.1.116, v2.1.119, v2.1.123_
+_Last updated: 2026-04-30_

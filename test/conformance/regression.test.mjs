@@ -1148,6 +1148,7 @@ describe("E2E: Beta composition is complete and correct", () => {
     expect(beta).toContain("interleaved-thinking-2025-05-14");
     expect(beta).toContain("prompt-caching-scope-2026-01-05");
     expect(beta).toContain("context-management-2025-06-27");
+    expect(beta).toContain("extended-cache-ttl-2025-04-11");
     // Provider-aware tool search: 1P uses advanced-tool-use, 3P uses tool-search-tool.
     // Since tests hit first-party (default), expect advanced-tool-use.
     expect(beta).toContain("advanced-tool-use-2025-11-20");
@@ -1409,7 +1410,7 @@ describe("E2E: systemPromptTailing default (A2)", () => {
   });
 });
 
-describe("E2E: Version is 2.1.119", () => {
+describe("E2E: Version is 2.1.133", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1418,17 +1419,17 @@ describe("E2E: Version is 2.1.119", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.119", async () => {
+  it("User-Agent contains 2.1.133", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.119");
+    expect(headers.get("user-agent")).toContain("2.1.133");
   });
 
-  it("billing header contains 2.1.119", async () => {
+  it("billing header contains 2.1.133", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.119");
+    expect(body.system[0].text).toContain("2.1.133");
   });
 });
 
