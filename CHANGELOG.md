@@ -2,6 +2,46 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.27] — 2026-05-16
+
+### Upstream tracking — Claude Code v2.1.133 → v2.1.143 + simple-system-prompt mode + cc_workload billing tag
+
+10-version sync. Drift risk on the wire was **low**: real CC 2.1.143 only added one beta to the registry (not auto-emitted) and two `x-` headers that are emitted only inside subagent dispatch contexts. The valuable work was registering the new flags, exploiting two token-economy gaps the prior analyses missed (simple-system-prompt mode and `cc_workload` billing), and writing a real risk assessment for `mid-conversation-system`, subagent header propagation, and `stop_details`.
+
+Full analysis: `docs/claude-code-2.1.143-analysis.md`. Verified via `strings` extraction of the win32-x64 native Bun binary at build time `2026-05-15T17:39:39Z`, git `cfb8132e4c3551e2773f41a1900efd1cc93637db`.
+
+**Applied (P0 — mimicry parity):**
+
+- `FALLBACK_CLAUDE_CLI_VERSION`: `"2.1.133"` → `"2.1.143"` (`lib/request-headers.mjs`)
+- `CLAUDE_CODE_BUILD_TIME`: `"2026-05-07T18:26:46Z"` → `"2026-05-15T17:39:39Z"`
+- Added 10 entries to `CLI_TO_SDK_VERSION` (2.1.134–2.1.143, all → `"0.81.0"`)
+- Registered `mid-conversation-system-2026-04-07` in `EXPERIMENTAL_BETA_FLAGS` with shortcuts `mid-conv-system` / `mid-system`. NOT auto-emitted — real CC registers the beta but the auto-emit subset (`yi6`/`Si6` in the binary) does not include it. Pure opt-in via `custom_betas` until server rollout evidence emerges.
+- Registered `user-profiles-2026-03-24` for forward-compat (SDK admin endpoint beta, not chat completions).
+- Version pins in `index.test.mjs`, `lib/request-headers.test.mjs`, and `test/conformance/regression.test.mjs` bumped to `2.1.143`.
+
+**New: simple-system-prompt mode** (real CC `tengu_vellum_lantern` equivalent):
+
+- New config flag `token_economy.simple_system_prompt: false` (default off).
+- New helper `isSimpleSystemPromptEligible(model)` matching real CC's `sR9`: `claude-opus-4-7` and any `-eap` (early access) variant.
+- When flag is on AND model is eligible AND request is main-role, `buildSystemPromptBlocks` skips the anti-verbosity boilerplate injection (`ANTI_VERBOSITY_SYSTEM_PROMPT` + `NUMERIC_LENGTH_ANCHORS_PROMPT`). Identity preamble, billing block, user instructions, `<system-reminder>` blocks all preserved — CC fingerprint match unaffected.
+- Savings: ~600–1500 tokens per request on eligible models. Conservative scope: gates only the plugin-owned anti-verbosity blocks; nothing the server uses to identify CC requests is touched.
+
+**New: `cc_workload` billing tag**:
+
+- New config flag `signature_emulation.workload: ""` (default empty → segment omitted).
+- `buildAnthropicBillingHeader` now accepts a `workloadOverride` parameter that takes precedence over the existing `CLAUDE_CODE_WORKLOAD` env-var fallback.
+- Emitted as `cc_workload=<tag>;` in the `x-anthropic-billing-header`, immediately after `cch=00000;`. Matches real CC's `--workload <tag>` CLI flag exactly.
+- Provider gated: bedrock / anthropicAws / mantle skip the segment (same gate as `cch`).
+- Sanitised against header-injection characters (`[;\s\r\n]` → `_`).
+
+**Not applied (deferred, see `docs/future-improvements.md` § 8–10):**
+
+- `mid-conversation-system-2026-04-07` auto-emission — wait for MITM evidence of real CC sending it before mirroring the body shape and 422 retry path.
+- Subagent identity header propagation (`x-claude-code-agent-id` / `x-claude-code-parent-agent-id`) — needs OpenCode to surface subagent identity through `experimental.chat.params`. Today it does not.
+- `stop_details` response passthrough verification — added as a P3 TODO; a smoke test in the SSE re-emitter is recommended.
+
+**Tests:** 1141/1141 pass.
+
 ## [0.1.23] — 2026-04-21
 
 ### Upstream tracking — Claude Code v2.1.116 → v2.1.117 + env-context fingerprint rewrite

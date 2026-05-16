@@ -6482,6 +6482,26 @@ function isOpus47Model(model) {
 }
 
 /**
+ * Models eligible for the "simple system prompt" mode that real CC ships in
+ * v2.1.133+ under GrowthBook flag `tengu_vellum_lantern` (or forced via
+ * `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=1`).
+ *
+ * Real CC's `sR9` matches: `claude-opus-4-7`, any model with `-eap` (early
+ * access) suffix, plus a small GrowthBook-controlled allowlist we can't read.
+ * Plugin mirrors the deterministic subset only.
+ *
+ * @param {string | undefined} model
+ * @returns {boolean}
+ */
+function isSimpleSystemPromptEligible(model) {
+  if (!model) return false;
+  if (isOpus47Model(model)) return true;
+  // -eap suffix variant, e.g. "claude-opus-4-7-eap" or "claude-opus-4-7-eap[1m]"
+  if (/-eap(?:\[|$|-)/i.test(model)) return true;
+  return false;
+}
+
+/**
  * Detects claude-sonnet-4.6 / claude-sonnet-4-6 model IDs.
  * @param {string | undefined} body
  * @returns {boolean}
@@ -6724,9 +6744,11 @@ function buildRequestMetadata(input) {
  * @param {string} version - CLI version (e.g., "2.1.97")
  * @param {string} [firstUserMessage] - First user message text for fingerprint computation
  * @param {string} [provider] - API provider ("anthropic" | "bedrock" | "vertex" | "foundry" | "anthropicAws" | "mantle")
+ * @param {string} [workloadOverride] - Explicit workload tag from config (`signature_emulation.workload`).
+ *   Takes precedence over `CLAUDE_CODE_WORKLOAD` env var. Mirrors real CC's `--workload <tag>` flag.
  * @returns {string}
  */
-function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
+function buildAnthropicBillingHeader(version, firstUserMessage, provider, workloadOverride) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
   // Real CC sends cc_entrypoint=cli (confirmed via proxy capture).
   const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
@@ -6741,13 +6763,15 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
   // The server uses the PRESENCE of cch=00000 as a CC identification signal.
   const cchDisabled = provider === "bedrock" || provider === "anthropicAws" || provider === "mantle";
   const cchPart = cchDisabled ? "" : " cch=00000;";
-  // Build workload part (upstream concatenates directly, no regex replace)
+  // Build workload part (upstream concatenates directly, no regex replace).
+  // Config wins over env so `signature_emulation.workload` is portable across hosts.
   let workloadPart = "";
-  const workload = process.env.CLAUDE_CODE_WORKLOAD;
-  if (workload) {
-    // QA fix M5: sanitize workload value to prevent header injection
-    const safeWorkload = workload.replace(/[;\s\r\n]/g, "_");
-    workloadPart = ` cc_workload=${safeWorkload};`;
+  const workload = workloadOverride || process.env.CLAUDE_CODE_WORKLOAD;
+  if (workload && !cchDisabled) {
+    // QA fix M5: sanitize workload value to prevent header injection.
+    // Real CC skips cc_workload on bedrock/anthropicAws/mantle (same gate as cch).
+    const safeWorkload = String(workload).replace(/[;\s\r\n]/g, "_");
+    if (safeWorkload) workloadPart = ` cc_workload=${safeWorkload};`;
   }
   return `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}${workloadPart}`;
 }
@@ -7195,8 +7219,20 @@ function buildSystemPromptBlocks(system, signature) {
 
   // Anti-verbosity injection (CC v2.1.100 quiet_salted_ember equivalent).
   // Applies to Opus 4.6 / 4.7 for non-title-generator requests.
+  //
+  // Simple-system-prompt gate (CC v2.1.133+ `tengu_vellum_lantern` equivalent):
+  // when `signature.simpleSystemPrompt` is true AND the model is eligible
+  // (Opus 4.7, -eap variants), skip the anti-verbosity boilerplate. Real CC's
+  // simple-prompt mode strips this kind of post-hoc behavioral hand-holding on
+  // models that don't need it. Conservative implementation: gates ONLY the
+  // anti-verbosity push, not the identity / billing / sanitized blocks. Saves
+  // ~600-1500 tokens per request on eligible models without touching the CC
+  // fingerprint markers the server checks.
+  const skipAntiVerbosity = signature.simpleSystemPrompt === true && isSimpleSystemPromptEligible(signature.modelId);
+
   if (
     !titleGeneratorRequest &&
+    !skipAntiVerbosity &&
     signature.modelId &&
     (isOpus46Model(signature.modelId) || isOpus47Model(signature.modelId))
   ) {
@@ -7233,6 +7269,7 @@ function buildSystemPromptBlocks(system, signature) {
     signature.claudeCliVersion,
     signature.firstUserMessage,
     signature.provider,
+    signature.workload,
   );
 
   // Select the identity string (matches real CC getCLISyspromptPrefix())
@@ -7408,7 +7445,7 @@ function buildAnthropicBetaHeader(
     betas.push("context-hint-2026-04-09");
   }
 
-  // extended-cache-ttl-2025-04-11 — found in CC v2.1.133. Extends server-side
+  // extended-cache-ttl-2025-04-11 — found in CC v2.1.143. Extends server-side
   // prompt cache TTL. Auto-on for 1P + Claude 4+ to improve cache hit rates.
   if (isFirstPartyProvider && !/claude-3-/i.test(model)) {
     betas.push("extended-cache-ttl-2025-04-11");
@@ -7967,6 +8004,15 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       // Default off — opt-in via `token_economy.lean_system_non_main: true`.
       requestRole: runtime?.requestRole,
       leanNonMain: config?.token_economy?.lean_system_non_main === true,
+      // Simple-system-prompt mode for Opus 4.7+ (CC v2.1.133+ parity, gated by
+      // GrowthBook `tengu_vellum_lantern` in real CC). Plugin gate: model
+      // eligibility + opt-in flag. See buildSystemPromptBlocks for what it
+      // strips (anti-verbosity boilerplate only; identity/billing untouched).
+      simpleSystemPrompt: config?.token_economy?.simple_system_prompt === true,
+      // Workload tag for x-anthropic-billing-header `cc_workload=` segment.
+      // Mirrors real CC's `--workload <tag>` CLI flag (process-scoped, used by
+      // SDK daemon callers spawning cron subprocesses). Empty string -> omit.
+      workload: typeof config?.signature_emulation?.workload === "string" ? config.signature_emulation.workload : "",
     };
     // Sanitize system prompt and optionally inject Claude Code identity/billing blocks.
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signatureWithModel);

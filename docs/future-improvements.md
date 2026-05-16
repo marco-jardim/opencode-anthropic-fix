@@ -237,4 +237,105 @@ If any of these diverge in a future version, the plugin's mimesis must follow.
 
 ---
 
-_Last updated: 2026-04-13 (added items 5–7 from v2.1.105 drift review)_
+_Last updated: 2026-05-16 (added items 8-10 from v2.1.143 drift review — see `claude-code-2.1.143-analysis.md`)_
+
+---
+
+## 8. Simple-system-prompt mode for Opus 4.7
+
+**Status:** Designed, not implemented
+**Risk:** Low (opt-in, no wire shape change beyond shorter system field)
+**Config:** `token_economy.simple_system_prompt: false` (default)
+
+### Source
+
+Real CC 2.1.133+ embeds a model-eligibility check (`sR9` in 2.1.143 bundle) that
+matches `claude-opus-4-7`, any `-eap` suffix models, and a GrowthBook-listed set
+(`tengu_velvet_cascade.models`). When eligible AND the GrowthBook flag
+`tengu_vellum_lantern` is on (or `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=1`), CC emits
+a leaner system prompt — less identity boilerplate, less tool self-description.
+
+### Plugin proposal
+
+1. Add a `token_economy.simple_system_prompt` flag (default `false`).
+2. Add a model-eligibility helper matching real CC's `sR9` (start with the
+   exact-match list: `claude-opus-4-7`, `-eap` suffix; skip the GrowthBook set
+   since we cannot read it).
+3. When the flag is on AND the model is eligible AND the request is main-role,
+   strip the verbose blocks from the system prompt and keep only:
+   - The identity preamble.
+   - The user instructions block (CLAUDE.md, etc.).
+   - The dynamic boundary marker.
+4. Gate behind `signature_emulation.enabled` so it can't accidentally fire when
+   mimicry is off.
+
+Expected savings: 200-600 input tokens per request on short-prompt Opus 4.7
+traffic. Real CC ships this opt-in by GrowthBook rollout, so default-off in the
+plugin is correct.
+
+---
+
+## 9. Billing `cc_workload=` segment passthrough
+
+**Status:** Designed, not implemented
+**Risk:** None (additive, optional, server already tolerates absence)
+**Config:** `signature_emulation.workload: ""` (default)
+
+### Source
+
+Real CC's `--workload <tag>` CLI flag (since at least 2.1.133) appends a
+`cc_workload=<tag>;` segment to the `x-anthropic-billing-header`, between
+`cch=00000;` and the end. It's process-scoped, "set by SDK daemon callers that
+spawn subprocesses for cron work". Provider-gated: bedrock/anthropicAws/mantle
+skip both `cch` and `cc_workload`.
+
+### Plugin proposal
+
+1. Add `signature_emulation.workload` (string, optional).
+2. Read `CLAUDE_CODE_WORKLOAD` env override.
+3. When non-empty AND provider is firstParty, append `cc_workload=<value>;` to
+   the billing header after the existing `cch=00000;`.
+4. Skip for bedrock / anthropicAws / mantle (matches real CC).
+
+This lets SDK-daemon users on opencode tag their cron traffic for billing
+attribution exactly like real CC. Zero cost when unset.
+
+---
+
+## 10. `mid-conversation-system-2026-04-07` opt-in support
+
+**Status:** Designed, not implemented (defer until server rollout visible)
+**Risk:** Medium (changes wire shape; depends on server-side gating)
+**Config:** `token_economy.mid_conversation_system: false` (default)
+
+### Source
+
+Beta registered in 2.1.143 master map. Telemetry `tengu_mid_conv_system_fallback_retry`
+confirms a retry-and-fallback path. Likely allows injecting `system` blocks
+between turns (Plan Mode / Goal mode / mid-stream system reminders), with the
+client falling back to a non-beta request shape if the server rejects.
+
+### Plugin proposal (defer until evidence)
+
+1. Detect when the plugin is about to inject a mid-conversation system block
+   (we already do this for `<system-reminder>` content).
+2. When the flag is on, add `mid-conversation-system-2026-04-07` to the
+   `anthropic-beta` header.
+3. On 422/424 referencing the beta, strip it and retry once.
+
+Defer until we observe real CC actually emitting this beta in MITM captures.
+The registry-only presence today suggests partial server rollout.
+
+### Cheap watch grep targets (running list)
+
+In addition to the v2.1.105 list above, monitor these for upcoming versions:
+
+- `x-claude-code-agent-id`, `x-claude-code-parent-agent-id` (added 2.1.143) —
+  if real CC starts sending them outside subagent contexts, plugin will need
+  to mirror.
+- `cc_workload=` — already present; track if format changes (e.g. adds another
+  segment after it).
+- `mid-conversation-system-` — new beta registered 2.1.143; flag the day it
+  starts appearing inside always-on emit paths.
+- `claude-opus-4-8`, `claude-sonnet-4-7` and friends — model registry expansions.
+- `stop_details` — confirm SSE re-emitter preserves the field on responses.

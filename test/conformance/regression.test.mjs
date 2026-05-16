@@ -1410,7 +1410,7 @@ describe("E2E: systemPromptTailing default (A2)", () => {
   });
 });
 
-describe("E2E: Version is 2.1.133", () => {
+describe("E2E: Version is 2.1.143", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1419,17 +1419,17 @@ describe("E2E: Version is 2.1.133", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.133", async () => {
+  it("User-Agent contains 2.1.143", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.133");
+    expect(headers.get("user-agent")).toContain("2.1.143");
   });
 
-  it("billing header contains 2.1.133", async () => {
+  it("billing header contains 2.1.143", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.133");
+    expect(body.system[0].text).toContain("2.1.143");
   });
 });
 

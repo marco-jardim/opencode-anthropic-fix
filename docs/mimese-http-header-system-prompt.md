@@ -1,14 +1,41 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
-<!-- Last verified against: Claude Code 2.1.133 (build 2026-05-07T18:26:46Z, git cba57ff) -->
+<!-- Last verified against: Claude Code 2.1.143 (build 2026-05-15T17:39:39Z, git cfb8132) -->
 
 ## Version history (mimicry-relevant changes)
 
-| CC version | SDK bundled | Beta additions                                         | Beta removals | OAuth change |
-| ---------- | ----------- | ------------------------------------------------------ | ------------- | ------------ |
-| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01 | none          | none         |
-| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                             | none          | none         |
-| 2.1.117    | 0.81.0      | (baseline for this doc)                                | none          | none         |
+| CC version | SDK bundled | Beta additions                                                  | Beta removals | OAuth change                                                              |
+| ---------- | ----------- | --------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------- |
+| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on) | none          | none on wire; client-side refresh telemetry expanded (legacy-lock detect) |
+| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01          | none          | none                                                                      |
+| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                      | none          | none                                                                      |
+| 2.1.117    | 0.81.0      | (baseline for this doc)                                         | none          | none                                                                      |
+
+### mid-conversation-system-2026-04-07 (registered in 2.1.143)
+
+- New beta added to the master `{json_key: beta_header}` registry in 2.1.143
+  (`mid_conversation_system -> mid-conversation-system-2026-04-07`).
+- Accompanied by telemetry event `tengu_mid_conv_system_fallback_retry` — implies
+  the client injects system blocks mid-conversation (not just leading), with a
+  fallback-and-retry path when the server refuses.
+- NOT in always-on emission code paths; only appears at the registry site and
+  inside the gated bundle block. Likely GrowthBook-gated until server rollout
+  completes.
+- Plugin support: should be listed in `EXPERIMENTAL_BETA_FLAGS` for forward
+  compat; should NOT be added to always-on emission set.
+
+### 2.1.143 wire-level changes (non-beta)
+
+- Two new optional `x-` headers when in subagent context:
+  `x-claude-code-agent-id`, `x-claude-code-parent-agent-id`. Emitted by real CC
+  only when a subagent dispatches; absence on main-thread is correct.
+- `anthropic-version` still `2023-06-01`.
+- All stainless headers, OAuth constants, model registry, billing header format
+  (`cc_version=...; cc_entrypoint=...; cch=00000; [cc_workload=...;]`) are
+  byte-identical to 2.1.133.
+- The `cc_workload=` billing segment and the `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT`
+  simple-prompt mode for Opus 4.7+ were already present in 2.1.133 — prior
+  analysis did not surface them. See `claude-code-2.1.143-analysis.md` § 6.1.
 
 ### cache-diagnosis-2026-04-07 (added in 2.1.119)
 
