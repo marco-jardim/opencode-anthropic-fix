@@ -247,10 +247,10 @@ describe("Fix #2: EXPERIMENTAL_BETA_FLAGS filter behavior", () => {
     const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const betaHeader = headers.get("anthropic-beta");
 
-    // Survivors: oauth, claude-code, effort
+    // Survivors: oauth, claude-code
     expect(betaHeader).toContain("oauth-2025-04-20");
     expect(betaHeader).toContain("claude-code-20250219");
-    expect(betaHeader).toContain("effort-2025-11-24");
+    expect(betaHeader).not.toContain("effort-2025-11-24");
 
     // Stripped: experimental set
     expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
@@ -1132,34 +1132,35 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all required always-on betas for non-Haiku model (v2.1.92 set)", async () => {
+  it("contains all required always-on betas for non-Haiku model (v2.1.150 set)", async () => {
     // Use opus-4-6: real CC's Lyz() only pushes effort-2025-11-24 for
     // rE(model) (Opus/Sonnet 4.6), so this test needs an adaptive model to
     // verify the full always-on set including effort.
     const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const beta = headers.get("anthropic-beta");
 
-    // RE doc §15.16 always-on set — synced to v2.1.92
+    // RE doc §15.16 always-on set — synced to v2.1.150
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
-    expect(beta).toContain("advanced-tool-use-2025-11-20");
-    expect(beta).toContain("fast-mode-2026-02-01");
-    expect(beta).toContain("effort-2025-11-24");
+    expect(beta).not.toContain("advanced-tool-use-2025-11-20");
+    expect(beta).not.toContain("fast-mode-2026-02-01");
+    expect(beta).not.toContain("effort-2025-11-24");
     expect(beta).toContain("interleaved-thinking-2025-05-14");
     expect(beta).toContain("prompt-caching-scope-2026-01-05");
-    expect(beta).toContain("context-management-2025-06-27");
+    expect(beta).not.toContain("context-management-2025-06-27");
     expect(beta).toContain("extended-cache-ttl-2025-04-11");
-    // Provider-aware tool search: 1P uses advanced-tool-use, 3P uses tool-search-tool.
-    // Since tests hit first-party (default), expect advanced-tool-use.
-    expect(beta).toContain("advanced-tool-use-2025-11-20");
+    expect(beta).toContain("thinking-token-count-2026-05-13");
+    expect(beta).toContain("redact-thinking-2026-02-12");
+    // Provider-aware tool search: tool-search-tool for 3P, neither for 1P by default.
+    expect(beta).not.toContain("advanced-tool-use-2025-11-20");
 
     // Token economy betas (config-controlled, defaults in DEFAULT_CONFIG.token_economy)
     // token-efficient-tools was removed in v2.1.90 (fully absent from bundle)
     expect(beta).not.toContain("token-efficient-tools-2026-03-28");
     // summarize-connector-text was removed in v2.1.90 (dead slot njq="" / NHq="" in v2.1.91+)
     expect(beta).not.toContain("summarize-connector-text-2026-03-13");
-    // redact-thinking is off by default
-    expect(beta).not.toContain("redact-thinking-2026-02-12");
+    // redact-thinking is on by default for non-Claude-3 models
+    expect(beta).toContain("redact-thinking-2026-02-12");
 
     // Removed in v2.1.84 — must NOT be sent
     expect(beta).not.toContain("tool-examples-2025-10-29");
@@ -1410,7 +1411,7 @@ describe("E2E: systemPromptTailing default (A2)", () => {
   });
 });
 
-describe("E2E: Version is 2.1.143", () => {
+describe("E2E: Version is 2.1.150", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1419,17 +1420,17 @@ describe("E2E: Version is 2.1.143", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.143", async () => {
+  it("User-Agent contains 2.1.150", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.143");
+    expect(headers.get("user-agent")).toContain("2.1.150");
   });
 
-  it("billing header contains 2.1.143", async () => {
+  it("billing header contains 2.1.150", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.143");
+    expect(body.system[0].text).toContain("2.1.150");
   });
 });
 

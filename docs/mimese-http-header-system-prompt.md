@@ -1,15 +1,16 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
-<!-- Last verified against: Claude Code 2.1.143 (build 2026-05-15T17:39:39Z, git cfb8132) -->
+<!-- Last verified against: Claude Code 2.1.150 (build 2026-05-23T01:22:49Z, git 28d4819e) -->
 
 ## Version history (mimicry-relevant changes)
 
-| CC version | SDK bundled | Beta additions                                                  | Beta removals | OAuth change                                                              |
-| ---------- | ----------- | --------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------- |
-| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on) | none          | none on wire; client-side refresh telemetry expanded (legacy-lock detect) |
-| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01          | none          | none                                                                      |
-| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                      | none          | none                                                                      |
-| 2.1.117    | 0.81.0      | (baseline for this doc)                                         | none          | none                                                                      |
+| CC version | SDK bundled | Beta additions                                                                                                          | Beta removals                                                                 | OAuth change                                                              |
+| ---------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| 2.1.150    | 0.94.0      | 26-entry registry; redact-thinking-2026-02-12 default ON; extended-cache-ttl + thinking-token-count default ON (plugin) | advanced-tool-use, tool-search-tool, fast-mode, effort removed from always-on | none                                                                      |
+| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on)                                                         | none                                                                          | none on wire; client-side refresh telemetry expanded (legacy-lock detect) |
+| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01                                                                  | none                                                                          | none                                                                      |
+| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                                                                              | none                                                                          | none                                                                      |
+| 2.1.117    | 0.81.0      | (baseline for this doc)                                                                                                 | none                                                                          | none                                                                      |
 
 ### mid-conversation-system-2026-04-07 (registered in 2.1.143)
 
@@ -23,6 +24,18 @@
   completes.
 - Plugin support: should be listed in `EXPERIMENTAL_BETA_FLAGS` for forward
   compat; should NOT be added to always-on emission set.
+
+### 2.1.150 wire-level changes (non-beta)
+
+- `x-stainless-package-version` bumped to `0.94.0` (was `0.81.0`) — SDK version in stainless headers.
+- `x-anthropic-additional-protection: true` confirmed as conditional header (set when `CLAUDE_CODE_ADDITIONAL_PROTECTION=1`).
+- Beta set restructured: 26-entry registry with 4 betas removed from always-on
+  (`advanced-tool-use-2025-11-20`, `tool-search-tool-2025-10-19`, `fast-mode-2026-02-01`, `effort-2025-11-24`).
+- `redact-thinking-2026-02-12` is default ON for first-party, non-SDK requests (matching CC 2.1.150). Opt out via `/anthropic set redact-thinking off`.
+- `context-management-2025-06-27` is hardcoded `&& false` in CC D5q (effectively disabled).
+- `structured-outputs-2025-12-15` remains behind `tengu_tool_pear` feature flag (not always-on).
+- Billing header format, `anthropic-version`, OAuth constants: byte-identical to 2.1.143.
+- See `claude-code-2.1.150-analysis.md` for full 26-entry beta registry and D5q assembly logic.
 
 ### 2.1.143 wire-level changes (non-beta)
 
@@ -271,13 +284,15 @@ When `signatureEnabled=true`, current implementation may add dynamically:
 
 - `claude-code-20250219` (not added for Haiku models)
 - `files-api-2025-04-14` (only for `/v1/files` or when body references `file_id`)
-- `effort-2025-11-24` (Opus 4.6 models)
 - `interleaved-thinking-2025-05-14` (if model supports it and not disabled by `DISABLE_INTERLEAVED_THINKING`)
 - `context-1m-2025-08-07` (if model indicates 1M context)
-- `context-management-2025-06-27` (non-interactive mode + flags)
-- `structured-outputs-2025-12-15` (model supports it + `TENGU_TOOL_PEAR`)
+- `redact-thinking-2026-02-12` (**default ON** — matches CC 2.1.150; opt out via `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`)
+- `context-management-2025-06-27` (opt-in via `token_economy.context_management`; hardcoded `&& false` in CC 2.1.150 D5q)
+- `structured-outputs-2025-12-15` (opt-in via `token_economy.structured_outputs`; behind `tengu_tool_pear` flag in CC)
 - `web-search-2025-03-05` (provider `vertex`/`foundry` + supported model)
 - `prompt-caching-scope-2026-01-05` (non-interactive mode; **skipped in round-robin** — cache is per-workspace)
+- `extended-cache-ttl-2025-04-11` (default ON; extended prompt cache TTL — plugin addition for better cache rates)
+- `thinking-token-count-2026-05-13` (default ON; token tracking — plugin addition via `token_economy.thinking_token_count`)
 - `token-counting-2024-11-01` (for `/v1/messages/count_tokens`)
 - additional betas from `ANTHROPIC_BETAS` (all models, including Haiku)
 - `custom_betas` from config
@@ -301,28 +316,38 @@ Provider detection is based on request URL hostname (`anthropic`, `bedrock`, `ve
 
 ### 5.2 Claude Code reference beta list (consolidated)
 
-Automatically enabled by Claude Code (functional reference):
+Automatically enabled by Claude Code 2.1.150 (D5q builder, first-party OAuth, non-haiku):
 
 - `claude-code-20250219`
-- `interleaved-thinking-2025-05-14`
-- `context-1m-2025-08-07`
-- `context-management-2025-06-27`
-- `structured-outputs-2025-12-15`
-- `prompt-caching-scope-2026-01-05`
-- `effort-2025-11-24`
-- `fast-mode-2026-02-01`
 - `oauth-2025-04-20`
+- `interleaved-thinking-2025-05-14` (thinking models)
+- `context-1m-2025-08-07` (long-context models)
+- `redact-thinking-2026-02-12` (default ON — first-party, non-SDK; opt-out via `/anthropic set redact-thinking off`)
+- `prompt-caching-scope-2026-01-05` (first-party only)
 - `token-counting-2024-11-01` (preflight `/v1/messages/count_tokens`)
 - `task-budgets-2026-03-13` (conditional on task budget presence)
-- `extended-cache-ttl-2025-04-11` (conditional on feature flag, not always-on)
-- `environments-2025-11-01` (conditional on feature flag, not always-on)
 
-Now auto-included by the plugin:
+Feature-flagged in CC 2.1.150 (NOT default; opt-in or flag-gated):
 
-- `advanced-tool-use-2025-11-20` (upstream 2.1.79+ base profile)
-- `fast-mode-2026-02-01` (upstream 2.1.79+ base profile)
+- `context-management-2025-06-27` (hardcoded `&& false` in D5q — effectively disabled)
+- `structured-outputs-2025-12-15` (behind `tengu_tool_pear` flag)
+- `thinking-token-count-2026-05-13` (behind `tengu_chert_bezel` flag)
+- `extended-cache-ttl-2025-04-11` (not default in CC, but default ON as plugin addition)
+- `environments-2025-11-01` (feature-flagged)
+
+Removed from CC always-on in 2.1.150 (were in prior versions):
+
+- `advanced-tool-use-2025-11-20` — no longer always-on in CC; available via `ANTHROPIC_BETAS`
+- `tool-search-tool-2025-10-19` — no longer always-on in CC; available via `ANTHROPIC_BETAS`
+- `fast-mode-2026-02-01` — no longer always-on in CC; available via `ANTHROPIC_BETAS`
+- `effort-2025-11-24` — no longer always-on in CC; available via `ANTHROPIC_BETAS`
+
+Now auto-included by the plugin (CC 2.1.150 parity + plugin additions):
+
+- `redact-thinking-2026-02-12` (**default ON** — opt-out via `/anthropic set redact-thinking off`; matches CC 2.1.150)
+- `extended-cache-ttl-2025-04-11` (default ON; plugin addition for better cache rates)
+- `thinking-token-count-2026-05-13` (default ON; plugin addition for token tracking)
 - `files-api-2025-04-14` (only `/v1/files` and Messages requests that reference `file_id`)
-- `effort-2025-11-24` (Opus 4.6)
 - `token-counting-2024-11-01` (preflight `/v1/messages/count_tokens`)
 
 Available via `/anthropic betas add` or `ANTHROPIC_BETAS`:
@@ -343,12 +368,23 @@ Platform-specific betas (not cross-provider defaults):
 
 ### 5.3 Current plugin gaps vs reference
 
-Newly auto-included in v0.0.38:
+Newly auto-included (CC 2.1.150 parity):
+
+- `redact-thinking-2026-02-12` (**default ON** — matches CC 2.1.150; opt-out via `/anthropic set redact-thinking off`)
+- `extended-cache-ttl-2025-04-11` (default ON; plugin addition)
+- `thinking-token-count-2026-05-13` (default ON; plugin addition)
+
+Newly auto-included in v0.0.38 (prior):
 
 - `token-efficient-tools-2026-03-28` (default on, `config.token_economy.token_efficient_tools`)
 - `summarize-connector-text-2026-03-13` (default on, `config.token_economy.connector_text_summarization`)
-- `redact-thinking-2026-02-12` (opt-in, `config.token_economy.redact_thinking`)
-- `advanced-tool-use-2025-11-20` for 1P/foundry provider (was incorrectly using 3P header)
+
+Removed from always-on (CC 2.1.150 parity):
+
+- `advanced-tool-use-2025-11-20` — removed from always-on; available via `ANTHROPIC_BETAS` or `/anthropic betas add`
+- `tool-search-tool-2025-10-19` — removed from always-on; available via `ANTHROPIC_BETAS`
+- `fast-mode-2026-02-01` — removed from always-on; available via `ANTHROPIC_BETAS`
+- `effort-2025-11-24` — removed from always-on; available via `ANTHROPIC_BETAS`
 
 No dedicated automatic composition yet for:
 
@@ -358,10 +394,7 @@ No dedicated automatic composition yet for:
 
 `task-budgets-2026-03-13` is available as a BETA_SHORTCUTS shortcut (`task-budgets` / `budgets`) and propagates `output_config` body injection when active.
 
-Newly identified in v2.1.133 (not yet auto-included):
-
-- `extended-cache-ttl-2025-04-11` (registered in EXPERIMENTAL_BETA_FLAGS and BETA_SHORTCUTS)
-- `environments-2025-11-01` (registered in EXPERIMENTAL_BETA_FLAGS)
+CC 2.1.150 beta registry (26 entries) is documented in full in `docs/claude-code-2.1.150-analysis.md`.
 
 Remaining gaps can be injected manually through `ANTHROPIC_BETAS` or `/anthropic betas add` when operationally required.
 
@@ -731,8 +764,12 @@ In `anthropic-auth.json`:
 {
   "token_economy": {
     "token_efficient_tools": true,
-    "redact_thinking": false,
+    "redact_thinking": true,
     "connector_text_summarization": true,
+    "extended_cache_ttl": true,
+    "thinking_token_count": true,
+    "context_management": false,
+    "structured_outputs": false,
   },
 }
 ```
@@ -742,6 +779,10 @@ Toggle at runtime via `/anthropic set`:
 - `/anthropic set token-efficient-tools on|off`
 - `/anthropic set redact-thinking on|off`
 - `/anthropic set connector-text on|off`
+- `/anthropic set extended-cache-ttl on|off`
+- `/anthropic set thinking-token-count on|off`
+- `/anthropic set context-management on|off`
+- `/anthropic set structured-outputs on|off`
 
 ### 11.2 Token-Efficient Tools
 
@@ -751,9 +792,9 @@ When `token_efficient_tools` is true, adds `token-efficient-tools-2026-03-28` to
 
 ### 11.3 Redact Thinking
 
-When `redact_thinking` is true, adds `redact-thinking-2026-02-12` to the beta header. The API returns `redacted_thinking` blocks instead of thinking summaries, reducing token overhead on subsequent turns.
+When `redact_thinking` is true (the default), adds `redact-thinking-2026-02-12` to the beta header. The API returns `redacted_thinking` blocks instead of thinking summaries, reducing token overhead on subsequent turns.
 
-**Default: off** — OpenCode users benefit from seeing thinking blocks. Enable if thinking summaries are not needed.
+**Default: on** (matches CC 2.1.150). Opt out via `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`.
 
 ### 11.4 Connector-Text Summarization
 

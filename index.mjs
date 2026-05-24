@@ -7358,24 +7358,12 @@ function buildAnthropicBetaHeader(
   // behavior from the Anthropic API.
   betas.push(CLAUDE_CODE_BETA_FLAG); // "claude-code-20250219"
 
-  // Tool search: use provider-aware header.
-  // 1P/Foundry u2192 advanced-tool-use-2025-11-20 (enables broader tool capabilities)
-  // Vertex/Bedrock u2192 tool-search-tool-2025-10-19 (3P-compatible subset)
-  if (provider === "vertex" || provider === "bedrock" || provider === "mantle") {
-    betas.push("tool-search-tool-2025-10-19");
-  } else {
-    betas.push(ADVANCED_TOOL_USE_BETA_FLAG); // "advanced-tool-use-2025-11-20"
-  }
+  // v2.1.150: advanced-tool-use / tool-search-tool removed from always-on.
+  // CC 2.1.150 D5q does not push these per-request. Available via custom betas.
 
-  betas.push(FAST_MODE_BETA_FLAG); // "fast-mode-2026-02-01"
+  // v2.1.150: fast-mode-2026-02-01 removed from always-on (CC sends only when speed feature active).
 
-  // effort-2025-11-24 — real CC's Lyz() only pushes this flag when rE(model)
-  // is true (Opus 4.6 / Sonnet 4.6). Pushing it for non-adaptive models like
-  // Haiku is a fingerprint mismatch vs real CC and can contaminate billing
-  // attribution even when the request body has no effort field.
-  if (isAdaptiveThinkingModel(model)) {
-    betas.push(EFFORT_BETA_FLAG); // "effort-2025-11-24"
-  }
+  // v2.1.150: effort-2025-11-24 removed from always-on (CC sends only when effort is explicitly requested).
 
   // Interleaved thinking — real CC's i01 pushes via hv4(model), which is
   // (firstParty && non-Claude-3). Claude 3.x models don't support interleaved
@@ -7400,18 +7388,20 @@ function buildAnthropicBetaHeader(
   if (!isRoundRobin) {
     betas.push("prompt-caching-scope-2026-01-05");
   }
+  // v2.1.150: extended-cache-ttl for better cache hit rates (opt-out via token_economy.extended_cache_ttl = false).
+  if (te.extended_cache_ttl !== false && !isRoundRobin) {
+    betas.push("extended-cache-ttl-2025-04-11");
+  }
 
   // === CONDITIONAL BETAS (model/context-dependent) ===
 
-  // Context management — gated to Claude 4+ models in CC v2.1.90.
-  // Excluded for Claude 3.x (not supported). Always-on for Claude 4+ on 1P/Foundry.
-  if (!/claude-3-/i.test(model)) {
+  // v2.1.150: context-management gated behind opt-in (CC has hardcoded && false).
+  if (te.context_management && !/claude-3-/i.test(model)) {
     betas.push("context-management-2025-06-27");
   }
 
-  // Structured outputs: only -2025-12-15 is active in v2.1.90 runtime.
-  // token-efficient-tools-2026-03-28 was fully removed from v90 bundle.
-  if (supportsStructuredOutputs(model)) {
+  // v2.1.150: structured-outputs gated behind opt-in (CC has behind tengu_tool_pear flag).
+  if (te.structured_outputs && supportsStructuredOutputs(model)) {
     betas.push("structured-outputs-2025-12-15");
   }
 
@@ -7445,12 +7435,6 @@ function buildAnthropicBetaHeader(
     betas.push("context-hint-2026-04-09");
   }
 
-  // extended-cache-ttl-2025-04-11 — found in CC v2.1.143. Extends server-side
-  // prompt cache TTL. Auto-on for 1P + Claude 4+ to improve cache hit rates.
-  if (isFirstPartyProvider && !/claude-3-/i.test(model)) {
-    betas.push("extended-cache-ttl-2025-04-11");
-  }
-
   // Files API — scoped to file endpoints/references
   if (isFilesEndpoint || hasFileReferences) {
     betas.push("files-api-2025-04-14");
@@ -7463,11 +7447,16 @@ function buildAnthropicBetaHeader(
 
   // === TOKEN ECONOMY BETAS (on by default for token savings) ===
 
-  // redact-thinking: suppresses thinking summaries server-side.
-  // CC v108 enables this by default but we keep it off so thinking is visible.
-  // Users can opt in via `/anthropic set redact-thinking on`.
-  if (te.redact_thinking && !disableExperimentalBetas) {
+  // v2.1.150: redact-thinking is default-ON in CC (first-party, non-SDK, thinking models).
+  // Opt out via `/anthropic set redact-thinking off` to see thinking content.
+  if (te.redact_thinking !== false && !disableExperimentalBetas && !/claude-3-/i.test(model)) {
     betas.push("redact-thinking-2026-02-12");
+  }
+
+  // v2.1.150: thinking-token-count for token budget tracking (behind tengu_chert_bezel in CC).
+  // Default ON for token economy visibility. Opt out via token_economy.thinking_token_count = false.
+  if (te.thinking_token_count !== false && !disableExperimentalBetas && !/claude-3-/i.test(model)) {
+    betas.push("thinking-token-count-2026-05-13");
   }
 
   // compact-2026-01-12 and mcp-client-2025-11-20 exist only in docs, not runtime.
@@ -7704,7 +7693,7 @@ function buildRequestHeaders(
     // the minifier identifier renamed, d66 → g86). Re-verify on every upstream bump:
     //   rg -n '"0\.\d+\.\d+"' _tmp_claude_pkg/<version>/package/cli.js | rg -C2 stainless
     // See docs/future-improvements.md §7 and claude-code-reverse-engineering.md §16.
-    requestHeaders.set("x-stainless-package-version", "0.81.0");
+    requestHeaders.set("x-stainless-package-version", "0.94.0");
     // Real CC on Windows/Node reports "node" — confirmed via proxy capture.
     requestHeaders.set("x-stainless-runtime", "node");
     requestHeaders.set("x-stainless-runtime-version", process.version);

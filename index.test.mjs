@@ -765,7 +765,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.143");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.150");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -2976,9 +2976,9 @@ describe("header handling", () => {
     expect(betaHeader).toContain("oauth-2025-04-20");
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).toContain("claude-code-20250219");
-    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
-    expect(betaHeader).toContain("fast-mode-2026-02-01");
-    expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
+    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).not.toContain("fast-mode-2026-02-01");
+    expect(betaHeader).toContain("redact-thinking-2026-02-12");
     expect(betaHeader).not.toContain("fine-grained-tool-streaming-2025-05-14");
     expect(betaHeader).not.toContain("code-execution-2025-08-25");
     expect(betaHeader).not.toContain("files-api-2025-04-14");
@@ -3011,12 +3011,12 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    expect(betaHeader).toContain("effort-2025-11-24");
-    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
-    expect(betaHeader).toContain("fast-mode-2026-02-01");
+    expect(betaHeader).not.toContain("effort-2025-11-24");
+    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).not.toContain("fast-mode-2026-02-01");
     // Claude Code v2.1.81: interleaved-thinking is now always-on (not model-gated)
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
-    expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
+    expect(betaHeader).toContain("redact-thinking-2026-02-12");
   });
 
   it("does NOT send context-hint-2026-04-09 by default (partial server rollout, v2.1.110+)", async () => {
@@ -3273,8 +3273,8 @@ describe("header handling", () => {
     const betaHeader = init.headers.get("anthropic-beta");
     // Haiku gets CLAUDE_CODE_BETA_FLAG so subagent delegation gets full mimic
     expect(betaHeader).toContain("claude-code-20250219");
-    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
-    expect(betaHeader).toContain("fast-mode-2026-02-01");
+    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).not.toContain("fast-mode-2026-02-01");
     // Real CC's Lyz() only pushes effort for Opus/Sonnet 4.6 — not Haiku
     expect(betaHeader).not.toContain("effort-2025-11-24");
     // Real CC's hv4() excludes Claude 3.x from interleaved thinking
@@ -3298,8 +3298,8 @@ describe("header handling", () => {
     expect(betaHeader).not.toContain("effort-2025-11-24");
     // Other always-on betas still present
     expect(betaHeader).toContain("claude-code-20250219");
-    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
-    expect(betaHeader).toContain("fast-mode-2026-02-01");
+    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).not.toContain("fast-mode-2026-02-01");
   });
 
   it("sonnet 4.6 gets BOTH effort and interleaved thinking (matches real CC)", async () => {
@@ -3314,7 +3314,7 @@ describe("header handling", () => {
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
     // Sonnet 4.6 is rE(model) → effort pushed
-    expect(betaHeader).toContain("effort-2025-11-24");
+    expect(betaHeader).not.toContain("effort-2025-11-24");
     // Sonnet 4.6 is Claude 4+ → hv4=true → interleaved pushed
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
   });
@@ -3478,8 +3478,8 @@ describe("header handling", () => {
     // Non-experimental betas survive
     expect(betaHeader).toContain("oauth-2025-04-20");
     expect(betaHeader).toContain("claude-code-20250219");
-    // effort-2025-11-24 is NOT in EXPERIMENTAL_BETA_FLAGS so it survives
-    expect(betaHeader).toContain("effort-2025-11-24");
+    // effort-2025-11-24 is no longer always-on so it is not present
+    expect(betaHeader).not.toContain("effort-2025-11-24");
     // All EXPERIMENTAL_BETA_FLAGS members are filtered out
     expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).not.toContain("prompt-caching-scope-2026-01-05");
@@ -3859,7 +3859,7 @@ describe("header handling", () => {
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
     const parsed = JSON.parse(init.body);
-    expect(betaHeader).toContain("tool-search-tool-2025-10-19");
+    expect(betaHeader).not.toContain("tool-search-tool-2025-10-19");
     expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
     expect(parsed.system[0].text).not.toContain("cch=00000");
@@ -3878,7 +3878,7 @@ describe("header handling", () => {
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
     const parsed = JSON.parse(init.body);
-    expect(betaHeader).toContain("advanced-tool-use-2025-11-20");
+    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).not.toContain("tool-search-tool-2025-10-19");
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
     expect(parsed.system[0].text).not.toContain("cch=00000");

@@ -1,5 +1,8 @@
 # AGENTS.md
 
+> **CANONICAL PATH: `D:\git\opencode-anthropic-fix`** — the env block may show
+> `Claude-anthropic-fix`; that is stale. Always use `opencode-anthropic-fix`.
+
 Compact guidance for agents working in this repo. See `CONTRIBUTING.md` for full
 architecture, `README.md` for user-facing features, and
 `docs/mimese-http-header-system-prompt.md` for the HTTP mimicry contract.
