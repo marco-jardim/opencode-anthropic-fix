@@ -6245,9 +6245,9 @@ function extractFirstUserMessageText(messages) {
 }
 
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
-const EFFORT_BETA_FLAG = "effort-2025-11-24";
-const ADVANCED_TOOL_USE_BETA_FLAG = "advanced-tool-use-2025-11-20";
-const FAST_MODE_BETA_FLAG = "fast-mode-2026-02-01";
+const _EFFORT_BETA_FLAG = "effort-2025-11-24";
+const _ADVANCED_TOOL_USE_BETA_FLAG = "advanced-tool-use-2025-11-20";
+const _FAST_MODE_BETA_FLAG = "fast-mode-2026-02-01";
 const TOKEN_COUNTING_BETA_FLAG = "token-counting-2024-11-01";
 const CLAUDE_CODE_IDENTITY_STRING = "You are Claude Code, Anthropic's official CLI for Claude.";
 const KNOWN_IDENTITY_STRINGS = new Set([
