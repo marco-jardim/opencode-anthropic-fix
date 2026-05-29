@@ -1,11 +1,57 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
-<!-- Last verified against: Claude Code 2.1.150 (build 2026-05-23T01:22:49Z, git 28d4819e) -->
+<!-- Last verified against: Claude Code 2.1.154 — DECOMPILED from the real
+     win32-x64 native binary (@anthropic-ai/claude-code-win32-x64@2.1.154, Bun-
+     embedded JS). Primary-source fingerprints confirmed:
+       VERSION    = "2.1.154"
+       BUILD_TIME = "2026-05-28T12:27:24Z"   (NOT a fabricated midnight value)
+       GIT_SHA    = "b84d2da9ada13121515426fc644786a303e9ac53"
+       SDK (jQ)   = "0.94.0"                  (wire-verified, no longer by inertia)
+     Beta registry: 23 _W("label","flag") entries (see list below).
+     cc_version 3-char suffix algo CONFIRMED: sha256(SALT + msg[4]+msg[7]+msg[20]
+       + VERSION).slice(0,3), SALT="59cf53e54c78" — plugin matches byte-for-byte.
+     Thinking ctx-mgmt: jq_({hasThinking}) => {edits:[{type:"clear_thinking_20251015",
+       keep:"all"}]} only when thinking active — plugin matches. -->
+
+## Binary-verified beta registry (2.1.154, 23 entries)
+
+These are the exact `_W("internal_label", "beta-flag")` registrations in the
+2.1.154 binary. The plugin emits a subset always-on, gates some on body
+features (effort, fast-mode, tool-search via incoming passthrough), and keeps
+the rest in `EXPERIMENTAL_BETA_FLAGS` as a disable-guard. No plugin-emitted beta
+is absent from this list (no over-broadcast).
+
+| label                   | flag                               |
+| ----------------------- | ---------------------------------- |
+| advisor_tool            | advisor-tool-2026-03-01            |
+| afk_mode                | afk-mode-2026-01-31                |
+| cache_diagnosis         | cache-diagnosis-2026-04-07         |
+| ccr_byoc                | ccr-byoc-2025-07-29                |
+| context_hint            | context-hint-2026-04-09            |
+| context_management      | context-management-2025-06-27      |
+| effort                  | effort-2025-11-24                  |
+| environments            | environments-2025-11-01            |
+| extended_cache_ttl      | extended-cache-ttl-2025-04-11      |
+| files_api               | files-api-2025-04-14               |
+| interleaved_thinking    | interleaved-thinking-2025-05-14    |
+| long_context            | context-1m-2025-08-07              |
+| mcp_servers             | mcp-servers-2025-12-04             |
+| mid_conversation_system | mid-conversation-system-2026-04-07 |
+| prompt_caching_scope    | prompt-caching-scope-2026-01-05    |
+| redact_thinking         | redact-thinking-2026-02-12         |
+| speed                   | fast-mode-2026-02-01               |
+| structured_outputs      | structured-outputs-2025-12-15      |
+| task_budgets            | task-budgets-2026-03-13            |
+| thinking_token_count    | thinking-token-count-2026-05-13    |
+| tool_search             | advanced-tool-use-2025-11-20       |
+| tool_search             | tool-search-tool-2025-10-19        |
+| web_search              | web-search-2025-03-05              |
 
 ## Version history (mimicry-relevant changes)
 
 | CC version | SDK bundled | Beta additions                                                                                                          | Beta removals                                                                 | OAuth change                                                              |
 | ---------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| 2.1.154    | 0.94.0\*    | Opus 4.8 launch (2026-05-28) support: claude-opus-4-8 routed as adaptive-thinking + 1M context + fast-mode eligible     | none (vs 2.1.150)                                                             | none                                                                      |
 | 2.1.150    | 0.94.0      | 26-entry registry; redact-thinking-2026-02-12 default ON; extended-cache-ttl + thinking-token-count default ON (plugin) | advanced-tool-use, tool-search-tool, fast-mode, effort removed from always-on | none                                                                      |
 | 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on)                                                         | none                                                                          | none on wire; client-side refresh telemetry expanded (legacy-lock detect) |
 | 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01                                                                  | none                                                                          | none                                                                      |
@@ -24,6 +70,47 @@
   completes.
 - Plugin support: should be listed in `EXPERIMENTAL_BETA_FLAGS` for forward
   compat; should NOT be added to always-on emission set.
+
+### 2.1.151–2.1.154 changes (Opus 4.8 launch, 2026-05-28)
+
+- **`claude-opus-4-8`** is a new adaptive-thinking model (successor to 4.7). The
+  plugin detects it via `isOpus48Model()` and routes it identically to 4.6/4.7
+  for thinking, effort, 1M context, and simple-system-prompt eligibility.
+- **Adaptive thinking is mandatory.** Manual `thinking: {type:"enabled",
+budget_tokens:N}` returns a **400** on Opus 4.7 AND 4.8. The plugin's
+  `normalizeThinkingBlock()` converts any incoming manual thinking to
+  `{type:"adaptive"}` for these models; top-level `effort` is moved into
+  `output_config.effort` (default `high` for Pro/Max).
+- **Fast mode.** Per Anthropic fast-mode docs, `speed:"fast"` (beta
+  `fast-mode-2026-02-01`) is a research preview supported on Opus 4.6, 4.7,
+  **and** 4.8. Opus 4.7 is the `/fast` default in real Claude Code v2.1.142+.
+  The plugin injects `speed:"fast"` for all three Opus models (4.6/4.7/4.8) when
+  fast mode is enabled; Sonnet is not eligible. Switching `speed` invalidates
+  system + message prompt caches, so it is only flipped deliberately.
+- **Pricing.** Opus 4.8 is `$5 / $25` per 1M (input/output), cheaper than 4.6/4.7
+  (`$15 / $75`). Added to `MODEL_PRICING`.
+- **\*SDK version note.** Since 2.1.x, the `@anthropic-ai/claude-code` npm package
+  is a thin wrapper that ships a **native binary** (no JS `cli.js` bundle). The
+  bundled Anthropic SDK version can no longer be string-extracted, so the plugin
+  carries `0.94.0` forward for 2.1.151–2.1.154 (no SDK bump observed). Revisit if
+  a future release exposes a different `x-stainless-package-version` on the wire.
+
+### Thinking-block round-trip contract (CRITICAL — applies to all adaptive models)
+
+`thinking` and `redacted_thinking` blocks MUST be returned to the API
+**byte-identical** to the model's original response (signature/data intact,
+order preserved). ANY mutation triggers:
+
+> `400 ... thinking or redacted_thinking blocks in the latest assistant message
+cannot be modified. These blocks must remain as they were in the original
+response.`
+
+The plugin's per-message `cache_control` strip loop therefore **skips**
+`thinking`/`redacted_thinking` blocks entirely — it never deletes nor adds
+`cache_control` on them (`cache_control` is not a valid field on a thinking
+block in the first place). The `cache_control` breakpoint is placed only on the
+last **user**-message block. This guard is model-agnostic but is what makes Opus
+4.6/4.7/4.8 + Sonnet 4.6 tool-continuation turns work.
 
 ### 2.1.150 wire-level changes (non-beta)
 
@@ -339,7 +426,7 @@ Removed from CC always-on in 2.1.150 (were in prior versions):
 
 - `advanced-tool-use-2025-11-20` — no longer always-on in CC; available via `ANTHROPIC_BETAS`
 - `tool-search-tool-2025-10-19` — no longer always-on in CC; available via `ANTHROPIC_BETAS`
-- `fast-mode-2026-02-01` — no longer always-on in CC; available via `ANTHROPIC_BETAS`
+- `fast-mode-2026-02-01` — no longer always-on in CC; **auto-emitted by the plugin** when `speed:"fast"` is in the outgoing body (structural lockstep). Available via `ANTHROPIC_BETAS` for manual opt-in without fast_mode config.
 - `effort-2025-11-24` — no longer always-on in CC; available via `ANTHROPIC_BETAS`
 
 Now auto-included by the plugin (CC 2.1.150 parity + plugin additions):
@@ -653,7 +740,7 @@ This tells the API how to handle thinking blocks during context management opera
 
 ### 7.3 `speed` body field (fast mode)
 
-When `fast_mode` config is enabled and the model is Opus 4.6 or Sonnet 4.6:
+When `fast_mode` config is enabled and the model is Opus 4.6, Opus 4.7, or Opus 4.8:
 
 ```json
 {
@@ -661,7 +748,15 @@ When `fast_mode` config is enabled and the model is Opus 4.6 or Sonnet 4.6:
 }
 ```
 
-This enables server-side fast-mode processing. Can be disabled via `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE=1`.
+This enables server-side fast-mode processing. The plugin emits `fast-mode-2026-02-01` in `anthropic-beta`
+in lockstep with the body field: both are added together in `buildRequestHeaders` after `transformRequestBody`
+has already injected `speed:"fast"`. Detection is structural (`requestBody.includes('"speed":"fast"')`), so the
+header and body cannot drift. The beta is NOT added at the pre-transform `computedBetaHeader` call site, keeping
+the session latch clean. Can be disabled via `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE=1`.
+
+Eligibility is `isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model)`.
+Sonnet is NOT fast-mode eligible. Note: switching `speed` invalidates system +
+message prompt caches, so it should only be toggled deliberately.
 
 ## 8) Related URL shaping
 

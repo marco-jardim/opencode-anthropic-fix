@@ -603,13 +603,34 @@ describe("Role-scoped cache TTL (opt-in; CC v2.1.110+ MoY parity)", () => {
     return setupFetchFn(client);
   }
 
+  // Mirrors setupWithRoleScoped but explicitly sets role_scoped_cache_ttl:false to test
+  // the flag-off path deterministically (default changed to true in lib/config.mjs).
+  async function setupWithRoleScopedOff() {
+    const original = await vi.importActual("../../lib/config.mjs");
+    loadConfig.mockImplementation(() => ({
+      ...original.DEFAULT_CONFIG,
+      account_selection_strategy: "sticky",
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+      override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+      custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+      idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      token_economy: { ...original.DEFAULT_CONFIG.token_economy, role_scoped_cache_ttl: false },
+    }));
+    return setupFetchFn(client);
+  }
+
   beforeEach(async () => {
     vi.resetAllMocks();
     client = makeClient();
   });
 
   it("default (flag off): uses ttl:1h regardless of request shape", async () => {
-    fetchFn = await setupFetchFn(client);
+    // Use setupWithRoleScopedOff to explicitly set role_scoped_cache_ttl:false
+    // (the default flipped to true; this test documents the flag-off behavior)
+    fetchFn = await setupWithRoleScopedOff();
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -1112,7 +1133,13 @@ describe("E2E: System prompt block ordering invariants", () => {
   it("billing cc_version includes 3-char fingerprint hash (not model ID)", async () => {
     const { body } = await sendRequest(fetchFn, {
       model: "claude-opus-4-6",
-      messages: [{ role: "user", content: "hello world" }],
+      // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip billing
+      max_tokens: 8192,
+      messages: [
+        { role: "user", content: "warm up" },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "hello world" },
+      ],
       system: [{ type: "text", text: "test" }],
     });
 
@@ -1132,14 +1159,14 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all required always-on betas for non-Haiku model (v2.1.150 set)", async () => {
+  it("contains all required always-on betas for non-Haiku model (v2.1.154 set)", async () => {
     // Use opus-4-6: real CC's Lyz() only pushes effort-2025-11-24 for
     // rE(model) (Opus/Sonnet 4.6), so this test needs an adaptive model to
     // verify the full always-on set including effort.
     const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const beta = headers.get("anthropic-beta");
 
-    // RE doc §15.16 always-on set — synced to v2.1.150
+    // RE doc §15.16 always-on set — synced to v2.1.154
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
     expect(beta).not.toContain("advanced-tool-use-2025-11-20");
@@ -1411,7 +1438,7 @@ describe("E2E: systemPromptTailing default (A2)", () => {
   });
 });
 
-describe("E2E: Version is 2.1.150", () => {
+describe("E2E: Version is 2.1.154", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1420,17 +1447,17 @@ describe("E2E: Version is 2.1.150", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.150", async () => {
+  it("User-Agent contains 2.1.154", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.150");
+    expect(headers.get("user-agent")).toContain("2.1.154");
   });
 
-  it("billing header contains 2.1.150", async () => {
+  it("billing header contains 2.1.154", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.150");
+    expect(body.system[0].text).toContain("2.1.154");
   });
 });
 
@@ -1469,5 +1496,216 @@ describe("E2E: URL transform adds ?beta=true", () => {
     const [input] = mockFetch.mock.calls[0];
     const url = input instanceof URL ? input : new URL(input.toString());
     expect(url.searchParams.get("beta")).toBe("true");
+  });
+});
+
+// =============================================================================
+// Opus 4.8 — new model coverage (a)–(e)
+// =============================================================================
+
+describe("Opus 4.8", () => {
+  let client, fetchFn;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    fetchFn = await setupFetchFn(client);
+  });
+
+  // ── (a) No thinking field → adaptive injected ─────────────────────────────
+
+  it("(a) claude-opus-4-8 with no thinking field gets thinking:{type:'adaptive'}", async () => {
+    const { body } = await sendRequest(fetchFn, { model: "claude-opus-4-8" });
+    expect(body.thinking).toEqual({ type: "adaptive" });
+  });
+
+  it("(a) dotted variant claude-opus-4.8 also gets adaptive thinking injected", async () => {
+    const { body } = await sendRequest(fetchFn, { model: "claude-opus-4.8" });
+    expect(body.thinking).toEqual({ type: "adaptive" });
+  });
+
+  // ── (b) Manual thinking → converted to adaptive ───────────────────────────
+
+  it("(b) manual thinking {type:'enabled',budget_tokens:10000} converted to {type:'adaptive'}", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      thinking: { type: "enabled", budget_tokens: 10000 },
+    });
+    expect(body.thinking).toEqual({ type: "adaptive" });
+  });
+
+  // ── (c) top-level effort → output_config.effort ───────────────────────────
+
+  it("(c) top-level effort:'high' moved into output_config:{effort:'high'}, removed from root", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      effort: "high",
+    });
+    expect(body.effort).toBeUndefined();
+    expect(body.output_config).toEqual({ effort: "high" });
+  });
+
+  // ── (d) CONTRACT GUARD: cache_control preserved on thinking/redacted blocks ─
+
+  it("(d) thinking+signature block cache_control preserved; redacted_thinking data preserved; normal text block cache_control stripped", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: "Hello" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "internal thought",
+              signature: "sig-abc-123",
+              cache_control: { type: "ephemeral" },
+            },
+            {
+              type: "redacted_thinking",
+              data: "redacted-data-xyz",
+              cache_control: { type: "ephemeral" },
+            },
+            {
+              type: "text",
+              text: "I have answered.",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    });
+
+    const assistantMsg = body.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+
+    // thinking block: cache_control and signature must survive untouched
+    const thinkingBlock = assistantMsg.content.find((b) => b.type === "thinking");
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock.cache_control).toEqual({ type: "ephemeral" });
+    expect(thinkingBlock.signature).toBe("sig-abc-123");
+
+    // redacted_thinking block: cache_control and data must survive untouched
+    const redactedBlock = assistantMsg.content.find((b) => b.type === "redacted_thinking");
+    expect(redactedBlock).toBeDefined();
+    expect(redactedBlock.cache_control).toEqual({ type: "ephemeral" });
+    expect(redactedBlock.data).toBe("redacted-data-xyz");
+
+    // normal text block: cache_control MUST be stripped by the plugin
+    const textBlock = assistantMsg.content.find((b) => b.type === "text");
+    expect(textBlock).toBeDefined();
+    expect(textBlock.cache_control).toBeUndefined();
+  });
+
+  // ── (e) Fast mode: speed:"fast" injected when fast_mode enabled ───────────
+
+  it("(e) fast mode enabled: speed:'fast' injected for claude-opus-4-8", async () => {
+    const original = await vi.importActual("../../lib/config.mjs");
+    loadConfig.mockImplementation(() => ({
+      ...original.DEFAULT_CONFIG,
+      account_selection_strategy: "sticky",
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+      override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+      custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+      idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      fast_mode: true,
+    }));
+    const fastModeFetchFn = await setupFetchFn(makeClient());
+    const { body } = await sendRequest(fastModeFetchFn, { model: "claude-opus-4-8" });
+    expect(body.speed).toBe("fast");
+  });
+
+  it("(e) fast mode enabled: speed:'fast' injected for claude-opus-4-7", async () => {
+    const original = await vi.importActual("../../lib/config.mjs");
+    loadConfig.mockImplementation(() => ({
+      ...original.DEFAULT_CONFIG,
+      account_selection_strategy: "sticky",
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+      override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+      custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+      idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      fast_mode: true,
+    }));
+    const fastModeFetchFn = await setupFetchFn(makeClient());
+    const { body } = await sendRequest(fastModeFetchFn, { model: "claude-opus-4-7" });
+    expect(body.speed).toBe("fast");
+  });
+
+  // ── (f) Fast mode: anthropic-beta header must contain fast-mode-2026-02-01 ──
+
+  it("(f) fast mode active: anthropic-beta header contains fast-mode-2026-02-01 for claude-opus-4-8", async () => {
+    const original = await vi.importActual("../../lib/config.mjs");
+    loadConfig.mockImplementation(() => ({
+      ...original.DEFAULT_CONFIG,
+      account_selection_strategy: "sticky",
+      signature_emulation: {
+        ...original.DEFAULT_CONFIG.signature_emulation,
+        fetch_claude_code_version_on_startup: false,
+      },
+      override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
+      custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
+      idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      fast_mode: true,
+    }));
+    const fastModeFetchFn = await setupFetchFn(makeClient());
+    const { body, headers } = await sendRequest(fastModeFetchFn, { model: "claude-opus-4-8" });
+    // Both body.speed and the beta header must be present together — mimicry contract.
+    expect(body.speed).toBe("fast");
+    expect(headers.get("anthropic-beta")).toContain("fast-mode-2026-02-01");
+  });
+
+  it("(f) fast mode OFF: anthropic-beta header does NOT contain fast-mode-2026-02-01", async () => {
+    // Default config has fast_mode disabled. Beta must be absent unless passed through from host.
+    const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-8" });
+    expect(headers.get("anthropic-beta")).not.toContain("fast-mode-2026-02-01");
+  });
+
+  // ── (g) Real-world tool-continuation turn: the exact shape that triggered the
+  //        "thinking blocks cannot be modified" 400. thinking + tool_use live in
+  //        the SAME assistant message, followed by a user tool_result. The thinking
+  //        block (with signature) must be byte-identical on the way out, while the
+  //        tool_result still receives the cache_control breakpoint. ─────────────
+  it("(g) tool-continuation: latest-assistant thinking+tool_use preserved; tool_result gets cache breakpoint", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: "What is 2+2?" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "let me compute", signature: "sig-tool-987" },
+            { type: "tool_use", id: "tu_1", name: "calc", input: { expr: "2+2" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "tu_1", content: "4" }],
+        },
+      ],
+    });
+
+    // The assistant thinking block must remain byte-identical: signature intact,
+    // no cache_control injected, type unchanged.
+    const assistantMsg = body.messages.find((m) => m.role === "assistant");
+    const thinkingBlock = assistantMsg.content.find((b) => b.type === "thinking");
+    expect(thinkingBlock).toBeDefined();
+    expect(thinkingBlock.signature).toBe("sig-tool-987");
+    expect(thinkingBlock.cache_control).toBeUndefined();
+    expect(thinkingBlock.thinking).toBe("let me compute");
+
+    // The tool_use block must also be untouched (no cache_control).
+    const toolUseBlock = assistantMsg.content.find((b) => b.type === "tool_use");
+    expect(toolUseBlock).toBeDefined();
+
+    // The cache breakpoint goes on the last user message (the tool_result block).
+    const lastUserMsg = [...body.messages].reverse().find((m) => m.role === "user");
+    const lastBlock = lastUserMsg.content[lastUserMsg.content.length - 1];
+    expect(lastBlock.cache_control).toMatchObject({ type: "ephemeral" });
   });
 });

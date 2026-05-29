@@ -765,7 +765,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.150");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.154");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -3519,7 +3519,13 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        messages: [{ role: "user", content: "abcd_efghijklmnopqrstuv" }],
+        // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip billing/identity
+        max_tokens: 8192,
+        messages: [
+          { role: "user", content: "warm up" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "abcd_efghijklmnopqrstuv" },
+        ],
         system: [{ type: "text", text: "Use OpenCode defaults" }],
       }),
     });
@@ -3547,7 +3553,13 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        messages: [{ role: "user", content: "hello" }],
+        // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip billing/identity
+        max_tokens: 8192,
+        messages: [
+          { role: "user", content: "warm up" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "hello" },
+        ],
         system: [
           {
             type: "text",
@@ -3620,7 +3632,16 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: "hello world" }], system: [] }),
+      body: JSON.stringify({
+        // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip identity injection
+        max_tokens: 8192,
+        messages: [
+          { role: "user", content: "warm up" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "hello world" },
+        ],
+        system: [],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -3853,7 +3874,16 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-4", messages: [{ role: "user", content: "hello" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4",
+        // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip billing injection
+        max_tokens: 8192,
+        messages: [
+          { role: "user", content: "warm up" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "hello" },
+        ],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -3872,7 +3902,16 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-4", messages: [{ role: "user", content: "hello" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4",
+        // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip billing injection
+        max_tokens: 8192,
+        messages: [
+          { role: "user", content: "warm up" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "hello" },
+        ],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];

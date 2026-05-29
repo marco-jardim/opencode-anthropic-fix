@@ -4,7 +4,7 @@ import { randomBytes, randomUUID, createHash as createHashCrypto } from "node:cr
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import xxhashInit from "xxhash-wasm";
-import { AccountManager } from "./lib/accounts.mjs";
+import { AccountManager, RATE_LIMIT_KEY_FAST } from "./lib/accounts.mjs";
 import {
   authorize as oauthAuthorize,
   exchange as oauthExchange,
@@ -36,6 +36,11 @@ import {
 import { callHaiku } from "./lib/haiku-call.mjs";
 import { summarize as rollingSummarize } from "./lib/rolling-summarizer.mjs";
 import { staleReadEviction, perToolClassPrune } from "./lib/message-transform.mjs";
+
+// Max times a single logical request may fall back from fast->standard speed on
+// the same account before giving up the fast attempt entirely. 1 is enough: one
+// fast 429 => one standard retry on the same account.
+const MAX_FAST_FALLBACKS = 1;
 
 // ---------------------------------------------------------------------------
 // Account management CLI prompts
@@ -2461,7 +2466,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
             if (
               config.override_model_limits.enabled &&
               !isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT) &&
-              (hasOneMillionContext(model.id) || isOpus46Model(model.id) || isOpus47Model(model.id))
+              (hasOneMillionContext(model.id) ||
+                isOpus46Model(model.id) ||
+                isOpus47Model(model.id) ||
+                isOpus48Model(model.id))
             ) {
               model.limit = {
                 ...(model.limit ?? {}),
@@ -2642,6 +2650,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
               let serviceWideRetryCount = 0; // Track 529/503 retries (max 2 per RE doc §5.5)
               let shouldRetryCount = 0; // Track x-should-retry forced retries (cap at 3)
               let consecutive529Count = 0;
+              let fastFallbackCount = 0; // Track fast->standard same-account fallbacks (cap below)
               // Classify request for retry budget (A8)
               const requestClass =
                 config.request_classification?.enabled !== false ? classifyApiRequest(requestInit.body) : "foreground";
@@ -2682,7 +2691,17 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       "No enabled Anthropic accounts available. Enable one with 'opencode-anthropic-auth enable <N>'.",
                     );
                   }
-                  // All accounts excluded (transient refresh failures) — give up
+                  // All accounts excluded (transient refresh failures) — give up.
+                  // Diagnostic: surface WHICH accounts were skipped and why, so the
+                  // "No available account" symptom is debuggable (e.g. it can be a
+                  // downstream effect of an OAuth refresh failure, not a true
+                  // exhaustion). transientRefreshSkips holds account indices that
+                  // failed/were-rate-limited during refresh this request.
+                  debugLog("No available account — all candidates transiently skipped", {
+                    enabledCount,
+                    transientRefreshSkips: Array.from(transientRefreshSkips),
+                    attempt,
+                  });
                   throw new Error("No available Anthropic account for request.");
                 }
 
@@ -2979,6 +2998,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     provider: _reqProvider,
                     cachePolicy: effectiveCachePolicy,
                     fastMode: config.fast_mode || false,
+                    // When the account's fast pool is cooling down, suppress
+                    // speed:"fast" so this turn runs at standard speed on the same
+                    // account instead of re-hitting the exhausted fast pool.
+                    fastRateLimited: accountManager.isFastRateLimited(account),
                     strategy: getEffectiveStrategy(),
                     toolDeferral: config.token_economy_strategies?.tool_deferral,
                     toolDescriptionCompaction: config.token_economy_strategies?.tool_description_compaction,
@@ -2995,6 +3018,14 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     usedTools: sessionMetrics.usedTools,
                     tokenEconomySession,
                     requestRole: _requestRole,
+                    // Adaptive cache-breakpoint placement: pass the per-boundary
+                    // stability snapshot so transformRequestBody can anchor the
+                    // cache_control marker on the most-stable boundary instead of
+                    // the (possibly thrashing) last tool. Only populated once the
+                    // detector is enabled and has a baseline.
+                    cacheBoundaryStability: config.cache_break_detection?.adaptive_breakpoint
+                      ? cacheBreakState.boundaryStability
+                      : null,
                   },
                   computedBetaHeader,
                   config,
@@ -3018,6 +3049,16 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 if (config.cache_break_detection?.enabled && typeof body === "string") {
                   const currentHashes = extractCacheSourceHashes(body);
                   if (currentHashes.size > 0) {
+                    // Update per-boundary structural stability BEFORE staging the
+                    // new hashes, diffing against the prior turn's baseline. This
+                    // feeds the adaptive breakpoint placer on the NEXT turn.
+                    if (cacheBreakState.sourceHashes.size > 0) {
+                      updateBoundaryStability(
+                        currentHashes,
+                        cacheBreakState.sourceHashes,
+                        cacheBreakState.boundaryStability,
+                      );
+                    }
                     cacheBreakState._pendingHashes = currentHashes;
                   }
                 }
@@ -3665,8 +3706,14 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   // Check x-should-retry header first — server override
                   const shouldRetry = parseShouldRetryHeader(response);
                   if (shouldRetry === false) {
-                    // Server says DO NOT retry — return error directly
-                    debugLog("x-should-retry: false — not retrying", { status: response.status });
+                    // Server says DO NOT retry — return error directly.
+                    // Include a snippet of the error body so 4xx causes (e.g. the
+                    // thinking-block "cannot be modified" 400, or an unsupported
+                    // manual-thinking 400 on adaptive models) are visible in debug.
+                    debugLog("x-should-retry: false — not retrying", {
+                      status: response.status,
+                      errorBody: typeof errorBody === "string" ? errorBody.slice(0, 600) : errorBody,
+                    });
                     return transformResponse(response);
                   }
 
@@ -3713,6 +3760,44 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       continue;
                     }
 
+                    // Fast-mode pool isolation: if THIS request used speed:"fast"
+                    // and the limit is a plain rate limit, the FAST pool was
+                    // exhausted — not the account's standard quota. Per Anthropic,
+                    // fast has a separate pool and should fall back to standard
+                    // speed, NOT block the account. So: cool down only the fast
+                    // bucket, then retry on the SAME account at standard speed
+                    // (the next transformRequestBody omits speed:"fast" because
+                    // isFastRateLimited(account) is now true). We do NOT flip the
+                    // global config.fast_mode flag — other accounts/turns can still
+                    // use fast mode.
+                    const requestWasFast = typeof body === "string" && body.includes('"speed":"fast"');
+                    if (
+                      requestWasFast &&
+                      response.status === 429 &&
+                      reason === "RATE_LIMIT_EXCEEDED" &&
+                      fastFallbackCount < MAX_FAST_FALLBACKS
+                    ) {
+                      fastFallbackCount++;
+                      const fastBackoff = accountManager.markRateLimited(
+                        account,
+                        reason,
+                        retryAfterMs,
+                        RATE_LIMIT_KEY_FAST,
+                      );
+                      _fastModeAppliedToast = false;
+                      toast("⚡ Fast pool limited — falling back to standard speed", "info", {
+                        debounceKey: "fast-fallback",
+                      }).catch(() => {});
+                      debugLog("fast pool rate-limited; falling back to standard on same account", {
+                        account: account.email || `Account ${account.index + 1}`,
+                        fastBackoffMs: fastBackoff,
+                        fastFallbackCount,
+                      });
+                      // Retry same account at standard speed without consuming a slot.
+                      attempt--;
+                      continue;
+                    }
+
                     accountManager.markRateLimited(account, reason, retryAfterMs);
 
                     // On auth failures, clear token so next selection forces refresh
@@ -3724,7 +3809,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     // Strategy adaptation: record account-specific throttling signal
                     recordRateLimitForStrategy();
 
-                    // Graceful degradation: disable fast mode on rate limits
+                    // Graceful degradation: disable fast mode on rate limits.
+                    // Note: a fast-pool-only 429 is handled by the fast-fallback
+                    // branch above and never reaches here, so this global disable
+                    // only fires for standard-pool limits or 529 overloads.
                     if (config.fast_mode && (response.status === 429 || response.status === 529)) {
                       config.fast_mode = false;
                       _fastModeAppliedToast = false;
@@ -4372,7 +4460,39 @@ const cacheBreakState = {
   prevCacheRead: 0,
   sourceHashes: new Map(),
   lastAlertTurn: 0,
+  /**
+   * Per-boundary structural stability: how many consecutive turns each cache
+   * source ("system_prompt", "tools", "messages_prefix") has been unchanged.
+   * Used by the adaptive breakpoint placer to anchor the cache_control marker
+   * on the most-stable boundary instead of blindly on the last tool (which
+   * thrashes when the host reorders/adds tools between turns).
+   * @type {Map<string, number>}
+   */
+  boundaryStability: new Map(),
 };
+
+/**
+ * Update per-boundary stability counters by diffing the current request's cache
+ * source hashes against the previous turn's. A boundary that is unchanged gets
+ * its counter incremented; a changed (or newly-appeared) boundary resets to 0.
+ *
+ * @param {Map<string,string>} current - hashes for this turn (source -> hash)
+ * @param {Map<string,string>} previous - hashes from the prior turn
+ * @param {Map<string,number>} stability - mutated in place
+ */
+function updateBoundaryStability(current, previous, stability) {
+  for (const [source, hash] of current) {
+    if (previous.get(source) === hash) {
+      stability.set(source, (stability.get(source) || 0) + 1);
+    } else {
+      stability.set(source, 0);
+    }
+  }
+  // Drop boundaries that no longer appear so stale entries don't linger.
+  for (const source of [...stability.keys()]) {
+    if (!current.has(source)) stability.delete(source);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Microcompact state (Phase 3, Task 3.4)
@@ -4603,6 +4723,67 @@ function tryQuotaAwareAccountSwitch(account, accountManager, config) {
  * @param {string} bodyStr - JSON request body
  * @returns {Map<string, string>} source_id → hash
  */
+/**
+ * Resolve the prompt-cache TTL for tool/message breakpoints, mirroring the
+ * decompiled Claude Code 2.1.154 `REH(querySource)` precedence.
+ *
+ * Precedence (highest first):
+ *   1. FORCE_PROMPT_CACHING_5M truthy  -> "5m"
+ *   2. ENABLE_PROMPT_CACHING_1H truthy -> "1h"
+ *   3. role-scoping on AND not the main role -> "5m" (side-queries are cheap)
+ *   4. otherwise -> configuredTtl (main interactive thread, default "1h")
+ *
+ * @param {object} args
+ * @param {string} args.configuredTtl - Default TTL when 1h is eligible (usually "1h").
+ * @param {boolean} args.roleScopedTtl - Whether role-scoped 5m downgrade is enabled.
+ * @param {boolean} args.isMainForCache - True when the request is the main/interactive role.
+ * @param {Record<string, string | undefined>} [args.env] - Environment (defaults to process.env).
+ * @returns {string} The TTL string ("5m" or "1h"/configuredTtl).
+ */
+function resolveCacheTtl({ configuredTtl, roleScopedTtl, isMainForCache, env = process.env }) {
+  // Env overrides (exact CC REH() behavior). isTruthyEnv mirrors CC's uH().
+  if (isTruthyEnv(env.FORCE_PROMPT_CACHING_5M)) return "5m";
+  if (isTruthyEnv(env.ENABLE_PROMPT_CACHING_1H)) return "1h";
+  // Role-scoped downgrade: non-main (side-query) requests use the cheap 5m tier.
+  if (roleScopedTtl && !isMainForCache) return "5m";
+  return configuredTtl;
+}
+
+/**
+ * Decide whether to place the prompt-cache breakpoint on the last tool.
+ *
+ * Default (no stability data, or detector disabled): TRUE — exact Claude Code
+ * behavior (breakpoint on the last tool).
+ *
+ * Adaptive override: returns FALSE only when there is concrete evidence that the
+ * tool boundary is thrashing (a `tool:*` source changed within the last turn,
+ * i.e. stability 0) WHILE the system-prompt boundary is stable (unchanged for
+ * >= STABLE_TURNS turns). In that case the stable system-prompt breakpoint is a
+ * better cache anchor than a tool array that moves every turn.
+ *
+ * @param {Map<string, number> | null | undefined} stability - source -> consecutive-unchanged turns
+ * @returns {boolean} whether to stamp cache_control on the last tool
+ */
+function shouldPlaceToolBreakpoint(stability) {
+  if (!stability || stability.size === 0) return true; // no data -> CC behavior
+  const STABLE_TURNS = 2;
+  const systemStability = stability.get("system_prompt");
+  const systemIsStable = typeof systemStability === "number" && systemStability >= STABLE_TURNS;
+  if (!systemIsStable) return true; // system not proven stable -> keep CC behavior
+
+  // Is any tool boundary thrashing right now (changed within the last turn)?
+  let toolThrashing = false;
+  for (const [source, turns] of stability) {
+    if (source.startsWith("tool:") && turns === 0) {
+      toolThrashing = true;
+      break;
+    }
+  }
+  // Skip the last-tool breakpoint only when tools thrash AND system is the
+  // stable anchor. Otherwise fall back to CC behavior.
+  return !toolThrashing;
+}
+
 function extractCacheSourceHashes(bodyStr, parsedBody = undefined) {
   const hashes = new Map();
   try {
@@ -5141,6 +5322,11 @@ function forceEscalateAdaptiveContext() {
 }
 
 const MODEL_PRICING = {
+  // Opus 4.8 (launched 2026-05-28): $5/$25 per 1M (input/output), notably
+  // cheaper than 4.6/4.7. cacheRead = 0.1x input, cacheWrite = 1.25x input
+  // (Anthropic's standard 5m-write ratio).
+  "claude-opus-4-8": { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
+  "claude-opus-4-7": { input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75 },
   "claude-opus-4-6": { input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75 },
   "claude-sonnet-4-6": { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
   "claude-haiku-4-5": { input: 0.8, output: 4.0, cacheRead: 0.08, cacheWrite: 1.0 },
@@ -6247,7 +6433,7 @@ function extractFirstUserMessageText(messages) {
 const CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
 const _EFFORT_BETA_FLAG = "effort-2025-11-24";
 const _ADVANCED_TOOL_USE_BETA_FLAG = "advanced-tool-use-2025-11-20";
-const _FAST_MODE_BETA_FLAG = "fast-mode-2026-02-01";
+const FAST_MODE_BETA_FLAG = "fast-mode-2026-02-01";
 const TOKEN_COUNTING_BETA_FLAG = "token-counting-2024-11-01";
 const CLAUDE_CODE_IDENTITY_STRING = "You are Claude Code, Anthropic's official CLI for Claude.";
 const KNOWN_IDENTITY_STRINGS = new Set([
@@ -6482,6 +6668,20 @@ function isOpus47Model(model) {
 }
 
 /**
+ * Detects claude-opus-4.8 / claude-opus-4-8 model IDs.
+ * Opus 4.8 (launched 2026-05-28) is an adaptive-thinking model: manual
+ * `thinking: {type: "enabled", budget_tokens}` returns a 400 — it MUST use
+ * `thinking: {type: "adaptive"}` + the effort parameter. It also supports
+ * `speed: "fast"` (fast-mode research preview) and 1M context by default.
+ * @param {string | undefined} model
+ * @returns {boolean}
+ */
+function isOpus48Model(model) {
+  if (!model) return false;
+  return /claude-opus-4[._-]8|opus[._-]4[._-]8/i.test(model);
+}
+
+/**
  * Models eligible for the "simple system prompt" mode that real CC ships in
  * v2.1.133+ under GrowthBook flag `tengu_vellum_lantern` (or forced via
  * `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=1`).
@@ -6495,7 +6695,7 @@ function isOpus47Model(model) {
  */
 function isSimpleSystemPromptEligible(model) {
   if (!model) return false;
-  if (isOpus47Model(model)) return true;
+  if (isOpus47Model(model) || isOpus48Model(model)) return true;
   // -eap suffix variant, e.g. "claude-opus-4-7-eap" or "claude-opus-4-7-eap[1m]"
   if (/-eap(?:\[|$|-)/i.test(model)) return true;
   return false;
@@ -6513,12 +6713,12 @@ function isSonnet46Model(model) {
 
 /**
  * Detects models that support adaptive thinking ({type: "adaptive"}).
- * Currently: Opus 4.6, Opus 4.7, and Sonnet 4.6.
+ * Currently: Opus 4.6, Opus 4.7, Opus 4.8, and Sonnet 4.6.
  * @param {string | undefined} body
  * @returns {boolean}
  */
 function isAdaptiveThinkingModel(model) {
-  return isOpus46Model(model) || isOpus47Model(model) || isSonnet46Model(model);
+  return isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model) || isSonnet46Model(model);
 }
 
 /**
@@ -6533,8 +6733,11 @@ function isEligibleFor1MContext(model) {
   // Explicit 1m suffix/tag in model name
   if (/(^|[-_ ])1m($|[-_ ])|context[-_]?1m|\[1m\]/i.test(model)) return true;
   // CC v2.1.97 U01: claude-sonnet-4* (any Sonnet 4.x) or opus-4-6.
-  // Opus 4.7 (successor to 4.6) is also 1M-context eligible.
-  return /claude-sonnet-4|sonnet[._-]4/i.test(model) || isOpus46Model(model) || isOpus47Model(model);
+  // Opus 4.7 / 4.8 (successors to 4.6) are also 1M-context eligible.
+  // Opus 4.8 ships with 1M context by default on the Claude API.
+  return (
+    /claude-sonnet-4|sonnet[._-]4/i.test(model) || isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model)
+  );
 }
 
 /**
@@ -7309,6 +7512,11 @@ function buildSystemPromptBlocks(system, signature) {
  * @param {string} [requestPath]
  * @param {boolean} [hasFileReferences]
  * @param {{ use1MContext?: boolean }} [adaptiveOverride] - When set, overrides the static hasOneMillionContext() check.
+ * @param {boolean} [fastModeActive] - When true, emits FAST_MODE_BETA_FLAG (fast-mode-2026-02-01).
+ *   Must be derived structurally from the already-transformed outgoing body (body.includes('"speed":"fast"')).
+ *   Only passed from the buildRequestHeaders call site (after body transform). The pre-transform
+ *   computedBetaHeader call site (index.mjs:2905) leaves this undefined so the latch never
+ *   accumulates fast-mode independently of actual body content.
  * @returns {string}
  */
 function buildAnthropicBetaHeader(
@@ -7323,6 +7531,7 @@ function buildAnthropicBetaHeader(
   adaptiveOverride,
   tokenEconomy,
   microcompactBetas, // NEW 11th param
+  fastModeActive, // NEW 12th param — see @param above
 ) {
   const incomingBetasList = incomingBeta
     .split(",")
@@ -7471,6 +7680,16 @@ function buildAnthropicBetaHeader(
     }
   }
 
+  // Fast-mode beta — the PLUGIN injects speed:"fast" into the body, not the host.
+  // Because the host never sends speed:"fast", it also never sends the matching beta.
+  // We must add it here, derived structurally from the already-transformed body so
+  // it is always in lockstep with the speed field. Added BEFORE the dedupe merge so
+  // any duplicate (e.g. via incoming passthrough) is collapsed without duplication.
+  // Unlike effort-2025-11-24 / advanced-tool-use / tool-search-tool (which arrive via
+  // incoming-header passthrough because the HOST sets those body features), fast-mode
+  // is plugin-only and requires this explicit push.
+  if (fastModeActive) betas.push(FAST_MODE_BETA_FLAG);
+
   // Merge incoming betas from the original request, filtering out host-injected
   // betas (e.g. fine-grained-tool-streaming-2025-05-14, structured-outputs-2025-11-13)
   // that OpenCode's Anthropic SDK adds but real Claude Code never sends.
@@ -7523,7 +7742,9 @@ function budgetTokensToEffort(budgetTokens) {
 
 /**
  * Normalise the `thinking` block in the request body for the target model:
- * - Opus 4.6 / Sonnet 4.6 (adaptive thinking): produces `{ type: "adaptive" }`
+ * - Opus 4.6 / 4.7 / 4.8 / Sonnet 4.6 (adaptive thinking): produces
+ *   `{ type: "adaptive" }`. This is REQUIRED for Opus 4.7/4.8 — manual
+ *   `{ type: "enabled", budget_tokens }` returns a 400 on those models.
  * - Older models: passes the existing thinking block through unchanged.
  *
  * @param {any} thinking
@@ -7656,6 +7877,14 @@ function buildRequestHeaders(
   const incomingBeta = requestHeaders.get("anthropic-beta") || "";
   const { model, tools, messages, hasFileReferences } = parseRequestBodyMetadata(requestBody);
   const provider = detectProvider(requestUrl);
+  // Detect fast mode structurally from the already-transformed body string.
+  // transformRequestBody runs before buildRequestHeaders (see index.mjs:2986 vs 3039),
+  // so speed:"fast" is already present when fast mode fired. Same detection idiom as the
+  // toast check (~line 3018). This is the correct call site for fast-mode: the
+  // computedBetaHeader call at index.mjs:2905 runs BEFORE body transform, so fastModeActive
+  // is always false/absent there, keeping the latch free of fast-mode. The
+  // requestHeaders.set("anthropic-beta", mergedBetas) call below is what reaches the wire.
+  const fastModeActive = typeof requestBody === "string" && requestBody.includes('"speed":"fast"');
   const mergedBetas = buildAnthropicBetaHeader(
     incomingBeta,
     signature.enabled,
@@ -7667,6 +7896,8 @@ function buildRequestHeaders(
     hasFileReferences,
     adaptiveOverride,
     tokenEconomy,
+    undefined, // microcompactBetas: not available at this call site (handled via computedBetaHeader path at 2905)
+    fastModeActive, // NEW 12th param: emit fast-mode-2026-02-01 beta when body contains speed:"fast"
   );
 
   const authTokenOverride = process.env.ANTHROPIC_AUTH_TOKEN?.trim();
@@ -7781,6 +8012,21 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
 
   try {
     const parsed = JSON.parse(body);
+    // Diagnostic: log the incoming model + thinking/speed shape so model-routing
+    // issues (e.g. an unrecognized fast variant, or "No available account"
+    // symptoms tied to a specific model) are observable with /anthropic set debug on.
+    // NOTE: transformRequestBody is a top-level function outside the plugin
+    // closure where debugLog() lives, so we mirror debugLog's behaviour directly
+    // (console.error + same prefix, gated on config.debug).
+    if (config?.debug) {
+      console.error("[opencode-anthropic-auth]", "transformRequestBody: incoming model", {
+        model: parsed.model,
+        adaptive: isAdaptiveThinkingModel(parsed.model || ""),
+        thinkingType: parsed.thinking?.type,
+        hasEffort: parsed.effort !== undefined || parsed.output_config?.effort !== undefined,
+        speed: parsed.speed,
+      });
+    }
     // Output cap: resolve max_tokens before any other body transforms
     if (config?.output_cap?.enabled) {
       parsed.max_tokens = resolveMaxTokens(parsed, config);
@@ -8073,31 +8319,66 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       // our system prompt ttl=1h). Then add our own to the last user message
       // (matching real CC behavior seen in proxy capture).
       //
-      // Role-scoped TTL: real CC's MoY(querySource) gates the `ttl:"1h"` field
-      // on an allowlist of query sources (`repl_main_thread*`, `sdk`,
-      // `auto_mode`). Non-matching requests fall back to the default 5m tier
-      // — which is cheaper to write. We match this via classifyRequestRole
-      // (main → configured TTL, usually 1h; everything else → 5m).
+      // Role-scoped TTL: real CC's REH(querySource) decides the `ttl:"1h"` field.
+      // Decompiled from CC 2.1.154 (function REH, offset 225174828), precedence:
+      //   1. FORCE_PROMPT_CACHING_5M  => 5m (highest priority)
+      //   2. ENABLE_PROMPT_CACHING_1H => 1h
+      //   3. no tengu support / overage => 5m
+      //   4. querySource ∈ allowlist [repl_main_thread*, sdk, auto_mode, ...] => 1h, else 5m
+      // We map step 4 via classifyRequestRole: main (interactive/auto_mode thread)
+      // → 1h; side-queries (title-gen, etc.) → 5m. The env vars are honored
+      // exactly as CC does, giving the user a manual override + mimicry fidelity.
       const configuredTtl = signature.cachePolicy?.ttl || "1h";
       const roleScopedTtl = config?.token_economy?.role_scoped_cache_ttl !== false;
       const isMainForCache = runtime?.requestRole === "main" || runtime?.requestRole == null;
-      const ccTtl = roleScopedTtl && !isMainForCache ? "5m" : configuredTtl;
+      const ccTtl = resolveCacheTtl({
+        configuredTtl,
+        roleScopedTtl,
+        isMainForCache,
+        env: process.env,
+      });
       if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
         for (const tool of parsed.tools) {
           if (tool.cache_control) delete tool.cache_control;
         }
-        // Add cache_control to last tool as prompt-cache breakpoint (CC does this)
-        parsed.tools[parsed.tools.length - 1].cache_control = { type: "ephemeral", ttl: ccTtl };
+        // Adaptive breakpoint placement (opt-in, runtime-driven). Real CC always
+        // pins the breakpoint on the last tool because CC controls a STABLE tool
+        // array. opencode may reorder/add/remove tools between turns, which moves
+        // the "last tool" and invalidates the cached prefix after it. When the
+        // detector reports the tool boundary is thrashing while the system prompt
+        // is stable, we SKIP the volatile last-tool breakpoint and let the stable
+        // system-prompt breakpoint (added by buildSystemPromptBlocks) anchor the
+        // cache. Falls back to exact CC behavior when no stability data exists.
+        const placeToolBreakpoint = shouldPlaceToolBreakpoint(runtime?.cacheBoundaryStability);
+        if (placeToolBreakpoint) {
+          parsed.tools[parsed.tools.length - 1].cache_control = { type: "ephemeral", ttl: ccTtl };
+        }
       }
       if (Array.isArray(parsed.messages)) {
         for (const msg of parsed.messages) {
           if (Array.isArray(msg.content)) {
             for (const block of msg.content) {
+              // CONTRACT GUARD: `thinking` / `redacted_thinking` blocks MUST be
+              // round-tripped byte-identical to the model's original response
+              // (Anthropic extended-thinking rules). ANY mutation — including
+              // `delete block.cache_control` — triggers the 400 error
+              // "thinking or redacted_thinking blocks in the latest assistant
+              // message cannot be modified". `cache_control` is not even a valid
+              // field on a thinking block, so we never strip nor add it here;
+              // we leave the block exactly as received. This is required for
+              // adaptive-thinking models (Opus 4.6/4.7/4.8, Sonnet 4.6) on
+              // tool-continuation turns. See docs/mimese-http-header-system-prompt.md.
+              if (!block || typeof block !== "object") continue;
+              if (block.type === "thinking" || block.type === "redacted_thinking") {
+                continue;
+              }
               if (block.cache_control) delete block.cache_control;
             }
           }
         }
-        // Add cache_control to last user message (real CC does this)
+        // Add cache_control to last user message (real CC does this).
+        // (User messages never contain thinking blocks, so the guard above
+        // does not affect this breakpoint.)
         for (let i = parsed.messages.length - 1; i >= 0; i--) {
           const msg = parsed.messages[i];
           if (msg.role !== "user" || !Array.isArray(msg.content) || msg.content.length === 0) continue;
@@ -8228,12 +8509,18 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       parsed.context_hint = { enabled: true };
     }
 
-    // Fast mode: inject speed parameter for Opus 4.6 only (v2.1.97 restriction).
-    // Real CC v2.1.97 xJ() checks: model.includes("opus-4-6") — Sonnet is NOT eligible.
-    // NOTE: Deliberately NOT extended to Opus 4.7. xJ() is a fingerprint-sensitive
-    // check tied to the exact real-CC version we mirror; blindly enabling
-    // speed:"fast" for 4.7 could diverge from real CC's behavior for that model.
-    // Revisit once a real-CC dump confirms xJ() matches opus-4-7.
+    // Fast mode: inject speed parameter for fast-mode-eligible models.
+    // Per Anthropic fast-mode docs, `speed: "fast"` (beta fast-mode-2026-02-01) is
+    // supported on Opus 4.6, Opus 4.7, and Opus 4.8 (research preview). Opus 4.7
+    // is the /fast default in real Claude Code v2.1.142+. Sonnet is NOT eligible.
+    // NOTE: switching speed invalidates system + message prompt caches (per
+    // Anthropic fast-mode docs), so only flip it deliberately.
+    // When the selected account's fast pool is cooling down (a prior fast 429),
+    // suppress speed:"fast" entirely so this turn runs at standard speed on the
+    // same account rather than re-hitting the exhausted fast pool.
+    const fastPoolAvailable = !signature.fastRateLimited;
+    const isFastModeEligibleModel = (m) =>
+      fastPoolAvailable && (isOpus46Model(m) || isOpus47Model(m) || isOpus48Model(m));
     const fastModeEnabled = signature.fastMode && !isFalsyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_FAST_MODE);
     let fastModeAutoApplied = false;
     if (
@@ -8241,7 +8528,7 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       te.fast_mode_auto === true &&
       isMainRole &&
       parsed.model &&
-      isOpus46Model(parsed.model) &&
+      isFastModeEligibleModel(parsed.model) &&
       Array.isArray(parsed.messages) &&
       parsed.messages.length >= 2
     ) {
@@ -8264,7 +8551,7 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
         }
       }
     }
-    if ((fastModeEnabled || fastModeAutoApplied) && parsed.model && isOpus46Model(parsed.model)) {
+    if ((fastModeEnabled || fastModeAutoApplied) && parsed.model && isFastModeEligibleModel(parsed.model)) {
       parsed.speed = "fast";
     }
 
@@ -9059,3 +9346,13 @@ AnthropicAuthPlugin.__testing__ = {
 };
 
 export default AnthropicAuthPlugin;
+
+/**
+ * Internal cache helpers exported for unit testing only. Not part of the public
+ * plugin API — do not rely on these outside the test suite.
+ */
+export const __cacheInternals = {
+  resolveCacheTtl,
+  shouldPlaceToolBreakpoint,
+  updateBoundaryStability,
+};
