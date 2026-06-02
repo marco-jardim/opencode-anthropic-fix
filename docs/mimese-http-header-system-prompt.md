@@ -605,6 +605,22 @@ Mirrors real CC `getCacheControl()` (src/services/api/claude.ts:358-374):
 
 TTL is controlled by `cache_policy.ttl` config (default `"1h"`). When `ttl: "off"` or `ttl_supported: false`, the `ttl` field is omitted.
 
+**Role-scoped TTL applies to system blocks too (request-wide consistency).** The
+TTL written here is not the raw `cache_policy.ttl`; it is the **resolved** TTL
+from `resolveCacheTtl()` — the same value stamped on the tool and message
+breakpoints. For the main interactive thread it stays `"1h"`; for subagent
+requests (marked by opencode with the `x-parent-session-id` header) and other
+non-main roles (`title`/`small`/`empty`) with role-scoping enabled, it
+downgrades to `"5m"`. This is required because Anthropic processes
+`cache_control` blocks in the order **`tools` → `system` → `messages`** and
+rejects any `ttl: "1h"` block that comes **after** a `ttl: "5m"` block
+(`"a ttl='1h' cache_control block must not come after a ttl='5m' cache_control
+block"`). Keeping system, tools, and messages on one resolved TTL mirrors real
+CC, which derives a single TTL per `querySource`, and prevents the
+5m-tools-then-1h-system ordering violation that previously fired on every
+subagent delegation. The `ttl: "1h"` values in the tables below are the
+main-thread case; substitute `"5m"` for non-main/subagent requests.
+
 #### Path selection (`splitSysPromptPrefix`)
 
 The real CC has 3 code paths. Paths A and C produce identical wire output, so the plugin implements 2 effective paths:

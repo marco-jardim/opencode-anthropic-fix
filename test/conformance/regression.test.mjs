@@ -278,9 +278,12 @@ describe("Fix #3: Identity block has cache_control", () => {
     expect(body.system[0].cache_control).toBeUndefined();
 
     // Block 1: identity string (WITH cache_control per RE doc §14.1, §15.17)
-    // Uses same TTL as other cached blocks to satisfy API TTL ordering constraint.
+    // Identity uses the request-wide resolved TTL so it never sits at ttl=1h
+    // AFTER a ttl=5m tools/messages block (Anthropic processes tools→system→
+    // messages and rejects 1h-after-5m). This is a non-main ("empty") request
+    // (default messages:[]), so the role-scoped downgrade resolves to 5m.
     expect(body.system[1].text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
-    expect(body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
   });
 });
 
@@ -685,6 +688,88 @@ describe("Role-scoped cache TTL (opt-in; CC v2.1.110+ MoY parity)", () => {
     const lastUser = body.messages[body.messages.length - 1];
     const lastBlock = Array.isArray(lastUser.content) ? lastUser.content[lastUser.content.length - 1] : null;
     expect(lastBlock?.cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
+  });
+
+  // Regression: subagent requests (marked by opencode with x-parent-session-id)
+  // resolve to the 5m tier for tools/messages. Before the fix, the system blocks
+  // kept the configured 1h, so the request emitted 5m tools followed by a 1h
+  // system block — which Anthropic rejects with:
+  //   "system.1.cache_control.ttl: a ttl='1h' cache_control block must not come
+  //    after a ttl='5m' cache_control block. Note that blocks are processed in
+  //    the following order: tools, system, messages."
+  // The fix threads one resolved ttl through system + tools + messages.
+  function collectTtlsInProcessingOrder(body) {
+    // API processing order: tools → system → messages.
+    const ttls = [];
+    for (const t of body.tools || []) {
+      if (t?.cache_control?.ttl) ttls.push(t.cache_control.ttl);
+    }
+    for (const s of body.system || []) {
+      if (s?.cache_control?.ttl) ttls.push(s.cache_control.ttl);
+    }
+    for (const m of body.messages || []) {
+      if (Array.isArray(m.content)) {
+        for (const b of m.content) {
+          if (b?.cache_control?.ttl) ttls.push(b.cache_control.ttl);
+        }
+      }
+    }
+    return ttls;
+  }
+
+  function assertNo1hAfter5m(ttls) {
+    let seen5m = false;
+    for (const ttl of ttls) {
+      if (ttl === "5m") seen5m = true;
+      if (ttl === "1h" && seen5m) {
+        throw new Error(`TTL ordering violation (1h after 5m). Order: [${ttls.join(", ")}]`);
+      }
+    }
+  }
+
+  it("subagent request (x-parent-session-id): system ttl matches tools/messages 5m (no 1h-after-5m)", async () => {
+    fetchFn = await setupWithRoleScoped();
+    const { body } = await sendRequest(
+      fetchFn,
+      {
+        max_tokens: 8000, // main-shaped: would be 1h WITHOUT the subagent marker
+        system: [{ type: "text", text: "x".repeat(300) }],
+        tools: [
+          { name: "Read", description: "read", input_schema: { type: "object" } },
+          { name: "Bash", description: "bash", input_schema: { type: "object" } },
+        ],
+        messages: [{ role: "user", content: [{ type: "text", text: "do the task" }] }],
+      },
+      { "x-parent-session-id": "parent-session-abc" },
+    );
+
+    const ttls = collectTtlsInProcessingOrder(body);
+    expect(ttls.length).toBeGreaterThan(0);
+    assertNo1hAfter5m(ttls);
+    // Subagents resolve to the cheap 5m tier across the board.
+    expect(ttls.every((t) => t === "5m")).toBe(true);
+    // Identity block specifically must be 5m, matching tools/messages.
+    expect(body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
+  });
+
+  it("main-shaped request (no subagent marker): system ttl matches tools/messages 1h (no ordering violation)", async () => {
+    fetchFn = await setupWithRoleScoped();
+    const { body } = await sendRequest(fetchFn, {
+      max_tokens: 8000,
+      system: [{ type: "text", text: "x".repeat(300) }],
+      tools: [{ name: "Read", description: "read", input_schema: { type: "object" } }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "ok" }] },
+        { role: "user", content: [{ type: "text", text: "second real question" }] },
+      ],
+    });
+
+    const ttls = collectTtlsInProcessingOrder(body);
+    expect(ttls.length).toBeGreaterThan(0);
+    assertNo1hAfter5m(ttls);
+    expect(ttls.every((t) => t === "1h")).toBe(true);
+    expect(body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 });
 
@@ -1123,9 +1208,11 @@ describe("E2E: System prompt block ordering invariants", () => {
     // system[0] would break the prompt cache on every turn.
     expect(body.system[0].text).toContain("cch=00000;");
     expect(body.system[0].cache_control).toBeUndefined();
-    // Block 1: identity (same TTL as other cached blocks)
+    // Block 1: identity (request-wide resolved TTL; non-main "empty" request
+    // (default messages:[]) resolves to 5m via the role-scoped downgrade, so the
+    // identity block matches the tools/messages ttl and avoids 1h-after-5m).
     expect(body.system[1].text).toContain("Claude Code");
-    expect(body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
     // Block 2+: user content
     expect(body.system[2].text).toContain("User instructions here");
   });

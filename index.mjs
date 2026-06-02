@@ -8293,9 +8293,34 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     const modelId = parsed.model || "";
     // Extract first user message text for billing hash computation (cch)
     const firstUserMessage = extractFirstUserMessageText(parsed.messages);
+    // Resolve the prompt-cache TTL ONCE so system blocks, tools, and messages
+    // all share the SAME ttl. Anthropic processes cache_control blocks in the
+    // order tools → system → messages and rejects any ttl='1h' block that comes
+    // AFTER a ttl='5m' block. Before this fix the role-scoped 5m downgrade was
+    // applied only to tools/messages (resolveCacheTtl in the breakpoint loop)
+    // while the system blocks kept the configured 1h — so subagent requests
+    // (5m tools, then 1h system) tripped:
+    //   "system.1.cache_control.ttl: a ttl='1h' cache_control block must not
+    //    come after a ttl='5m' cache_control block".
+    // Threading it through buildSystemPromptBlocks keeps every cache_control ttl
+    // consistent (real CC derives the ttl uniformly from querySource).
+    const baseCachePolicy = signature.cachePolicy || { ttl: "1h", ttl_supported: true };
+    const cachingEnabledForTtl = baseCachePolicy.ttl !== "off" && baseCachePolicy.ttl_supported !== false;
+    const resolvedCacheTtl = cachingEnabledForTtl
+      ? resolveCacheTtl({
+          configuredTtl: baseCachePolicy.ttl || "1h",
+          roleScopedTtl: config?.token_economy?.role_scoped_cache_ttl !== false,
+          isMainForCache: runtime?.requestRole === "main" || runtime?.requestRole == null,
+          isSubagent: runtime?.isSubagent === true,
+          env: process.env,
+        })
+      : baseCachePolicy.ttl;
     const signatureWithModel = {
       ...signature,
       modelId,
+      // Override cachePolicy.ttl with the role/subagent-resolved ttl so the
+      // system blocks match the tool/message breakpoint ttl (see comment above).
+      cachePolicy: { ...baseCachePolicy, ttl: resolvedCacheTtl },
       firstUserMessage,
       antiVerbosity: config?.anti_verbosity,
       // Role-aware system-prompt leaning: for non-main-thread requests (title,
@@ -8393,17 +8418,10 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       // We map step 4 via classifyRequestRole: main (interactive/auto_mode thread)
       // → 1h; side-queries (title-gen, etc.) → 5m. The env vars are honored
       // exactly as CC does, giving the user a manual override + mimicry fidelity.
-      const configuredTtl = signature.cachePolicy?.ttl || "1h";
-      const roleScopedTtl = config?.token_economy?.role_scoped_cache_ttl !== false;
-      const isMainForCache = runtime?.requestRole === "main" || runtime?.requestRole == null;
-      const isSubagentForCache = runtime?.isSubagent === true;
-      const ccTtl = resolveCacheTtl({
-        configuredTtl,
-        roleScopedTtl,
-        isMainForCache,
-        isSubagent: isSubagentForCache,
-        env: process.env,
-      });
+      // Reuse the request-wide resolved ttl (computed above where
+      // signatureWithModel is built) so tools/messages match the system blocks
+      // and never trip the 1h-after-5m ordering rule on subagent requests.
+      const ccTtl = resolvedCacheTtl;
       if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
         for (const tool of parsed.tools) {
           if (tool.cache_control) delete tool.cache_control;
