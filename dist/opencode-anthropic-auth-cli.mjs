@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 // lib/storage.mjs
 import { promises as fs } from "node:fs";
 import { existsSync as existsSync2, readFileSync as readFileSync2, appendFileSync, writeFileSync as writeFileSync2 } from "node:fs";
@@ -16,7 +18,14 @@ var DEFAULT_CONFIG = {
   signature_emulation: {
     enabled: true,
     fetch_claude_code_version_on_startup: true,
-    prompt_compaction: "minimal"
+    prompt_compaction: "minimal",
+    /** Workload tag emitted in the `x-anthropic-billing-header` as
+     *  `cc_workload=<tag>;`. Mirrors real CC's `--workload <tag>` flag — used
+     *  by SDK daemon callers that spawn subprocesses for cron work, to tag
+     *  billing attribution. Empty string => omit (default). Provider-gated:
+     *  bedrock/anthropicAws/mantle skip this segment (same gate as `cch`).
+     *  Env var `CLAUDE_CODE_WORKLOAD` is a fallback when this is empty. */
+    workload: ""
   },
   override_model_limits: {
     enabled: false,
@@ -86,15 +95,25 @@ var DEFAULT_CONFIG = {
      *  (no point suggesting reset at the start of a session). */
     min_turns_before_suggest: 3
   },
+  /** SSE response streaming behavior. */
+  streaming: {
+    /** Byte-stream idle-timeout watchdog (ms). Parity with Claude Code's
+     *  `tengu_byte_stream_idle_timeout_ms`: if the upstream produces no bytes for
+     *  this long, the reader is cancelled and the stream errors instead of hanging.
+     *  0 = disabled (default — Anthropic SSE sends periodic pings, so only set a
+     *  multi-minute value to catch genuinely dead connections). Env override:
+     *  `OPENCODE_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS`. */
+    idle_timeout_ms: 0
+  },
   /** Token economy optimizations. */
   token_economy: {
     /** [DEPRECATED] token-efficient-tools-2026-03-28 was removed in CC v2.1.90.
      *  This flag is retained for config backward compatibility but has no effect. */
     token_efficient_tools: false,
     /** Enable redact-thinking-2026-02-12 beta (suppresses thinking summaries
-     *  server-side for lower bandwidth). Off by default so thinking stays
-     *  visible. Opt in via `/anthropic set redact-thinking on`. */
-    redact_thinking: false,
+     *  server-side for lower bandwidth). On by default for non-Claude-3 models
+     *  (CC v2.1.150+). Opt out via `/anthropic set redact-thinking off`. */
+    redact_thinking: true,
     /** Enable context-hint-2026-04-09 beta (CC v2.1.110+). When on, the server
      *  MAY reject 422/424 and trigger client-side compaction retries.
      *  Default ON (Phase C2). Server-side gating + contextHintState.disabled
@@ -160,14 +179,30 @@ var DEFAULT_CONFIG = {
      *  `ttl:"1h"` on an allowlist of query sources (`repl_main_thread*`, `sdk`,
      *  `auto_mode`). Everything else falls back to the 5m tier, which is
      *  cheaper to write. Matches by classifying request role: main → 1h (or
-     *  whatever signature.cachePolicy.ttl is configured as), else → 5m. */
-    role_scoped_cache_ttl: false,
+     *  whatever signature.cachePolicy.ttl is configured as), else → 5m.
+     *  Default ON: this MATCHES real CC behaviour (main thread 1h, side-queries
+     *  5m) and only makes non-main cache writes cheaper — no fingerprint risk. */
+    role_scoped_cache_ttl: true,
     /** Lean system prompt for non-main requests. For title-gen / small /
      *  subagent-shaped requests, strip billing identity + CC identity
-     *  injection. Saves ~1-2kB per request. Opt-in: changes the system-prompt
-     *  shape that downstream observers (billing/telemetry) may rely on, so
-     *  enable deliberately rather than by default. */
-    lean_system_non_main: false
+     *  injection. Saves ~1-2kB per request. Default ON: only affects non-main
+     *  (title-gen / subagent) requests where the CC identity/billing block is
+     *  not load-bearing for the main-thread fingerprint; the main interactive
+     *  thread is untouched. */
+    lean_system_non_main: true,
+    /** Simple system prompt mode (real CC v2.1.133+ `tengu_vellum_lantern`
+     *  equivalent). When enabled AND the request model is eligible
+     *  (claude-opus-4-7, -eap variants — see `isSimpleSystemPromptEligible`),
+     *  skip the anti-verbosity boilerplate (`ANTI_VERBOSITY_SYSTEM_PROMPT` +
+     *  `NUMERIC_LENGTH_ANCHORS_PROMPT`) that the plugin injects on Opus 4.x.
+     *  Conservative implementation: gates ONLY anti-verbosity. Identity
+     *  preamble, billing block, user instructions, and `<system-reminder>`
+     *  blocks are all preserved so the CC fingerprint match still holds.
+     *  Saves ~600-1500 tokens per request on eligible models. Default ON:
+     *  gates ONLY the anti-verbosity boilerplate (which real CC v2.1.133+ also
+     *  drops for eligible Opus 4.x via tengu_vellum_lantern); identity, billing
+     *  and system-reminders are preserved, so the fingerprint match holds. */
+    simple_system_prompt: true
     // NOTE: identical-tool-call short-circuit was considered but requires SSE
     // response-stream rewriting that breaks normal tool-execution semantics.
     // Tracked as future work — not exposed as a config flag here.
@@ -231,7 +266,18 @@ var DEFAULT_CONFIG = {
   /** Cache break detection: alert when cache_read_input_tokens drops significantly. */
   cache_break_detection: {
     enabled: true,
-    alert_threshold: 2e3
+    alert_threshold: 2e3,
+    /**
+     * Adaptive breakpoint placement (opt-in). When true, the prompt-cache
+     * breakpoint is anchored on the most-stable boundary (e.g. the system
+     * prompt) instead of always on the last tool. This is a DELIBERATE
+     * divergence from Claude Code, useful for hosts (like opencode) whose tool
+     * array order/count is less stable than CC's. Default true (opencode's tool
+     * presentation is less stable than CC's, so adaptive anchoring improves cache
+     * hit rate). Set false to force exact CC behavior. Safe either way: with no
+     * stability baseline (first turns) it falls back to CC's last-tool breakpoint.
+     */
+    adaptive_breakpoint: true
   },
   /** Request classification: reduced retry budget for background requests. */
   request_classification: {
@@ -344,7 +390,8 @@ function validateConfig(raw) {
     config.signature_emulation = {
       enabled: typeof se.enabled === "boolean" ? se.enabled : DEFAULT_CONFIG.signature_emulation.enabled,
       fetch_claude_code_version_on_startup: typeof se.fetch_claude_code_version_on_startup === "boolean" ? se.fetch_claude_code_version_on_startup : DEFAULT_CONFIG.signature_emulation.fetch_claude_code_version_on_startup,
-      prompt_compaction: se.prompt_compaction === "off" || se.prompt_compaction === "minimal" ? se.prompt_compaction : DEFAULT_CONFIG.signature_emulation.prompt_compaction
+      prompt_compaction: se.prompt_compaction === "off" || se.prompt_compaction === "minimal" ? se.prompt_compaction : DEFAULT_CONFIG.signature_emulation.prompt_compaction,
+      workload: typeof se.workload === "string" ? se.workload.trim() : DEFAULT_CONFIG.signature_emulation.workload
     };
   }
   if (raw.override_model_limits && typeof raw.override_model_limits === "object") {
@@ -560,7 +607,8 @@ function validateConfig(raw) {
       fast_mode_auto: typeof te.fast_mode_auto === "boolean" ? te.fast_mode_auto : DEFAULT_CONFIG.token_economy.fast_mode_auto,
       trailing_summary_trim: typeof te.trailing_summary_trim === "boolean" ? te.trailing_summary_trim : DEFAULT_CONFIG.token_economy.trailing_summary_trim,
       role_scoped_cache_ttl: typeof te.role_scoped_cache_ttl === "boolean" ? te.role_scoped_cache_ttl : DEFAULT_CONFIG.token_economy.role_scoped_cache_ttl,
-      lean_system_non_main: typeof te.lean_system_non_main === "boolean" ? te.lean_system_non_main : DEFAULT_CONFIG.token_economy.lean_system_non_main
+      lean_system_non_main: typeof te.lean_system_non_main === "boolean" ? te.lean_system_non_main : DEFAULT_CONFIG.token_economy.lean_system_non_main,
+      simple_system_prompt: typeof te.simple_system_prompt === "boolean" ? te.simple_system_prompt : DEFAULT_CONFIG.token_economy.simple_system_prompt
     };
   }
   if (raw.token_economy_strategies && typeof raw.token_economy_strategies === "object") {
@@ -644,7 +692,8 @@ function validateConfig(raw) {
         0,
         1e6,
         DEFAULT_CONFIG.cache_break_detection.alert_threshold
-      )
+      ),
+      adaptive_breakpoint: typeof cbd.adaptive_breakpoint === "boolean" ? cbd.adaptive_breakpoint : DEFAULT_CONFIG.cache_break_detection.adaptive_breakpoint
     };
   }
   if (raw.request_classification && typeof raw.request_classification === "object") {
@@ -1218,6 +1267,54 @@ async function authorize(mode) {
     state: pkce.state
   };
 }
+function parseOAuthCallback(input) {
+  if (!input || typeof input !== "string") return { code: "", state: null };
+  const trimmed = input.trim();
+  if (!trimmed) return { code: "", state: null };
+  if (trimmed.includes("://")) {
+    try {
+      const url = new URL(trimmed);
+      const hashStr = url.hash.slice(1);
+      if (hashStr && hashStr.includes("=")) {
+        const hashParams = new URLSearchParams(hashStr);
+        const hCode = hashParams.get("code");
+        if (hCode) return { code: hCode, state: hashParams.get("state") };
+      }
+      const qCode = url.searchParams.get("code");
+      if (qCode) return { code: qCode, state: url.searchParams.get("state") };
+    } catch {
+    }
+  }
+  {
+    const qs = trimmed.startsWith("?") ? trimmed.slice(1) : trimmed;
+    if (qs.includes("=") && (qs.startsWith("code") || qs.includes("&code"))) {
+      try {
+        const params = new URLSearchParams(qs);
+        const qCode = params.get("code");
+        if (qCode) return { code: qCode, state: params.get("state") };
+      } catch {
+      }
+    }
+  }
+  if (trimmed.startsWith("#")) {
+    const hashStr = trimmed.slice(1);
+    if (hashStr.includes("=")) {
+      try {
+        const params = new URLSearchParams(hashStr);
+        const hCode = params.get("code");
+        if (hCode) return { code: hCode, state: params.get("state") };
+      } catch {
+      }
+    }
+  }
+  const hashIdx = trimmed.indexOf("#");
+  if (hashIdx > 0) {
+    const codePart = trimmed.slice(0, hashIdx);
+    const statePart = trimmed.slice(hashIdx + 1);
+    return { code: codePart, state: statePart || null };
+  }
+  return { code: trimmed, state: null };
+}
 async function exchange(code, verifier) {
   const fail = (status, rawText = "", cooldownHint = { retryAfterMs: null }) => {
     const { errorCode, reason } = parseOAuthErrorBody(rawText);
@@ -1236,10 +1333,18 @@ async function exchange(code, verifier) {
       ...cooldownHint?.retryAfterSource ? { retryAfterSource: cooldownHint.retryAfterSource } : {}
     };
   };
-  const splits = code.split("#");
+  const { code: _authCode, state: _authState } = parseOAuthCallback(code);
   let result;
   for (let attempt = 0; attempt <= OAUTH_MAX_RETRIES; attempt++) {
     try {
+      const _exchangeBody = {
+        grant_type: "authorization_code",
+        code: _authCode,
+        redirect_uri: OAUTH_REDIRECT_URI,
+        client_id: CLIENT_ID,
+        code_verifier: verifier,
+        ..._authState != null ? { state: _authState } : {}
+      };
       result = await fetch(OAUTH_TOKEN_URL, {
         method: "POST",
         headers: {
@@ -1247,14 +1352,7 @@ async function exchange(code, verifier) {
           "Content-Type": "application/json",
           "User-Agent": OAUTH_USER_AGENT
         },
-        body: JSON.stringify({
-          grant_type: "authorization_code",
-          code: splits[0],
-          redirect_uri: OAUTH_REDIRECT_URI,
-          client_id: CLIENT_ID,
-          code_verifier: verifier,
-          state: splits[1]
-        }),
+        body: JSON.stringify(_exchangeBody),
         signal: AbortSignal.timeout(15e3)
       });
     } catch (err) {

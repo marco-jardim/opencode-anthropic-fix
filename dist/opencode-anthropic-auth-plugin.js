@@ -76,7 +76,8 @@ function validateConfig(raw) {
     config.signature_emulation = {
       enabled: typeof se.enabled === "boolean" ? se.enabled : DEFAULT_CONFIG.signature_emulation.enabled,
       fetch_claude_code_version_on_startup: typeof se.fetch_claude_code_version_on_startup === "boolean" ? se.fetch_claude_code_version_on_startup : DEFAULT_CONFIG.signature_emulation.fetch_claude_code_version_on_startup,
-      prompt_compaction: se.prompt_compaction === "off" || se.prompt_compaction === "minimal" ? se.prompt_compaction : DEFAULT_CONFIG.signature_emulation.prompt_compaction
+      prompt_compaction: se.prompt_compaction === "off" || se.prompt_compaction === "minimal" ? se.prompt_compaction : DEFAULT_CONFIG.signature_emulation.prompt_compaction,
+      workload: typeof se.workload === "string" ? se.workload.trim() : DEFAULT_CONFIG.signature_emulation.workload
     };
   }
   if (raw.override_model_limits && typeof raw.override_model_limits === "object") {
@@ -292,7 +293,8 @@ function validateConfig(raw) {
       fast_mode_auto: typeof te.fast_mode_auto === "boolean" ? te.fast_mode_auto : DEFAULT_CONFIG.token_economy.fast_mode_auto,
       trailing_summary_trim: typeof te.trailing_summary_trim === "boolean" ? te.trailing_summary_trim : DEFAULT_CONFIG.token_economy.trailing_summary_trim,
       role_scoped_cache_ttl: typeof te.role_scoped_cache_ttl === "boolean" ? te.role_scoped_cache_ttl : DEFAULT_CONFIG.token_economy.role_scoped_cache_ttl,
-      lean_system_non_main: typeof te.lean_system_non_main === "boolean" ? te.lean_system_non_main : DEFAULT_CONFIG.token_economy.lean_system_non_main
+      lean_system_non_main: typeof te.lean_system_non_main === "boolean" ? te.lean_system_non_main : DEFAULT_CONFIG.token_economy.lean_system_non_main,
+      simple_system_prompt: typeof te.simple_system_prompt === "boolean" ? te.simple_system_prompt : DEFAULT_CONFIG.token_economy.simple_system_prompt
     };
   }
   if (raw.token_economy_strategies && typeof raw.token_economy_strategies === "object") {
@@ -376,7 +378,8 @@ function validateConfig(raw) {
         0,
         1e6,
         DEFAULT_CONFIG.cache_break_detection.alert_threshold
-      )
+      ),
+      adaptive_breakpoint: typeof cbd.adaptive_breakpoint === "boolean" ? cbd.adaptive_breakpoint : DEFAULT_CONFIG.cache_break_detection.adaptive_breakpoint
     };
   }
   if (raw.request_classification && typeof raw.request_classification === "object") {
@@ -602,7 +605,14 @@ var init_config = __esm({
       signature_emulation: {
         enabled: true,
         fetch_claude_code_version_on_startup: true,
-        prompt_compaction: "minimal"
+        prompt_compaction: "minimal",
+        /** Workload tag emitted in the `x-anthropic-billing-header` as
+         *  `cc_workload=<tag>;`. Mirrors real CC's `--workload <tag>` flag — used
+         *  by SDK daemon callers that spawn subprocesses for cron work, to tag
+         *  billing attribution. Empty string => omit (default). Provider-gated:
+         *  bedrock/anthropicAws/mantle skip this segment (same gate as `cch`).
+         *  Env var `CLAUDE_CODE_WORKLOAD` is a fallback when this is empty. */
+        workload: ""
       },
       override_model_limits: {
         enabled: false,
@@ -672,15 +682,25 @@ var init_config = __esm({
          *  (no point suggesting reset at the start of a session). */
         min_turns_before_suggest: 3
       },
+      /** SSE response streaming behavior. */
+      streaming: {
+        /** Byte-stream idle-timeout watchdog (ms). Parity with Claude Code's
+         *  `tengu_byte_stream_idle_timeout_ms`: if the upstream produces no bytes for
+         *  this long, the reader is cancelled and the stream errors instead of hanging.
+         *  0 = disabled (default — Anthropic SSE sends periodic pings, so only set a
+         *  multi-minute value to catch genuinely dead connections). Env override:
+         *  `OPENCODE_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS`. */
+        idle_timeout_ms: 0
+      },
       /** Token economy optimizations. */
       token_economy: {
         /** [DEPRECATED] token-efficient-tools-2026-03-28 was removed in CC v2.1.90.
          *  This flag is retained for config backward compatibility but has no effect. */
         token_efficient_tools: false,
         /** Enable redact-thinking-2026-02-12 beta (suppresses thinking summaries
-         *  server-side for lower bandwidth). Off by default so thinking stays
-         *  visible. Opt in via `/anthropic set redact-thinking on`. */
-        redact_thinking: false,
+         *  server-side for lower bandwidth). On by default for non-Claude-3 models
+         *  (CC v2.1.150+). Opt out via `/anthropic set redact-thinking off`. */
+        redact_thinking: true,
         /** Enable context-hint-2026-04-09 beta (CC v2.1.110+). When on, the server
          *  MAY reject 422/424 and trigger client-side compaction retries.
          *  Default ON (Phase C2). Server-side gating + contextHintState.disabled
@@ -746,14 +766,30 @@ var init_config = __esm({
          *  `ttl:"1h"` on an allowlist of query sources (`repl_main_thread*`, `sdk`,
          *  `auto_mode`). Everything else falls back to the 5m tier, which is
          *  cheaper to write. Matches by classifying request role: main → 1h (or
-         *  whatever signature.cachePolicy.ttl is configured as), else → 5m. */
-        role_scoped_cache_ttl: false,
+         *  whatever signature.cachePolicy.ttl is configured as), else → 5m.
+         *  Default ON: this MATCHES real CC behaviour (main thread 1h, side-queries
+         *  5m) and only makes non-main cache writes cheaper — no fingerprint risk. */
+        role_scoped_cache_ttl: true,
         /** Lean system prompt for non-main requests. For title-gen / small /
          *  subagent-shaped requests, strip billing identity + CC identity
-         *  injection. Saves ~1-2kB per request. Opt-in: changes the system-prompt
-         *  shape that downstream observers (billing/telemetry) may rely on, so
-         *  enable deliberately rather than by default. */
-        lean_system_non_main: false
+         *  injection. Saves ~1-2kB per request. Default ON: only affects non-main
+         *  (title-gen / subagent) requests where the CC identity/billing block is
+         *  not load-bearing for the main-thread fingerprint; the main interactive
+         *  thread is untouched. */
+        lean_system_non_main: true,
+        /** Simple system prompt mode (real CC v2.1.133+ `tengu_vellum_lantern`
+         *  equivalent). When enabled AND the request model is eligible
+         *  (claude-opus-4-7, -eap variants — see `isSimpleSystemPromptEligible`),
+         *  skip the anti-verbosity boilerplate (`ANTI_VERBOSITY_SYSTEM_PROMPT` +
+         *  `NUMERIC_LENGTH_ANCHORS_PROMPT`) that the plugin injects on Opus 4.x.
+         *  Conservative implementation: gates ONLY anti-verbosity. Identity
+         *  preamble, billing block, user instructions, and `<system-reminder>`
+         *  blocks are all preserved so the CC fingerprint match still holds.
+         *  Saves ~600-1500 tokens per request on eligible models. Default ON:
+         *  gates ONLY the anti-verbosity boilerplate (which real CC v2.1.133+ also
+         *  drops for eligible Opus 4.x via tengu_vellum_lantern); identity, billing
+         *  and system-reminders are preserved, so the fingerprint match holds. */
+        simple_system_prompt: true
         // NOTE: identical-tool-call short-circuit was considered but requires SSE
         // response-stream rewriting that breaks normal tool-execution semantics.
         // Tracked as future work — not exposed as a config flag here.
@@ -817,7 +853,18 @@ var init_config = __esm({
       /** Cache break detection: alert when cache_read_input_tokens drops significantly. */
       cache_break_detection: {
         enabled: true,
-        alert_threshold: 2e3
+        alert_threshold: 2e3,
+        /**
+         * Adaptive breakpoint placement (opt-in). When true, the prompt-cache
+         * breakpoint is anchored on the most-stable boundary (e.g. the system
+         * prompt) instead of always on the last tool. This is a DELIBERATE
+         * divergence from Claude Code, useful for hosts (like opencode) whose tool
+         * array order/count is less stable than CC's. Default true (opencode's tool
+         * presentation is less stable than CC's, so adaptive anchoring improves cache
+         * hit rate). Set false to force exact CC behavior. Safe either way: with no
+         * stability baseline (first turns) it falls back to CC's last-tool breakpoint.
+         */
+        adaptive_breakpoint: true
       },
       /** Request classification: reduced retry budget for background requests. */
       request_classification: {
@@ -1469,6 +1516,54 @@ async function authorize(mode) {
     state: pkce.state
   };
 }
+function parseOAuthCallback(input) {
+  if (!input || typeof input !== "string") return { code: "", state: null };
+  const trimmed = input.trim();
+  if (!trimmed) return { code: "", state: null };
+  if (trimmed.includes("://")) {
+    try {
+      const url = new URL(trimmed);
+      const hashStr = url.hash.slice(1);
+      if (hashStr && hashStr.includes("=")) {
+        const hashParams = new URLSearchParams(hashStr);
+        const hCode = hashParams.get("code");
+        if (hCode) return { code: hCode, state: hashParams.get("state") };
+      }
+      const qCode = url.searchParams.get("code");
+      if (qCode) return { code: qCode, state: url.searchParams.get("state") };
+    } catch {
+    }
+  }
+  {
+    const qs = trimmed.startsWith("?") ? trimmed.slice(1) : trimmed;
+    if (qs.includes("=") && (qs.startsWith("code") || qs.includes("&code"))) {
+      try {
+        const params = new URLSearchParams(qs);
+        const qCode = params.get("code");
+        if (qCode) return { code: qCode, state: params.get("state") };
+      } catch {
+      }
+    }
+  }
+  if (trimmed.startsWith("#")) {
+    const hashStr = trimmed.slice(1);
+    if (hashStr.includes("=")) {
+      try {
+        const params = new URLSearchParams(hashStr);
+        const hCode = params.get("code");
+        if (hCode) return { code: hCode, state: params.get("state") };
+      } catch {
+      }
+    }
+  }
+  const hashIdx = trimmed.indexOf("#");
+  if (hashIdx > 0) {
+    const codePart = trimmed.slice(0, hashIdx);
+    const statePart = trimmed.slice(hashIdx + 1);
+    return { code: codePart, state: statePart || null };
+  }
+  return { code: trimmed, state: null };
+}
 async function exchange(code, verifier) {
   const fail = (status, rawText = "", cooldownHint = { retryAfterMs: null }) => {
     const { errorCode, reason } = parseOAuthErrorBody(rawText);
@@ -1487,10 +1582,18 @@ async function exchange(code, verifier) {
       ...cooldownHint?.retryAfterSource ? { retryAfterSource: cooldownHint.retryAfterSource } : {}
     };
   };
-  const splits = code.split("#");
+  const { code: _authCode, state: _authState } = parseOAuthCallback(code);
   let result;
   for (let attempt = 0; attempt <= OAUTH_MAX_RETRIES; attempt++) {
     try {
+      const _exchangeBody = {
+        grant_type: "authorization_code",
+        code: _authCode,
+        redirect_uri: OAUTH_REDIRECT_URI,
+        client_id: CLIENT_ID,
+        code_verifier: verifier,
+        ..._authState != null ? { state: _authState } : {}
+      };
       result = await fetch(OAUTH_TOKEN_URL, {
         method: "POST",
         headers: {
@@ -1498,14 +1601,7 @@ async function exchange(code, verifier) {
           "Content-Type": "application/json",
           "User-Agent": OAUTH_USER_AGENT
         },
-        body: JSON.stringify({
-          grant_type: "authorization_code",
-          code: splits[0],
-          redirect_uri: OAUTH_REDIRECT_URI,
-          client_id: CLIENT_ID,
-          code_verifier: verifier,
-          state: splits[1]
-        }),
+        body: JSON.stringify(_exchangeBody),
         signal: AbortSignal.timeout(15e3)
       });
     } catch (err) {
@@ -3210,6 +3306,7 @@ function hashTokenFragment(token) {
 }
 var MAX_ACCOUNTS = 10;
 var RATE_LIMIT_KEY = "anthropic";
+var RATE_LIMIT_KEY_FAST = "anthropic:fast";
 var AccountManager = class _AccountManager {
   /** @type {ManagedAccount[]} */
   #accounts = [];
@@ -3457,14 +3554,26 @@ var AccountManager = class _AccountManager {
     }
   }
   /**
-   * Check if an account is currently rate-limited.
+   * Check if an account is currently rate-limited for the given bucket.
+   * Defaults to the STANDARD bucket so that a fast-only rate limit never makes
+   * an account look unavailable for standard requests.
+   * @param {ManagedAccount} account
+   * @param {string} [bucket] - Rate-limit bucket key (default: standard).
+   * @returns {boolean}
+   */
+  #isRateLimited(account, bucket = RATE_LIMIT_KEY) {
+    this.#clearExpiredRateLimits(account);
+    const resetTime = account.rateLimitResetTimes[bucket];
+    return resetTime !== void 0 && Date.now() < resetTime;
+  }
+  /**
+   * Public check: is this account rate-limited for the fast-mode pool?
+   * Used to decide whether to inject speed:"fast" on a request.
    * @param {ManagedAccount} account
    * @returns {boolean}
    */
-  #isRateLimited(account) {
-    this.#clearExpiredRateLimits(account);
-    const resetTime = account.rateLimitResetTimes[RATE_LIMIT_KEY];
-    return resetTime !== void 0 && Date.now() < resetTime;
+  isFastRateLimited(account) {
+    return this.#isRateLimited(account, RATE_LIMIT_KEY_FAST);
   }
   /**
    * Select the best account for the current request.
@@ -3503,21 +3612,35 @@ var AccountManager = class _AccountManager {
   }
   /**
    * Mark an account as rate-limited.
+   *
+   * When `bucket` is the FAST pool (RATE_LIMIT_KEY_FAST), this is a soft marker:
+   * it only cools down the fast pool and does NOT increment consecutiveFailures
+   * or apply a health penalty, because the standard pool is still fully usable
+   * (the request can simply fall back to standard speed). Marking the whole
+   * account unhealthy for a fast-only limit would defeat Anthropic's separate
+   * fast pool and waste standard quota.
    * @param {ManagedAccount} account
    * @param {RateLimitReason} reason
    * @param {number | null} [retryAfterMs]
+   * @param {string} [bucket] - Rate-limit bucket key (default: standard).
    * @returns {number} The backoff duration in ms
    */
-  markRateLimited(account, reason, retryAfterMs) {
+  markRateLimited(account, reason, retryAfterMs, bucket = RATE_LIMIT_KEY) {
     const now = Date.now();
-    if (account.lastFailureTime !== null && now - account.lastFailureTime > this.#config.failure_ttl_seconds * 1e3) {
-      account.consecutiveFailures = 0;
+    const isFastBucket = bucket === RATE_LIMIT_KEY_FAST;
+    if (!isFastBucket) {
+      if (account.lastFailureTime !== null && now - account.lastFailureTime > this.#config.failure_ttl_seconds * 1e3) {
+        account.consecutiveFailures = 0;
+      }
+      account.consecutiveFailures += 1;
+      account.lastFailureTime = now;
     }
-    account.consecutiveFailures += 1;
-    account.lastFailureTime = now;
-    const backoffMs = calculateBackoffMs(reason, account.consecutiveFailures - 1, retryAfterMs);
-    account.rateLimitResetTimes[RATE_LIMIT_KEY] = now + backoffMs;
-    this.#healthTracker.recordRateLimit(account.index);
+    const failureIndex = isFastBucket ? 0 : account.consecutiveFailures - 1;
+    const backoffMs = calculateBackoffMs(reason, failureIndex, retryAfterMs);
+    account.rateLimitResetTimes[bucket] = now + backoffMs;
+    if (!isFastBucket) {
+      this.#healthTracker.recordRateLimit(account.index);
+    }
     this.requestSaveToDisk();
     return backoffMs;
   }
@@ -3942,6 +4065,102 @@ var AccountManager = class _AccountManager {
 
 // index.mjs
 init_oauth();
+
+// lib/request-headers.mjs
+var FALLBACK_CLAUDE_CLI_VERSION = "2.1.159";
+var CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
+var CLAUDE_CODE_BUILD_TIME = "2026-05-31T16:22:50Z";
+var EXPERIMENTAL_BETA_FLAGS = /* @__PURE__ */ new Set([
+  "adaptive-thinking-2026-01-28",
+  "advanced-tool-use-2025-11-20",
+  "advisor-tool-2026-03-01",
+  "afk-mode-2026-01-31",
+  "cache-diagnosis-2026-04-07",
+  // CCR bring-your-own-cloud beta. Registered in the 2.1.154 binary's _W() table
+  // but not emitted on /v1/messages; kept here for the disable-experimental guard.
+  "ccr-byoc-2025-07-29",
+  "code-execution-2025-08-25",
+  "compact-2026-01-12",
+  "context-1m-2025-08-07",
+  "context-hint-2026-04-09",
+  "context-management-2025-06-27",
+  "environments-2025-11-01",
+  "extended-cache-ttl-2025-04-11",
+  "fast-mode-2026-02-01",
+  "files-api-2025-04-14",
+  "interleaved-thinking-2025-05-14",
+  // Registered in the 2.1.154 binary's _W() table (mcp_servers label). Plugin
+  // proxies MCP tool calls inline and does not emit this on chat completions.
+  "mcp-servers-2025-12-04",
+  // Registered in CC v2.1.143 but NOT in real CC's always-on emission set
+  // (master registry only, not in the always-on subset). Likely GrowthBook-gated
+  // pending server rollout. Paired telemetry: tengu_mid_conv_system_fallback_retry.
+  "mid-conversation-system-2026-04-07",
+  "prompt-caching-scope-2026-01-05",
+  "redact-thinking-2026-02-12",
+  "structured-outputs-2025-12-15",
+  // Revived in CC 2.1.159 as registry label `narration_summaries` (it was a dead
+  // slot from v2.1.90-2.1.154). Real CC emits it only when GrowthBook flag
+  // `pewter_owl_header` is on (default-off), first-party, and NOT in fast-mode.
+  // Listed here for the disable-guard + manual opt-in ONLY; never emitted always-on.
+  "summarize-connector-text-2026-03-13",
+  "task-budgets-2026-03-13",
+  "tool-search-tool-2025-10-19",
+  // SDK admin route beta (used for /v1/user_profiles* endpoints). Registered for
+  // forward-compat; the plugin proxies /v1/messages only and does NOT emit this
+  // on chat completions.
+  "user-profiles-2026-03-24",
+  "web-search-2025-03-05"
+]);
+var BETA_SHORTCUTS = /* @__PURE__ */ new Map([
+  ["1m", "context-1m-2025-08-07"],
+  ["1m-context", "context-1m-2025-08-07"],
+  ["context-1m", "context-1m-2025-08-07"],
+  ["cache-diagnosis", "cache-diagnosis-2026-04-07"],
+  ["cache-diag", "cache-diagnosis-2026-04-07"],
+  ["cache-ttl", "extended-cache-ttl-2025-04-11"],
+  ["context-hint", "context-hint-2026-04-09"],
+  ["environments", "environments-2025-11-01"],
+  ["extended-cache-ttl", "extended-cache-ttl-2025-04-11"],
+  ["hint", "context-hint-2026-04-09"],
+  ["fast", "fast-mode-2026-02-01"],
+  ["fast-mode", "fast-mode-2026-02-01"],
+  ["opus-fast", "fast-mode-2026-02-01"],
+  ["task-budgets", "task-budgets-2026-03-13"],
+  ["budgets", "task-budgets-2026-03-13"],
+  ["redact-thinking", "redact-thinking-2026-02-12"],
+  ["mid-conv-system", "mid-conversation-system-2026-04-07"],
+  ["mid-system", "mid-conversation-system-2026-04-07"],
+  ["context-management", "context-management-2025-06-27"],
+  ["structured-outputs", "structured-outputs-2025-12-15"],
+  ["web-search", "web-search-2025-03-05"],
+  ["advanced-tool-use", "advanced-tool-use-2025-11-20"],
+  ["tool-search-tool", "tool-search-tool-2025-10-19"],
+  ["effort", "effort-2025-11-24"],
+  ["prompt-caching-scope", "prompt-caching-scope-2026-01-05"],
+  ["thinking-token-count", "thinking-token-count-2026-05-13"],
+  ["afk-mode", "afk-mode-2026-01-31"],
+  ["advisor-tool", "advisor-tool-2026-03-01"],
+  ["mcp-servers", "mcp-servers-2025-12-04"],
+  ["ccr-byoc", "ccr-byoc-2025-07-29"],
+  ["connector-text", "summarize-connector-text-2026-03-13"],
+  ["narration-summaries", "summarize-connector-text-2026-03-13"],
+  ["summarize-connector-text", "summarize-connector-text-2026-03-13"]
+]);
+function resolveBetaShortcut(value) {
+  if (!value) return "";
+  const trimmed = value.trim();
+  const mapped = BETA_SHORTCUTS.get(trimmed.toLowerCase());
+  return mapped || trimmed;
+}
+function buildExtendedUserAgent(version) {
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT ?? "cli";
+  const sdkVersion = process.env.CLAUDE_AGENT_SDK_VERSION ? `, agent-sdk/${process.env.CLAUDE_AGENT_SDK_VERSION}` : "";
+  const clientApp = process.env.CLAUDE_AGENT_SDK_CLIENT_APP ? `, client-app/${process.env.CLAUDE_AGENT_SDK_CLIENT_APP}` : "";
+  return `claude-cli/${version} (external, ${entrypoint}${sdkVersion}${clientApp})`;
+}
+
+// index.mjs
 init_config();
 
 // lib/context-hint-persist.mjs
@@ -4261,25 +4480,14 @@ async function summarize(messages, opts) {
 
 // lib/message-transform.mjs
 var STALE_READ_TOOLS = /* @__PURE__ */ new Set(["read", "view"]);
-var REPRODUCIBLE_TOOLS = /* @__PURE__ */ new Set([
-  "read",
-  "grep",
-  "glob",
-  "ls",
-  "list",
-  "find"
-]);
+var REPRODUCIBLE_TOOLS = /* @__PURE__ */ new Set(["read", "grep", "glob", "ls", "list", "find"]);
 var PRUNE_PROTECTED_TOOLS = /* @__PURE__ */ new Set(["skill"]);
 var STALE_READ_PLACEHOLDER = "[File was read earlier in this session \u2014 re-read if you need the current contents]";
 function estimateTokens(text) {
   if (typeof text !== "string" || text.length === 0) return 0;
   return Math.ceil(text.length / 4);
 }
-function staleReadEviction({
-  messages,
-  threshold = 10,
-  tools = STALE_READ_TOOLS
-}) {
+function staleReadEviction({ messages, threshold = 10, tools = STALE_READ_TOOLS }) {
   if (!Array.isArray(messages) || messages.length <= threshold) {
     return { evicted: 0 };
   }
@@ -4349,6 +4557,7 @@ function perToolClassPrune({
 }
 
 // index.mjs
+var MAX_FAST_FALLBACKS = 1;
 async function promptAccountMenu(accountManager) {
   const accounts = accountManager.getAccountsSnapshot();
   const currentIndex = accountManager.getCurrentIndex();
@@ -4492,6 +4701,8 @@ async function AnthropicAuthPlugin({ client, project, directory, worktree, serve
     /** @type {string | null} The last computed beta header string (for latching). */
     lastHeader: null
   };
+  const SESSION_REJECTED_BETA_TTL_MS = 5 * 60 * 1e3;
+  const sessionRejectedBetas = /* @__PURE__ */ new Map();
   const _persistedCtxHint = loadContextHintDisabledFlag();
   const contextHintState = {
     /** Permanently disabled for this session after a server rejection. */
@@ -4643,8 +4854,7 @@ async function AnthropicAuthPlugin({ client, project, directory, worktree, serve
       };
     }
     slashOAuthExchangeCooldownUntil.delete(sessionID);
-    const codeParts = code.split("#");
-    const returnedState = codeParts[1];
+    const { code: _parsedCode, state: returnedState } = parseOAuthCallback(code);
     if (pending.state) {
       if (!returnedState || returnedState !== pending.state) {
         pendingSlashOAuth.delete(sessionID);
@@ -6317,7 +6527,7 @@ ${message}`);
               output: 0,
               cache: { read: 0, write: 0 }
             };
-            if (config.override_model_limits.enabled && !isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT) && (hasOneMillionContext(model.id) || isOpus46Model(model.id) || isOpus47Model(model.id))) {
+            if (config.override_model_limits.enabled && !isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT) && (hasOneMillionContext(model.id) || isOpus46Model(model.id) || isOpus47Model(model.id) || isOpus48Model(model.id))) {
               model.limit = {
                 ...model.limit ?? {},
                 context: config.override_model_limits.context,
@@ -6446,6 +6656,7 @@ ${message}`);
               let serviceWideRetryCount = 0;
               let shouldRetryCount = 0;
               let consecutive529Count = 0;
+              let fastFallbackCount = 0;
               const requestClass = config.request_classification?.enabled !== false ? classifyApiRequest(requestInit.body) : "foreground";
               const maxServiceRetries = requestClass === "background" ? config.request_classification?.background_max_service_retries ?? 0 : 2;
               const maxShouldRetries = requestClass === "background" ? config.request_classification?.background_max_should_retries ?? 1 : 3;
@@ -6453,6 +6664,7 @@ ${message}`);
               let _adaptiveOverrideForRequest;
               let _overloadRecoveryAttempted = false;
               let _connectionResetRetries = 0;
+              let customBetasStripped = false;
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 const account = attempt === 0 && pinnedAccount && !transientRefreshSkips.has(pinnedAccount.index) ? pinnedAccount : accountManager.getCurrentAccount(transientRefreshSkips);
                 if (showUsageToast && account && accountManager) {
@@ -6472,6 +6684,11 @@ ${message}`);
                       "No enabled Anthropic accounts available. Enable one with 'opencode-anthropic-auth enable <N>'."
                     );
                   }
+                  debugLog("No available account \u2014 all candidates transiently skipped", {
+                    enabledCount,
+                    transientRefreshSkips: Array.from(transientRefreshSkips),
+                    attempt
+                  });
                   throw new Error("No available Anthropic account for request.");
                 }
                 let accessToken;
@@ -6592,6 +6809,7 @@ ${message}`);
                 }
                 const _adaptiveOverride = _adaptiveOverrideForRequest;
                 const _requestRole = classifyRequestRole(_parsedBodyOnce);
+                const _isSubagent = getIncomingHeader(input, requestInit, "x-parent-session-id") != null;
                 const _baseTE = config.token_economy || {};
                 const _disableCtxHint = contextHintState.disabled || _requestRole !== "main";
                 const _tokenEconomy = _disableCtxHint ? { ..._baseTE, context_hint: false, __requestRole: _requestRole } : { ..._baseTE, __requestRole: _requestRole };
@@ -6612,12 +6830,22 @@ ${message}`);
                     microcompactState.active = false;
                   }
                 }
+                const _sessionFilteredCustomBetas = customBetasStripped ? [] : (config.custom_betas ?? []).filter((b) => {
+                  const canonical = resolveBetaShortcut(b);
+                  const rejectedAt = sessionRejectedBetas.get(canonical);
+                  if (rejectedAt == null) return true;
+                  if (Date.now() - rejectedAt > SESSION_REJECTED_BETA_TTL_MS) {
+                    sessionRejectedBetas.delete(canonical);
+                    return true;
+                  }
+                  return false;
+                });
                 let computedBetaHeader = buildAnthropicBetaHeader(
                   "",
                   getSignatureEmulationEnabled(),
                   _reqModel,
                   _reqProvider,
-                  config.custom_betas,
+                  _sessionFilteredCustomBetas,
                   getEffectiveStrategy(),
                   requestUrl?.pathname,
                   _reqHasFileRefs,
@@ -6639,6 +6867,26 @@ ${message}`);
                     merged.delete("context-hint-2026-04-09");
                     betaLatchState.sent.delete("context-hint-2026-04-09");
                   }
+                  if (customBetasStripped && config.custom_betas?.length) {
+                    for (const b of config.custom_betas) {
+                      const canonical = resolveBetaShortcut(b);
+                      merged.delete(b);
+                      merged.delete(canonical);
+                      betaLatchState.sent.delete(b);
+                      betaLatchState.sent.delete(canonical);
+                    }
+                  }
+                  if (sessionRejectedBetas.size > 0) {
+                    const _now = Date.now();
+                    for (const [_canonical, _rejectedAt] of sessionRejectedBetas) {
+                      if (_now - _rejectedAt <= SESSION_REJECTED_BETA_TTL_MS) {
+                        merged.delete(_canonical);
+                        betaLatchState.sent.delete(_canonical);
+                      } else {
+                        sessionRejectedBetas.delete(_canonical);
+                      }
+                    }
+                  }
                   computedBetaHeader = [...merged].join(",");
                   betaLatchState.lastHeader = computedBetaHeader;
                 }
@@ -6656,6 +6904,10 @@ ${message}`);
                     provider: _reqProvider,
                     cachePolicy: effectiveCachePolicy,
                     fastMode: config.fast_mode || false,
+                    // When the account's fast pool is cooling down, suppress
+                    // speed:"fast" so this turn runs at standard speed on the same
+                    // account instead of re-hitting the exhausted fast pool.
+                    fastRateLimited: accountManager.isFastRateLimited(account),
                     strategy: getEffectiveStrategy(),
                     toolDeferral: config.token_economy_strategies?.tool_deferral,
                     toolDescriptionCompaction: config.token_economy_strategies?.tool_description_compaction,
@@ -6671,7 +6923,14 @@ ${message}`);
                     turns: sessionMetrics.turns,
                     usedTools: sessionMetrics.usedTools,
                     tokenEconomySession,
-                    requestRole: _requestRole
+                    requestRole: _requestRole,
+                    isSubagent: _isSubagent,
+                    // Adaptive cache-breakpoint placement: pass the per-boundary
+                    // stability snapshot so transformRequestBody can anchor the
+                    // cache_control marker on the most-stable boundary instead of
+                    // the (possibly thrashing) last tool. Only populated once the
+                    // detector is enabled and has a baseline.
+                    cacheBoundaryStability: config.cache_break_detection?.adaptive_breakpoint ? cacheBreakState.boundaryStability : null
                   },
                   computedBetaHeader,
                   config
@@ -6690,6 +6949,13 @@ ${message}`);
                 if (config.cache_break_detection?.enabled && typeof body === "string") {
                   const currentHashes = extractCacheSourceHashes(body);
                   if (currentHashes.size > 0) {
+                    if (cacheBreakState.sourceHashes.size > 0) {
+                      updateBoundaryStability(
+                        currentHashes,
+                        cacheBreakState.sourceHashes,
+                        cacheBreakState.boundaryStability
+                      );
+                    }
                     cacheBreakState._pendingHashes = currentHashes;
                   }
                 }
@@ -6702,7 +6968,7 @@ ${message}`);
                   {
                     enabled: getSignatureEmulationEnabled(),
                     claudeCliVersion,
-                    customBetas: config.custom_betas,
+                    customBetas: _sessionFilteredCustomBetas,
                     strategy: getEffectiveStrategy(),
                     sessionId: signatureSessionId
                   },
@@ -7025,6 +7291,28 @@ ${message}`);
                       }
                     }
                   }
+                  if (!customBetasStripped && (config.custom_betas?.length ?? 0) > 0 && (response.status === 400 && errorBody && errorBody.includes("anthropic-beta") && !errorBody.includes("context-hint") || response.status === 413 && errorBody && /anthropic-beta|beta header|unsupported beta|unknown beta|invalid beta|context_window|long context|1m context|million context/i.test(
+                    errorBody
+                  ))) {
+                    customBetasStripped = true;
+                    {
+                      const _allCustom = config.custom_betas ?? [];
+                      const _mentioned = _allCustom.filter((_sb) => {
+                        const _rawLc = _sb.toLowerCase();
+                        const _canLc = resolveBetaShortcut(_sb).toLowerCase();
+                        const _bodyLc = (errorBody || "").toLowerCase();
+                        return _bodyLc.includes(_rawLc) || _bodyLc.includes(_canLc);
+                      });
+                      const _toRecord = _mentioned.length > 0 ? _mentioned : _allCustom;
+                      const _recordedAt = Date.now();
+                      for (const _sb of _toRecord) {
+                        sessionRejectedBetas.set(resolveBetaShortcut(_sb), _recordedAt);
+                      }
+                    }
+                    attempt--;
+                    debugLog("custom beta/context rejection - retrying without custom betas");
+                    continue;
+                  }
                   if (response.status === 400 && errorBody && (errorBody.includes("prompt is too long") || errorBody.includes("prompt_too_long")) && !requestInit._reactiveCompactAttempted) {
                     debugLog("prompt too long \u2014 attempting reactive message trimming");
                     if (config.overflow_recovery?.enabled && !requestInit._overflowRecoveryAttempted) {
@@ -7142,7 +7430,10 @@ ${message}`);
                   }
                   const shouldRetry = parseShouldRetryHeader(response);
                   if (shouldRetry === false) {
-                    debugLog("x-should-retry: false \u2014 not retrying", { status: response.status });
+                    debugLog("x-should-retry: false \u2014 not retrying", {
+                      status: response.status,
+                      errorBody: typeof errorBody === "string" ? errorBody.slice(0, 600) : errorBody
+                    });
                     return transformResponse(response);
                   }
                   const accountSpecific = isAccountSpecificError(response.status, errorBody);
@@ -7167,6 +7458,28 @@ ${message}`);
                         account: account.email || `Account ${account.index + 1}`
                       });
                       await new Promise((r) => setTimeout(r, retryAfterMs));
+                      attempt--;
+                      continue;
+                    }
+                    const requestWasFast = typeof body === "string" && body.includes('"speed":"fast"');
+                    if (requestWasFast && response.status === 429 && reason === "RATE_LIMIT_EXCEEDED" && fastFallbackCount < MAX_FAST_FALLBACKS) {
+                      fastFallbackCount++;
+                      const fastBackoff = accountManager.markRateLimited(
+                        account,
+                        reason,
+                        retryAfterMs,
+                        RATE_LIMIT_KEY_FAST
+                      );
+                      _fastModeAppliedToast = false;
+                      toast("\u26A1 Fast pool limited \u2014 falling back to standard speed", "info", {
+                        debounceKey: "fast-fallback"
+                      }).catch(() => {
+                      });
+                      debugLog("fast pool rate-limited; falling back to standard on same account", {
+                        account: account.email || `Account ${account.index + 1}`,
+                        fastBackoffMs: fastBackoff,
+                        fastFallbackCount
+                      });
                       attempt--;
                       continue;
                     }
@@ -7669,8 +7982,29 @@ var _fastModeAppliedToast = false;
 var cacheBreakState = {
   prevCacheRead: 0,
   sourceHashes: /* @__PURE__ */ new Map(),
-  lastAlertTurn: 0
+  lastAlertTurn: 0,
+  /**
+   * Per-boundary structural stability: how many consecutive turns each cache
+   * source ("system_prompt", "tools", "messages_prefix") has been unchanged.
+   * Used by the adaptive breakpoint placer to anchor the cache_control marker
+   * on the most-stable boundary instead of blindly on the last tool (which
+   * thrashes when the host reorders/adds tools between turns).
+   * @type {Map<string, number>}
+   */
+  boundaryStability: /* @__PURE__ */ new Map()
 };
+function updateBoundaryStability(current, previous, stability) {
+  for (const [source, hash] of current) {
+    if (previous.get(source) === hash) {
+      stability.set(source, (stability.get(source) || 0) + 1);
+    } else {
+      stability.set(source, 0);
+    }
+  }
+  for (const source of [...stability.keys()]) {
+    if (!current.has(source)) stability.delete(source);
+  }
+}
 var microcompactState = {
   active: false,
   lastActivatedTurn: 0
@@ -7794,6 +8128,55 @@ function tryQuotaAwareAccountSwitch(account, accountManager, config) {
     }
   }
   return result;
+}
+function resolveCacheTtl({ configuredTtl, roleScopedTtl, isMainForCache, isSubagent = false, env = process.env }) {
+  if (isTruthyEnv(env.FORCE_PROMPT_CACHING_5M)) return "5m";
+  if (isTruthyEnv(env.ENABLE_PROMPT_CACHING_1H)) return "1h";
+  if (roleScopedTtl && isSubagent) return "5m";
+  if (roleScopedTtl && !isMainForCache) return "5m";
+  return configuredTtl;
+}
+function getIncomingHeader(input, requestInit, name) {
+  const lower = name.toLowerCase();
+  const pick = (v) => v != null && String(v).trim() !== "" ? String(v).trim() : null;
+  try {
+    if (input && typeof input === "object" && input.headers && typeof input.headers.get === "function") {
+      const v = pick(input.headers.get(name));
+      if (v) return v;
+    }
+  } catch {
+  }
+  const h = requestInit?.headers;
+  if (!h) return null;
+  try {
+    if (typeof h.get === "function") return pick(h.get(name));
+    if (Array.isArray(h)) {
+      for (const pair of h) {
+        if (Array.isArray(pair) && String(pair[0]).toLowerCase() === lower) return pick(pair[1]);
+      }
+      return null;
+    }
+    for (const [k, v] of Object.entries(h)) {
+      if (k.toLowerCase() === lower) return pick(v);
+    }
+  } catch {
+  }
+  return null;
+}
+function shouldPlaceToolBreakpoint(stability) {
+  if (!stability || stability.size === 0) return true;
+  const STABLE_TURNS = 2;
+  const systemStability = stability.get("system_prompt");
+  const systemIsStable = typeof systemStability === "number" && systemStability >= STABLE_TURNS;
+  if (!systemIsStable) return true;
+  let toolThrashing = false;
+  for (const [source, turns] of stability) {
+    if (source.startsWith("tool:") && turns === 0) {
+      toolThrashing = true;
+      break;
+    }
+  }
+  return !toolThrashing;
 }
 function extractCacheSourceHashes(bodyStr, parsedBody = void 0) {
   const hashes = /* @__PURE__ */ new Map();
@@ -8131,6 +8514,11 @@ function forceEscalateAdaptiveContext() {
   return !wasActive;
 }
 var MODEL_PRICING = {
+  // Opus 4.8 (launched 2026-05-28): $5/$25 per 1M (input/output), notably
+  // cheaper than 4.6/4.7. cacheRead = 0.1x input, cacheWrite = 1.25x input
+  // (Anthropic's standard 5m-write ratio).
+  "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+  "claude-opus-4-7": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
   "claude-opus-4-6": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
   "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   "claude-haiku-4-5": { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 }
@@ -8407,9 +8795,6 @@ var _beforeExitHandler = () => {
   });
 };
 process.once("beforeExit", _beforeExitHandler);
-var FALLBACK_CLAUDE_CLI_VERSION = "2.1.114";
-var CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-var CLAUDE_CODE_BUILD_TIME = "2026-04-17T22:37:24Z";
 var BILLING_HASH_SALT = "59cf53e54c78";
 var BILLING_HASH_INDICES = [4, 7, 20];
 var _xxh64Raw = null;
@@ -8840,8 +9225,6 @@ function extractFirstUserMessageText(messages) {
   return "";
 }
 var CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
-var EFFORT_BETA_FLAG = "effort-2025-11-24";
-var ADVANCED_TOOL_USE_BETA_FLAG = "advanced-tool-use-2025-11-20";
 var FAST_MODE_BETA_FLAG = "fast-mode-2026-02-01";
 var TOKEN_COUNTING_BETA_FLAG = "token-counting-2024-11-01";
 var CLAUDE_CODE_IDENTITY_STRING = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -8869,39 +9252,6 @@ var CORE_TOOL_NAMES = /* @__PURE__ */ new Set([
   "Compress"
 ]);
 var HOST_SDK_BETAS_BLOCKLIST = /* @__PURE__ */ new Set(["fine-grained-tool-streaming-2025-05-14", "structured-outputs-2025-11-13"]);
-var EXPERIMENTAL_BETA_FLAGS = /* @__PURE__ */ new Set([
-  "adaptive-thinking-2026-01-28",
-  "advanced-tool-use-2025-11-20",
-  "advisor-tool-2026-03-01",
-  "afk-mode-2026-01-31",
-  "code-execution-2025-08-25",
-  "compact-2026-01-12",
-  "context-1m-2025-08-07",
-  "context-hint-2026-04-09",
-  "context-management-2025-06-27",
-  "fast-mode-2026-02-01",
-  "files-api-2025-04-14",
-  "interleaved-thinking-2025-05-14",
-  "prompt-caching-scope-2026-01-05",
-  "redact-thinking-2026-02-12",
-  "structured-outputs-2025-12-15",
-  "task-budgets-2026-03-13",
-  "tool-search-tool-2025-10-19",
-  "web-search-2025-03-05"
-]);
-var BETA_SHORTCUTS = /* @__PURE__ */ new Map([
-  ["1m", "context-1m-2025-08-07"],
-  ["1m-context", "context-1m-2025-08-07"],
-  ["context-1m", "context-1m-2025-08-07"],
-  ["context-hint", "context-hint-2026-04-09"],
-  ["hint", "context-hint-2026-04-09"],
-  ["fast", "fast-mode-2026-02-01"],
-  ["fast-mode", "fast-mode-2026-02-01"],
-  ["opus-fast", "fast-mode-2026-02-01"],
-  ["task-budgets", "task-budgets-2026-03-13"],
-  ["budgets", "task-budgets-2026-03-13"],
-  ["redact-thinking", "redact-thinking-2026-02-12"]
-]);
 var STAINLESS_HELPER_KEYS = [
   "x_stainless_helper",
   "x-stainless-helper",
@@ -8969,21 +9319,9 @@ function isFalsyEnv(value) {
   const normalized = value.trim().toLowerCase();
   return normalized === "0" || normalized === "false" || normalized === "no";
 }
-function resolveBetaShortcut(value) {
-  if (!value) return "";
-  const trimmed = value.trim();
-  const mapped = BETA_SHORTCUTS.get(trimmed.toLowerCase());
-  return mapped || trimmed;
-}
 function isNonInteractiveMode() {
   if (isTruthyEnv(process.env.CI)) return true;
   return !process.stdout.isTTY;
-}
-function buildExtendedUserAgent(version) {
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT ?? "cli";
-  const sdkVersion = process.env.CLAUDE_AGENT_SDK_VERSION ? `, agent-sdk/${process.env.CLAUDE_AGENT_SDK_VERSION}` : "";
-  const clientApp = process.env.CLAUDE_AGENT_SDK_CLIENT_APP ? `, client-app/${process.env.CLAUDE_AGENT_SDK_CLIENT_APP}` : "";
-  return `claude-cli/${version} (external, ${entrypoint}${sdkVersion}${clientApp})`;
 }
 function parseAnthropicCustomHeaders() {
   const raw = process.env.ANTHROPIC_CUSTOM_HEADERS;
@@ -9026,17 +9364,27 @@ function isOpus47Model(model) {
   if (!model) return false;
   return /claude-opus-4[._-]7|opus[._-]4[._-]7/i.test(model);
 }
+function isOpus48Model(model) {
+  if (!model) return false;
+  return /claude-opus-4[._-]8|opus[._-]4[._-]8/i.test(model);
+}
+function isSimpleSystemPromptEligible(model) {
+  if (!model) return false;
+  if (isOpus47Model(model) || isOpus48Model(model)) return true;
+  if (/-eap(?:\[|$|-)/i.test(model)) return true;
+  return false;
+}
 function isSonnet46Model(model) {
   if (!model) return false;
   return /claude-sonnet-4[._-]6|sonnet[._-]4[._-]6/i.test(model);
 }
 function isAdaptiveThinkingModel(model) {
-  return isOpus46Model(model) || isOpus47Model(model) || isSonnet46Model(model);
+  return isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model) || isSonnet46Model(model);
 }
 function isEligibleFor1MContext(model) {
   if (!model) return false;
   if (/(^|[-_ ])1m($|[-_ ])|context[-_]?1m|\[1m\]/i.test(model)) return true;
-  return /claude-sonnet-4|sonnet[._-]4/i.test(model) || isOpus46Model(model) || isOpus47Model(model);
+  return /claude-sonnet-4|sonnet[._-]4/i.test(model) || isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model);
 }
 function hasOneMillionContext(model) {
   return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model);
@@ -9155,7 +9503,7 @@ function buildRequestMetadata(input) {
     })
   };
 }
-function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
+function buildAnthropicBillingHeader(version, firstUserMessage, provider, workloadOverride) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
   const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
   const fingerprint = computeBillingCacheHash(firstUserMessage || "", version);
@@ -9163,10 +9511,10 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
   const cchDisabled = provider === "bedrock" || provider === "anthropicAws" || provider === "mantle";
   const cchPart = cchDisabled ? "" : " cch=00000;";
   let workloadPart = "";
-  const workload = process.env.CLAUDE_CODE_WORKLOAD;
-  if (workload) {
-    const safeWorkload = workload.replace(/[;\s\r\n]/g, "_");
-    workloadPart = ` cc_workload=${safeWorkload};`;
+  const workload = workloadOverride || process.env.CLAUDE_CODE_WORKLOAD;
+  if (workload && !cchDisabled) {
+    const safeWorkload = String(workload).replace(/[;\s\r\n]/g, "_");
+    if (safeWorkload) workloadPart = ` cc_workload=${safeWorkload};`;
   }
   return `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}${workloadPart}`;
 }
@@ -9270,19 +9618,26 @@ function isTitleGeneratorSystemBlocks(system) {
     (item) => item.type === "text" && typeof item.text === "string" && isTitleGeneratorSystemText(item.text)
   );
 }
+var OPENCODE_ENV_CONTEXT_PREFIX = "Here is some useful information about the environment you are running in:";
+var CC_ENV_CONTEXT_PREFIX = "Here is useful information about the environment you are running in:";
+function rewriteEnvContextPhrasing(text) {
+  if (typeof text !== "string" || text.length === 0) return text;
+  if (text.indexOf(OPENCODE_ENV_CONTEXT_PREFIX) === -1) return text;
+  return text.split(OPENCODE_ENV_CONTEXT_PREFIX).join(CC_ENV_CONTEXT_PREFIX);
+}
 function normalizeSystemTextBlocks(system) {
   const output = [];
   if (!Array.isArray(system)) return output;
   for (const item of system) {
     if (typeof item === "string") {
-      output.push({ type: "text", text: item });
+      output.push({ type: "text", text: rewriteEnvContextPhrasing(item) });
       continue;
     }
     if (!item || typeof item !== "object") continue;
     if (typeof item.text !== "string") continue;
     const normalized = {
       type: typeof item.type === "string" ? item.type : "text",
-      text: item.text
+      text: rewriteEnvContextPhrasing(item.text)
     };
     output.push(normalized);
   }
@@ -9373,7 +9728,8 @@ function buildSystemPromptBlocks(system, signature) {
   } else if (signature.promptCompactionMode !== "off") {
     sanitized = dedupeSystemBlocks(sanitized);
   }
-  if (!titleGeneratorRequest && signature.modelId && (isOpus46Model(signature.modelId) || isOpus47Model(signature.modelId))) {
+  const skipAntiVerbosity = signature.simpleSystemPrompt === true && isSimpleSystemPromptEligible(signature.modelId);
+  if (!titleGeneratorRequest && !skipAntiVerbosity && signature.modelId && (isOpus46Model(signature.modelId) || isOpus47Model(signature.modelId))) {
     const avConfig = signature.antiVerbosity;
     if (avConfig?.enabled !== false) {
       sanitized.push({ type: "text", text: ANTI_VERBOSITY_SYSTEM_PROMPT });
@@ -9392,7 +9748,8 @@ function buildSystemPromptBlocks(system, signature) {
   const billingHeader = buildAnthropicBillingHeader(
     signature.claudeCliVersion,
     signature.firstUserMessage,
-    signature.provider
+    signature.provider,
+    signature.workload
   );
   const identityString = getCLISyspromptPrefix();
   const effectiveCachePolicy = signature.cachePolicy || { ttl: "1h", ttl_supported: true };
@@ -9407,7 +9764,7 @@ function buildSystemPromptBlocks(system, signature) {
     };
   });
 }
-function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provider, customBetas, strategy, requestPath, hasFileReferences, adaptiveOverride, tokenEconomy, microcompactBetas) {
+function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provider, customBetas, strategy, requestPath, hasFileReferences, adaptiveOverride, tokenEconomy, microcompactBetas, fastModeActive) {
   const incomingBetasList = incomingBeta.split(",").map((b) => b.trim()).filter(Boolean);
   const betas = ["oauth-2025-04-20"];
   const disableExperimentalBetas = isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS);
@@ -9429,15 +9786,6 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
   const isRoundRobin = strategy === "round-robin";
   const te = tokenEconomy || {};
   betas.push(CLAUDE_CODE_BETA_FLAG);
-  if (provider === "vertex" || provider === "bedrock" || provider === "mantle") {
-    betas.push("tool-search-tool-2025-10-19");
-  } else {
-    betas.push(ADVANCED_TOOL_USE_BETA_FLAG);
-  }
-  betas.push(FAST_MODE_BETA_FLAG);
-  if (isAdaptiveThinkingModel(model)) {
-    betas.push(EFFORT_BETA_FLAG);
-  }
   if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && !/claude-3-/i.test(model)) {
     betas.push("interleaved-thinking-2025-05-14");
   }
@@ -9450,10 +9798,13 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
   if (!isRoundRobin) {
     betas.push("prompt-caching-scope-2026-01-05");
   }
-  if (!/claude-3-/i.test(model)) {
+  if (te.extended_cache_ttl !== false && !isRoundRobin) {
+    betas.push("extended-cache-ttl-2025-04-11");
+  }
+  if (te.context_management && !/claude-3-/i.test(model)) {
     betas.push("context-management-2025-06-27");
   }
-  if (supportsStructuredOutputs(model)) {
+  if (te.structured_outputs && supportsStructuredOutputs(model)) {
     betas.push("structured-outputs-2025-12-15");
   }
   if (supportsWebSearch(model)) {
@@ -9473,14 +9824,18 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
   if (isMessagesCountTokensPath) {
     betas.push(TOKEN_COUNTING_BETA_FLAG);
   }
-  if (te.redact_thinking && !disableExperimentalBetas) {
+  if (te.redact_thinking !== false && !disableExperimentalBetas && !/claude-3-/i.test(model)) {
     betas.push("redact-thinking-2026-02-12");
+  }
+  if (te.thinking_token_count !== false && !disableExperimentalBetas && !/claude-3-/i.test(model)) {
+    betas.push("thinking-token-count-2026-05-13");
   }
   if (microcompactBetas?.length) {
     for (const mb of microcompactBetas) {
       if (!betas.includes(mb)) betas.push(mb);
     }
   }
+  if (fastModeActive) betas.push(FAST_MODE_BETA_FLAG);
   const filteredIncoming = incomingBetasList.filter((b) => !HOST_SDK_BETAS_BLOCKLIST.has(b));
   let mergedBetas = [.../* @__PURE__ */ new Set([...betas, ...filteredIncoming])];
   if (customBetas?.length) {
@@ -9574,6 +9929,7 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
   const incomingBeta = requestHeaders.get("anthropic-beta") || "";
   const { model, tools, messages, hasFileReferences } = parseRequestBodyMetadata(requestBody);
   const provider = detectProvider(requestUrl);
+  const fastModeActive = typeof requestBody === "string" && requestBody.includes('"speed":"fast"');
   const mergedBetas = buildAnthropicBetaHeader(
     incomingBeta,
     signature.enabled,
@@ -9584,7 +9940,11 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
     requestUrl?.pathname,
     hasFileReferences,
     adaptiveOverride,
-    tokenEconomy
+    tokenEconomy,
+    void 0,
+    // microcompactBetas: not available at this call site (handled via computedBetaHeader path at 2905)
+    fastModeActive
+    // NEW 12th param: emit fast-mode-2026-02-01 beta when body contains speed:"fast"
   );
   const authTokenOverride = process.env.ANTHROPIC_AUTH_TOKEN?.trim();
   const bearerToken = authTokenOverride || accessToken;
@@ -9600,7 +9960,7 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
     requestHeaders.set("x-stainless-arch", getStainlessArch(process.arch));
     requestHeaders.set("x-stainless-lang", "js");
     requestHeaders.set("x-stainless-os", getStainlessOs(process.platform));
-    requestHeaders.set("x-stainless-package-version", "0.81.0");
+    requestHeaders.set("x-stainless-package-version", "0.94.0");
     requestHeaders.set("x-stainless-runtime", "node");
     requestHeaders.set("x-stainless-runtime-version", process.version);
     const incomingRetryCount = requestHeaders.get("x-stainless-retry-count");
@@ -9649,6 +10009,15 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
   const TOOL_PREFIX = "mcp_";
   try {
     const parsed = JSON.parse(body);
+    if (config?.debug) {
+      console.error("[opencode-anthropic-auth]", "transformRequestBody: incoming model", {
+        model: parsed.model,
+        adaptive: isAdaptiveThinkingModel(parsed.model || ""),
+        thinkingType: parsed.thinking?.type,
+        hasEffort: parsed.effort !== void 0 || parsed.output_config?.effort !== void 0,
+        speed: parsed.speed
+      });
+    }
     if (config?.output_cap?.enabled) {
       parsed.max_tokens = resolveMaxTokens(parsed, config);
     }
@@ -9675,10 +10044,18 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     } else if (Object.prototype.hasOwnProperty.call(parsed, "effort")) {
       delete parsed.effort;
     }
+    if (parsed.model && isAdaptiveThinkingModel(parsed.model)) {
+      if (!parsed.output_config || typeof parsed.output_config !== "object") {
+        parsed.output_config = {};
+      }
+      if (!("effort" in parsed.output_config)) {
+        parsed.output_config.effort = "high";
+      }
+    }
     const thinkingActive = parsed.thinking && typeof parsed.thinking === "object" && (parsed.thinking.type === "adaptive" || parsed.thinking.type === "enabled");
     if (thinkingActive) {
       delete parsed.temperature;
-      if (!parsed.context_management) {
+      if (config?.token_economy?.context_management && !/claude-3-/i.test(parsed.model || "") && !parsed.context_management) {
         parsed.context_management = {
           edits: [{ type: "clear_thinking_20251015", keep: "all" }]
         };
@@ -9774,7 +10151,16 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       // Title-gen path is handled separately by isTitleGeneratorSystemBlocks().
       // Default off — opt-in via `token_economy.lean_system_non_main: true`.
       requestRole: runtime?.requestRole,
-      leanNonMain: config?.token_economy?.lean_system_non_main === true
+      leanNonMain: config?.token_economy?.lean_system_non_main === true,
+      // Simple-system-prompt mode for Opus 4.7+ (CC v2.1.133+ parity, gated by
+      // GrowthBook `tengu_vellum_lantern` in real CC). Plugin gate: model
+      // eligibility + opt-in flag. See buildSystemPromptBlocks for what it
+      // strips (anti-verbosity boilerplate only; identity/billing untouched).
+      simpleSystemPrompt: config?.token_economy?.simple_system_prompt === true,
+      // Workload tag for x-anthropic-billing-header `cc_workload=` segment.
+      // Mirrors real CC's `--workload <tag>` CLI flag (process-scoped, used by
+      // SDK daemon callers spawning cron subprocesses). Empty string -> omit.
+      workload: typeof config?.signature_emulation?.workload === "string" ? config.signature_emulation.workload : ""
     };
     parsed.system = buildSystemPromptBlocks(normalizeSystemTextBlocks(parsed.system), signatureWithModel);
     const tailThreshold = signature.systemPromptTailTurns ?? 6;
@@ -9818,17 +10204,31 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       const configuredTtl = signature.cachePolicy?.ttl || "1h";
       const roleScopedTtl = config?.token_economy?.role_scoped_cache_ttl !== false;
       const isMainForCache = runtime?.requestRole === "main" || runtime?.requestRole == null;
-      const ccTtl = roleScopedTtl && !isMainForCache ? "5m" : configuredTtl;
+      const isSubagentForCache = runtime?.isSubagent === true;
+      const ccTtl = resolveCacheTtl({
+        configuredTtl,
+        roleScopedTtl,
+        isMainForCache,
+        isSubagent: isSubagentForCache,
+        env: process.env
+      });
       if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
         for (const tool of parsed.tools) {
           if (tool.cache_control) delete tool.cache_control;
         }
-        parsed.tools[parsed.tools.length - 1].cache_control = { type: "ephemeral", ttl: ccTtl };
+        const placeToolBreakpoint = shouldPlaceToolBreakpoint(runtime?.cacheBoundaryStability);
+        if (placeToolBreakpoint) {
+          parsed.tools[parsed.tools.length - 1].cache_control = { type: "ephemeral", ttl: ccTtl };
+        }
       }
       if (Array.isArray(parsed.messages)) {
         for (const msg of parsed.messages) {
           if (Array.isArray(msg.content)) {
             for (const block of msg.content) {
+              if (!block || typeof block !== "object") continue;
+              if (block.type === "thinking" || block.type === "redacted_thinking") {
+                continue;
+              }
               if (block.cache_control) delete block.cache_control;
             }
           }
@@ -9916,9 +10316,11 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     if (betaHeader && betaHeader.includes("context-hint-2026-04-09") && !parsed.context_hint) {
       parsed.context_hint = { enabled: true };
     }
+    const fastPoolAvailable = !signature.fastRateLimited;
+    const isFastModeEligibleModel = (m) => fastPoolAvailable && (isOpus46Model(m) || isOpus47Model(m) || isOpus48Model(m));
     const fastModeEnabled = signature.fastMode && !isFalsyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_FAST_MODE);
     let fastModeAutoApplied = false;
-    if (!fastModeEnabled && te.fast_mode_auto === true && isMainRole && parsed.model && isOpus46Model(parsed.model) && Array.isArray(parsed.messages) && parsed.messages.length >= 2) {
+    if (!fastModeEnabled && te.fast_mode_auto === true && isMainRole && parsed.model && isFastModeEligibleModel(parsed.model) && Array.isArray(parsed.messages) && parsed.messages.length >= 2) {
       const last = parsed.messages[parsed.messages.length - 1];
       if (last && last.role === "user") {
         let txt = "";
@@ -9935,7 +10337,7 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
         }
       }
     }
-    if ((fastModeEnabled || fastModeAutoApplied) && parsed.model && isOpus46Model(parsed.model)) {
+    if ((fastModeEnabled || fastModeAutoApplied) && parsed.model && isFastModeEligibleModel(parsed.model)) {
       parsed.speed = "fast";
     }
     if (Array.isArray(parsed.messages) && parsed.messages.length > 0) {
@@ -10126,12 +10528,23 @@ function stripMcpPrefixFromParsedEvent(parsed) {
   }
   return modified;
 }
+function resolveStreamIdleTimeoutMs(cfg) {
+  const envRaw = process.env.OPENCODE_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS;
+  if (envRaw != null && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  const c2 = cfg?.streaming?.idle_timeout_ms;
+  if (typeof c2 === "number" && Number.isFinite(c2) && c2 >= 0) return Math.floor(c2);
+  return 0;
+}
 function transformResponse(response, onUsage, onAccountError) {
   if (!response.body) return response;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const EMPTY_CHUNK = new Uint8Array();
+  const idleTimeoutMs = resolveStreamIdleTimeoutMs(_pluginConfig);
   const stats = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let sseBuffer = "";
   let sseRewriteBuffer = "";
@@ -10186,7 +10599,33 @@ function transformResponse(response, onUsage, onAccountError) {
   }
   const stream = new ReadableStream({
     async pull(controller) {
-      const { done, value } = await reader.read();
+      let readResult;
+      if (idleTimeoutMs > 0) {
+        let idleTimer;
+        try {
+          readResult = await Promise.race([
+            reader.read(),
+            new Promise((_resolve, reject) => {
+              idleTimer = setTimeout(
+                () => reject(new Error(`stream idle timeout: no bytes for ${idleTimeoutMs}ms`)),
+                idleTimeoutMs
+              );
+            })
+          ]);
+        } catch (err) {
+          try {
+            await reader.cancel();
+          } catch {
+          }
+          controller.error(err instanceof Error ? err : new Error(String(err)));
+          return;
+        } finally {
+          clearTimeout(idleTimer);
+        }
+      } else {
+        readResult = await reader.read();
+      }
+      const { done, value } = readResult;
       if (done) {
         processSSEBuffer(true);
         const rewrittenTail = rewriteSSEChunk("", true);
@@ -10304,7 +10743,7 @@ async function refreshAccountToken(account, client, source = "foreground", { onT
   try {
     const diskAuthBeforeRefresh = await readDiskAccountAuth(account.id);
     const adopted = applyDiskAuthIfFresher(account, diskAuthBeforeRefresh);
-    if (source === "foreground" && adopted && account.access && account.expires && account.expires > Date.now()) {
+    if (adopted && account.access && account.expires && account.expires > Date.now()) {
       return account.access;
     }
     const json = await refreshToken(account.refreshToken, { signal: AbortSignal.timeout(15e3) });
@@ -10386,6 +10825,8 @@ AnthropicAuthPlugin.__testing__ = {
   buildSystemPromptBlocks,
   stripMcpPrefixFromParsedEvent,
   CORE_TOOL_NAMES,
+  // exposed for subagent-detection tests (x-parent-session-id header extraction)
+  getIncomingHeader,
   // exposed for determinism regression tests (phase C1)
   applyContextHintCompaction,
   // exposed for session-dedupe regression tests (phase C3)
@@ -10419,6 +10860,11 @@ AnthropicAuthPlugin.__testing__ = {
     }
     Object.assign(sessionMetrics, fresh);
   }
+};
+AnthropicAuthPlugin.__cacheInternals = {
+  resolveCacheTtl,
+  shouldPlaceToolBreakpoint,
+  updateBoundaryStability
 };
 var index_default = AnthropicAuthPlugin;
 export {
