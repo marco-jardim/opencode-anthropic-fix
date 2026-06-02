@@ -10141,9 +10141,21 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     }
     const modelId = parsed.model || "";
     const firstUserMessage = extractFirstUserMessageText(parsed.messages);
+    const baseCachePolicy = signature.cachePolicy || { ttl: "1h", ttl_supported: true };
+    const cachingEnabledForTtl = baseCachePolicy.ttl !== "off" && baseCachePolicy.ttl_supported !== false;
+    const resolvedCacheTtl = cachingEnabledForTtl ? resolveCacheTtl({
+      configuredTtl: baseCachePolicy.ttl || "1h",
+      roleScopedTtl: config?.token_economy?.role_scoped_cache_ttl !== false,
+      isMainForCache: runtime?.requestRole === "main" || runtime?.requestRole == null,
+      isSubagent: runtime?.isSubagent === true,
+      env: process.env
+    }) : baseCachePolicy.ttl;
     const signatureWithModel = {
       ...signature,
       modelId,
+      // Override cachePolicy.ttl with the role/subagent-resolved ttl so the
+      // system blocks match the tool/message breakpoint ttl (see comment above).
+      cachePolicy: { ...baseCachePolicy, ttl: resolvedCacheTtl },
       firstUserMessage,
       antiVerbosity: config?.anti_verbosity,
       // Role-aware system-prompt leaning: for non-main-thread requests (title,
@@ -10201,17 +10213,7 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     }
     const isTitleGen = isTitleGeneratorSystemBlocks(parsed.system || []);
     if (signature.enabled && signature.cachePolicy?.ttl !== "off" && signature.cachePolicy?.ttl_supported !== false && !isTitleGen) {
-      const configuredTtl = signature.cachePolicy?.ttl || "1h";
-      const roleScopedTtl = config?.token_economy?.role_scoped_cache_ttl !== false;
-      const isMainForCache = runtime?.requestRole === "main" || runtime?.requestRole == null;
-      const isSubagentForCache = runtime?.isSubagent === true;
-      const ccTtl = resolveCacheTtl({
-        configuredTtl,
-        roleScopedTtl,
-        isMainForCache,
-        isSubagent: isSubagentForCache,
-        env: process.env
-      });
+      const ccTtl = resolvedCacheTtl;
       if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
         for (const tool of parsed.tools) {
           if (tool.cache_control) delete tool.cache_control;
