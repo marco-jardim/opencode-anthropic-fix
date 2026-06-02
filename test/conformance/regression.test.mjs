@@ -1159,14 +1159,14 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all required always-on betas for non-Haiku model (v2.1.154 set)", async () => {
+  it("contains all required always-on betas for non-Haiku model (v2.1.159 set — unchanged from 2.1.154)", async () => {
     // Use opus-4-6: real CC's Lyz() only pushes effort-2025-11-24 for
     // rE(model) (Opus/Sonnet 4.6), so this test needs an adaptive model to
     // verify the full always-on set including effort.
     const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const beta = headers.get("anthropic-beta");
 
-    // RE doc §15.16 always-on set — synced to v2.1.154
+    // RE doc §15.16 always-on set — synced to v2.1.159 (no always-on change vs 2.1.154)
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
     expect(beta).not.toContain("advanced-tool-use-2025-11-20");
@@ -1184,7 +1184,11 @@ describe("E2E: Beta composition is complete and correct", () => {
     // Token economy betas (config-controlled, defaults in DEFAULT_CONFIG.token_economy)
     // token-efficient-tools was removed in v2.1.90 (fully absent from bundle)
     expect(beta).not.toContain("token-efficient-tools-2026-03-28");
-    // summarize-connector-text was removed in v2.1.90 (dead slot njq="" / NHq="" in v2.1.91+)
+    // summarize-connector-text was a dead slot v2.1.90-2.1.154; REVIVED in CC 2.1.159
+    // as label `narration_summaries` but gated by GrowthBook `pewter_owl_header`
+    // (default-off) + first-party + non-fast-mode. Plugin keeps it OFF by default
+    // (registered in EXPERIMENTAL_BETA_FLAGS for disable-guard/opt-in only), so the
+    // default beta header must still NOT contain it.
     expect(beta).not.toContain("summarize-connector-text-2026-03-13");
     // redact-thinking is on by default for non-Claude-3 models
     expect(beta).toContain("redact-thinking-2026-02-12");
@@ -1438,7 +1442,7 @@ describe("E2E: systemPromptTailing default (A2)", () => {
   });
 });
 
-describe("E2E: Version is 2.1.154", () => {
+describe("E2E: Version is 2.1.159", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1447,17 +1451,17 @@ describe("E2E: Version is 2.1.154", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.154", async () => {
+  it("User-Agent contains 2.1.159", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.154");
+    expect(headers.get("user-agent")).toContain("2.1.159");
   });
 
-  it("billing header contains 2.1.154", async () => {
+  it("billing header contains 2.1.159", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.154");
+    expect(body.system[0].text).toContain("2.1.159");
   });
 });
 

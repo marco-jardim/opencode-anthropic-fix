@@ -1,62 +1,124 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
-<!-- Last verified against: Claude Code 2.1.154 — DECOMPILED from the real
-     win32-x64 native binary (@anthropic-ai/claude-code-win32-x64@2.1.154, Bun-
+<!-- Last verified against: Claude Code 2.1.159 — DECOMPILED from the real
+     linux-x64 native binary (@anthropic-ai/claude-code-linux-x64@2.1.159, Bun-
      embedded JS). Primary-source fingerprints confirmed:
-       VERSION    = "2.1.154"
-       BUILD_TIME = "2026-05-28T12:27:24Z"   (NOT a fabricated midnight value)
-       GIT_SHA    = "b84d2da9ada13121515426fc644786a303e9ac53"
-       SDK (jQ)   = "0.94.0"                  (wire-verified, no longer by inertia)
-     Beta registry: 23 _W("label","flag") entries (see list below).
+       VERSION    = "2.1.159"
+       BUILD_TIME = "2026-05-31T16:22:50Z"
+       GIT_SHA    = "dd8c11fc8d05cea0b2b9fc8f5a99a5c5c5dffc9b"
+       SDK (NQ)   = "0.94.0"                  (wire-verified, no bump from 2.1.154)
+     Diff vs 2.1.154: ONE registered beta added —
+       rD("narration_summaries","summarize-connector-text-2026-03-13"), gated by
+       GrowthBook flag "pewter_owl_header" (t36()) + first-party + NOT in fast-mode;
+       it reoccupies the dead `v76;` slot the beta vacated in v2.1.90. Plugin keeps
+       it OFF by default (correct — pewter_owl_header is default-off). New header
+       x-is-refusal-fallback gated by server clientData flag convolute_arcades
+       (default-off) — plugin omits. OAuth byte-identical. See
+       docs/claude-code-2.1.159-analysis.md for the full diff.
+     Prior baseline (2.1.154 win32-x64): BUILD_TIME 2026-05-28T12:27:24Z,
+       GIT_SHA b84d2da9ada13121515426fc644786a303e9ac53.
+     Beta registry: 24 rD("label","flag") entries (was 23 _W() in 2.1.154; see list below).
      cc_version 3-char suffix algo CONFIRMED: sha256(SALT + msg[4]+msg[7]+msg[20]
        + VERSION).slice(0,3), SALT="59cf53e54c78" — plugin matches byte-for-byte.
      Thinking ctx-mgmt: jq_({hasThinking}) => {edits:[{type:"clear_thinking_20251015",
        keep:"all"}]} only when thinking active — plugin matches. -->
 
-## Binary-verified beta registry (2.1.154, 23 entries)
+## Binary-verified beta registry (2.1.159, 24 entries)
 
-These are the exact `_W("internal_label", "beta-flag")` registrations in the
-2.1.154 binary. The plugin emits a subset always-on, gates some on body
+These are the exact `rD("internal_label", "beta-flag")` registrations in the
+2.1.159 binary (the constructor was `_W(...)` in 2.1.154; minifier rename only).
+The sole addition vs 2.1.154 is `narration_summaries` (see row below, marked NEW). The plugin emits a subset always-on, gates some on body
 features (effort, fast-mode, tool-search via incoming passthrough), and keeps
 the rest in `EXPERIMENTAL_BETA_FLAGS` as a disable-guard. No plugin-emitted beta
 is absent from this list (no over-broadcast).
 
-| label                   | flag                               |
-| ----------------------- | ---------------------------------- |
-| advisor_tool            | advisor-tool-2026-03-01            |
-| afk_mode                | afk-mode-2026-01-31                |
-| cache_diagnosis         | cache-diagnosis-2026-04-07         |
-| ccr_byoc                | ccr-byoc-2025-07-29                |
-| context_hint            | context-hint-2026-04-09            |
-| context_management      | context-management-2025-06-27      |
-| effort                  | effort-2025-11-24                  |
-| environments            | environments-2025-11-01            |
-| extended_cache_ttl      | extended-cache-ttl-2025-04-11      |
-| files_api               | files-api-2025-04-14               |
-| interleaved_thinking    | interleaved-thinking-2025-05-14    |
-| long_context            | context-1m-2025-08-07              |
-| mcp_servers             | mcp-servers-2025-12-04             |
-| mid_conversation_system | mid-conversation-system-2026-04-07 |
-| prompt_caching_scope    | prompt-caching-scope-2026-01-05    |
-| redact_thinking         | redact-thinking-2026-02-12         |
-| speed                   | fast-mode-2026-02-01               |
-| structured_outputs      | structured-outputs-2025-12-15      |
-| task_budgets            | task-budgets-2026-03-13            |
-| thinking_token_count    | thinking-token-count-2026-05-13    |
-| tool_search             | advanced-tool-use-2025-11-20       |
-| tool_search             | tool-search-tool-2025-10-19        |
-| web_search              | web-search-2025-03-05              |
+| label                   | flag                                                                                                                                |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| advisor_tool            | advisor-tool-2026-03-01                                                                                                             |
+| afk_mode                | afk-mode-2026-01-31                                                                                                                 |
+| cache_diagnosis         | cache-diagnosis-2026-04-07                                                                                                          |
+| ccr_byoc                | ccr-byoc-2025-07-29                                                                                                                 |
+| context_hint            | context-hint-2026-04-09                                                                                                             |
+| context_management      | context-management-2025-06-27                                                                                                       |
+| effort                  | effort-2025-11-24                                                                                                                   |
+| environments            | environments-2025-11-01                                                                                                             |
+| extended_cache_ttl      | extended-cache-ttl-2025-04-11                                                                                                       |
+| files_api               | files-api-2025-04-14                                                                                                                |
+| interleaved_thinking    | interleaved-thinking-2025-05-14                                                                                                     |
+| long_context            | context-1m-2025-08-07                                                                                                               |
+| mcp_servers             | mcp-servers-2025-12-04                                                                                                              |
+| mid_conversation_system | mid-conversation-system-2026-04-07                                                                                                  |
+| narration_summaries     | summarize-connector-text-2026-03-13 (NEW 2.1.159; gated by GrowthBook `pewter_owl_header`, stripped in fast-mode; plugin keeps OFF) |
+| prompt_caching_scope    | prompt-caching-scope-2026-01-05                                                                                                     |
+| redact_thinking         | redact-thinking-2026-02-12                                                                                                          |
+| speed                   | fast-mode-2026-02-01                                                                                                                |
+| structured_outputs      | structured-outputs-2025-12-15                                                                                                       |
+| task_budgets            | task-budgets-2026-03-13                                                                                                             |
+| thinking_token_count    | thinking-token-count-2026-05-13                                                                                                     |
+| tool_search             | advanced-tool-use-2025-11-20                                                                                                        |
+| tool_search             | tool-search-tool-2025-10-19                                                                                                         |
+| web_search              | web-search-2025-03-05                                                                                                               |
 
 ## Version history (mimicry-relevant changes)
 
-| CC version | SDK bundled | Beta additions                                                                                                          | Beta removals                                                                 | OAuth change                                                              |
-| ---------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| 2.1.154    | 0.94.0\*    | Opus 4.8 launch (2026-05-28) support: claude-opus-4-8 routed as adaptive-thinking + 1M context + fast-mode eligible     | none (vs 2.1.150)                                                             | none                                                                      |
-| 2.1.150    | 0.94.0      | 26-entry registry; redact-thinking-2026-02-12 default ON; extended-cache-ttl + thinking-token-count default ON (plugin) | advanced-tool-use, tool-search-tool, fast-mode, effort removed from always-on | none                                                                      |
-| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on)                                                         | none                                                                          | none on wire; client-side refresh telemetry expanded (legacy-lock detect) |
-| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01                                                                  | none                                                                          | none                                                                      |
-| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                                                                              | none                                                                          | none                                                                      |
-| 2.1.117    | 0.81.0      | (baseline for this doc)                                                                                                 | none                                                                          | none                                                                      |
+| CC version | SDK bundled | Beta additions                                                                                                                                                                                                                                                    | Beta removals                                                                 | OAuth change                                                              |
+| ---------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| 2.1.159    | 0.94.0      | `summarize-connector-text-2026-03-13` revived as registry label `narration_summaries`, gated by GrowthBook `pewter_owl_header` (default-off) + first-party + non-fast-mode. New header `x-is-refusal-fallback` gated by server `convolute_arcades` (default-off). | none                                                                          | none (byte-identical)                                                     |
+| 2.1.154    | 0.94.0\*    | Opus 4.8 launch (2026-05-28) support: claude-opus-4-8 routed as adaptive-thinking + 1M context + fast-mode eligible                                                                                                                                               | none (vs 2.1.150)                                                             | none                                                                      |
+| 2.1.150    | 0.94.0      | 26-entry registry; redact-thinking-2026-02-12 default ON; extended-cache-ttl + thinking-token-count default ON (plugin)                                                                                                                                           | advanced-tool-use, tool-search-tool, fast-mode, effort removed from always-on | none                                                                      |
+| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on)                                                                                                                                                                                                   | none                                                                          | none on wire; client-side refresh telemetry expanded (legacy-lock detect) |
+| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01                                                                                                                                                                                                            | none                                                                          | none                                                                      |
+| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                                                                                                                                                                                                                        | none                                                                          | none                                                                      |
+| 2.1.117    | 0.81.0      | (baseline for this doc)                                                                                                                                                                                                                                           | none                                                                          | none                                                                      |
+
+### 2.1.155–2.1.159 changes (narration_summaries revival, 2026-05-31)
+
+Verified by diffing the linux-x64 native binaries of 2.1.154 and 2.1.159.
+
+- **`summarize-connector-text-2026-03-13` revived.** It had been a dead/no-op slot
+  (`njq=""`/`NHq=""`, then a bare `v76;` statement) since v2.1.90. In 2.1.159 the
+  registry gains `rD("narration_summaries","summarize-connector-text-2026-03-13")`
+  and the per-request builder's dead slot becomes:
+
+  ```js
+  if (_ && t36()) $.push(QY$); // _ = first-party/non-SDK; QY$ = narration_summaries
+  // t36() === s36("pewter_owl_header")        // GrowthBook flag, default-off
+  // downstream: if (q.type==="disabled" || !!z.fastMode) M = M.filter(b => b !== QY$);
+  ```
+
+  So real CC emits it only for first-party accounts where the server-side
+  GrowthBook flag `pewter_owl_header` is enabled, and never in fast-mode. **The
+  plugin keeps it OFF by default** — emitting it unconditionally would be an
+  over-broadcast fingerprint. Same posture as `mid-conversation-system`. The
+  earlier plugin behavior of NOT sending `summarize-connector-text` (asserted by
+  `test/conformance/regression.test.mjs`) remains correct; the flag is added to
+  `EXPERIMENTAL_BETA_FLAGS`/`BETA_SHORTCUTS` only for the disable-guard and manual
+  opt-in. If opted in manually, replicate the fast-mode strip.
+
+- **New header `x-is-refusal-fallback`.** Bound to `clientDataCache.convolute_arcades`
+  (server-pushed flag, default-off): `ZMK()` returns `clientDataCache?.convolute_arcades===true`.
+  A per-request retry marker the server expects only for accounts opted into the
+  refusal-fallback experiment. **Plugin omits it** (correct).
+
+- **OAuth unchanged.** `client_id 9d1c250a-e61b-44d9-88ed-5944d1962f5e`, scopes
+  `org:create_api_key user:inference user:profile`, `/oauth/token` + `/v1/oauth/token`
+  are byte-identical to 2.1.154. No login-flow drift.
+
+- **Stainless / version headers unchanged.** `x-stainless-package-version` still
+  `0.94.0` (`NQ="0.94.0"`), `anthropic-version` still `2023-06-01`.
+
+- **New telemetry (no wire impact except as corroboration):**
+  `tengu_reorder_tool_uses_skipped_for_thinking` confirms CC reorders `tool_use`
+  blocks but skips the reorder when `thinking`/`redacted_thinking` blocks are
+  present — exactly the byte-identity contract the plugin already enforces.
+  `tengu_byte_stream_idle_timeout_ms` exposes a client-side stream idle-timeout
+  (env `*_STREAM_IDLE_TIMEOUT_MS` / GrowthBook) — a robustness parity opportunity,
+  not a fingerprint. `tengu_pewter_owl_model` is the same `pewter_owl` family as
+  `narration_summaries`.
+
+- **Fingerprints:** `BUILD_TIME 2026-05-31T16:22:50Z`,
+  `GIT_SHA dd8c11fc8d05cea0b2b9fc8f5a99a5c5c5dffc9b`. SDK still `0.94.0` (no bump
+  across 2.1.155–2.1.159). See `docs/claude-code-2.1.159-analysis.md`.
 
 ### mid-conversation-system-2026-04-07 (registered in 2.1.143)
 
@@ -858,9 +920,9 @@ In `anthropic-auth.json`:
 ```jsonc
 {
   "token_economy": {
-    "token_efficient_tools": true,
+    "token_efficient_tools": false, // DEPRECATED/inert — see §11.2 (beta removed from CC v2.1.90)
     "redact_thinking": true,
-    "connector_text_summarization": true,
+    "connector_text_summarization": false, // off by default — GrowthBook-gated in CC, see §11.4
     "extended_cache_ttl": true,
     "thinking_token_count": true,
     "context_management": false,
@@ -879,11 +941,21 @@ Toggle at runtime via `/anthropic set`:
 - `/anthropic set context-management on|off`
 - `/anthropic set structured-outputs on|off`
 
-### 11.2 Token-Efficient Tools
+### 11.2 Token-Efficient Tools (DEPRECATED — inert)
 
-When `token_efficient_tools` is true, adds `token-efficient-tools-2026-03-28` to the beta header. This switches tool_use blocks from ANTML to JSON format (FC v3), saving ~4.5% output tokens.
+> **Status (verified against 2.1.154 and 2.1.159 binaries):** This feature is
+> **inert**. The beta `token-efficient-tools-2026-03-28` referenced by older docs
+> **does not exist** in the real Claude Code binary — only the legacy
+> `token-efficient-tools-2025-02-19` string is present, and it is **not** in the
+> `rD()` registry (it was removed from always-on in CC v2.1.90). The plugin
+> reflects this: `config.token_economy.token_efficient_tools` defaults to `false`
+> (`lib/config.mjs`), the plugin emits **no** token-efficient beta, and
+> `test/conformance/regression.test.mjs` enforces its absence.
 
-**Mutual exclusion:** When active, `structured-outputs-2025-12-15` is NOT added (API rejects both together). If structured-outputs is needed, disable token-efficient-tools.
+The `token_efficient_tools` config key and `/anthropic set token-efficient-tools`
+toggle are retained only for backward compatibility and have no wire effect. Do
+not re-enable emission: sending a beta that real CC no longer sends would be an
+over-broadcast fingerprint.
 
 ### 11.3 Redact Thinking
 
@@ -891,9 +963,23 @@ When `redact_thinking` is true (the default), adds `redact-thinking-2026-02-12` 
 
 **Default: on** (matches CC 2.1.150). Opt out via `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`.
 
-### 11.4 Connector-Text Summarization
+### 11.4 Connector-Text Summarization (`summarize-connector-text-2026-03-13`)
 
-When `connector_text_summarization` is true, adds `summarize-connector-text-2026-03-13` to the beta header. The API summarizes assistant text between tool calls (anti-distillation measure).
+> **Status (verified against 2.1.159 binary):** This beta was a **dead slot** in CC
+> from v2.1.90 through v2.1.154 and the plugin did **not** emit it (asserted by
+> `test/conformance/regression.test.mjs`). In **2.1.159** real CC **revived** it as
+> registry label `narration_summaries`, but only emits it when:
+> `_` (first-party / non-SDK) **AND** the GrowthBook flag `pewter_owl_header` is
+> enabled, **AND** the request is not in fast-mode (it is filtered out when
+> `speed:"fast"`).
+
+Because `pewter_owl_header` is default-off server-side, the plugin **keeps this beta
+off by default** to match the majority of real CC instances. It is registered in
+`EXPERIMENTAL_BETA_FLAGS` (disable-guard) and `BETA_SHORTCUTS` for manual opt-in /
+forward-compat only. If a user opts in via `ANTHROPIC_BETAS` / `/anthropic betas add`,
+the plugin should replicate CC's fast-mode strip (do not send it alongside
+`speed:"fast"`). The API, when the flag is active, summarizes assistant text between
+tool calls (anti-distillation measure).
 
 ### 11.5 Provider-Aware Tool Search Header
 
