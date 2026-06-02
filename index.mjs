@@ -2866,6 +2866,12 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 // suppress context-hint for non-main-thread requests so we don't
                 // opt subagent/title/tool one-shots into a server retry loop.
                 const _requestRole = classifyRequestRole(_parsedBodyOnce);
+                // opencode tags subagent requests with the x-parent-session-id header
+                // (set in its request builder only when a parent session exists).
+                // This is a reliable subagent signal; body-shape classification alone
+                // sees subagents as "main" (real messages + large max_tokens). Used
+                // only to pick the cheaper 5m cache tier for one-shot subagents.
+                const _isSubagent = getIncomingHeader(input, requestInit, "x-parent-session-id") != null;
                 const _baseTE = config.token_economy || {};
                 const _disableCtxHint = contextHintState.disabled || _requestRole !== "main";
                 const _tokenEconomy = _disableCtxHint
@@ -3018,6 +3024,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     usedTools: sessionMetrics.usedTools,
                     tokenEconomySession,
                     requestRole: _requestRole,
+                    isSubagent: _isSubagent,
                     // Adaptive cache-breakpoint placement: pass the per-boundary
                     // stability snapshot so transformRequestBody can anchor the
                     // cache_control marker on the most-stable boundary instead of
@@ -4737,16 +4744,65 @@ function tryQuotaAwareAccountSwitch(account, accountManager, config) {
  * @param {string} args.configuredTtl - Default TTL when 1h is eligible (usually "1h").
  * @param {boolean} args.roleScopedTtl - Whether role-scoped 5m downgrade is enabled.
  * @param {boolean} args.isMainForCache - True when the request is the main/interactive role.
+ * @param {boolean} [args.isSubagent] - True when the request is an opencode subagent
+ *   (detected via the `x-parent-session-id` header). One-shot subagents prefer 5m.
  * @param {Record<string, string | undefined>} [args.env] - Environment (defaults to process.env).
  * @returns {string} The TTL string ("5m" or "1h"/configuredTtl).
  */
-function resolveCacheTtl({ configuredTtl, roleScopedTtl, isMainForCache, env = process.env }) {
+function resolveCacheTtl({ configuredTtl, roleScopedTtl, isMainForCache, isSubagent = false, env = process.env }) {
   // Env overrides (exact CC REH() behavior). isTruthyEnv mirrors CC's uH().
   if (isTruthyEnv(env.FORCE_PROMPT_CACHING_5M)) return "5m";
   if (isTruthyEnv(env.ENABLE_PROMPT_CACHING_1H)) return "1h";
+  // Subagent requests (opencode marks them with the x-parent-session-id header)
+  // are usually one-shot, and opencode runs them sequentially with a DIFFERENT
+  // system prompt than the main thread, so they rarely re-hit a 1h cache. Prefer
+  // the cheap 5m write tier (~1.25x base) over the 1h tier (~2x base) to avoid
+  // paying the long-cache write premium on a prefix that won't be reused. Gated
+  // on the same role-scoped master switch as the side-query downgrade below.
+  if (roleScopedTtl && isSubagent) return "5m";
   // Role-scoped downgrade: non-main (side-query) requests use the cheap 5m tier.
   if (roleScopedTtl && !isMainForCache) return "5m";
   return configuredTtl;
+}
+
+/**
+ * Read a single incoming request header by name (case-insensitive) from either a
+ * `Request` input or a fetch `init.headers` (Headers | array | plain object).
+ * Returns the trimmed value or null. Used to detect opencode's subagent marker
+ * `x-parent-session-id` without consuming/normalizing the full header set.
+ * @param {any} input
+ * @param {any} requestInit
+ * @param {string} name
+ * @returns {string | null}
+ */
+function getIncomingHeader(input, requestInit, name) {
+  const lower = name.toLowerCase();
+  const pick = (v) => (v != null && String(v).trim() !== "" ? String(v).trim() : null);
+  try {
+    if (input && typeof input === "object" && input.headers && typeof input.headers.get === "function") {
+      const v = pick(input.headers.get(name));
+      if (v) return v;
+    }
+  } catch {
+    // malformed Request — fall through to init.headers
+  }
+  const h = requestInit?.headers;
+  if (!h) return null;
+  try {
+    if (typeof h.get === "function") return pick(h.get(name));
+    if (Array.isArray(h)) {
+      for (const pair of h) {
+        if (Array.isArray(pair) && String(pair[0]).toLowerCase() === lower) return pick(pair[1]);
+      }
+      return null;
+    }
+    for (const [k, v] of Object.entries(h)) {
+      if (k.toLowerCase() === lower) return pick(v);
+    }
+  } catch {
+    // unexpected header shape — treat as absent
+  }
+  return null;
 }
 
 /**
@@ -8098,10 +8154,19 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       // Anthropic API rejects temperature when thinking is enabled
       delete parsed.temperature;
 
-      // Claude Code v2.1.84: inject context_management body field when thinking
-      // is active and context-management beta is in use. This tells the API how
-      // to handle thinking blocks during context management operations.
-      if (!parsed.context_management) {
+      // Claude Code v2.1.84: inject the context_management body field ONLY when the
+      // context-management beta is actually enabled (token_economy.context_management,
+      // the SAME flag that gates the beta in buildAnthropicBetaHeader). A top-level
+      // context_management field WITHOUT the beta is rejected by the API with
+      // "context_management: Extra inputs are not permitted". Keeping the field and
+      // the anthropic-beta header in lockstep prevents that 400 — previously the
+      // field was injected on every thinking turn regardless of the beta, which only
+      // worked if the beta happened to be forced on via custom_betas/ANTHROPIC_BETAS.
+      if (
+        config?.token_economy?.context_management &&
+        !/claude-3-/i.test(parsed.model || "") &&
+        !parsed.context_management
+      ) {
         parsed.context_management = {
           edits: [{ type: "clear_thinking_20251015", keep: "all" }],
         };
@@ -8331,10 +8396,12 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       const configuredTtl = signature.cachePolicy?.ttl || "1h";
       const roleScopedTtl = config?.token_economy?.role_scoped_cache_ttl !== false;
       const isMainForCache = runtime?.requestRole === "main" || runtime?.requestRole == null;
+      const isSubagentForCache = runtime?.isSubagent === true;
       const ccTtl = resolveCacheTtl({
         configuredTtl,
         roleScopedTtl,
         isMainForCache,
+        isSubagent: isSubagentForCache,
         env: process.env,
       });
       if (Array.isArray(parsed.tools) && parsed.tools.length > 0) {
@@ -8860,6 +8927,32 @@ function stripMcpPrefixFromParsedEvent(parsed) {
 }
 
 /**
+ * Resolve the byte-stream idle timeout in milliseconds.
+ *
+ * Parity with Claude Code's `tengu_byte_stream_idle_timeout_ms`: a watchdog that
+ * fires when the upstream SSE stream produces no bytes for N ms, so a stalled /
+ * half-dead connection surfaces as a fast error instead of an indefinite hang.
+ *
+ * Resolution order: env `OPENCODE_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS` →
+ * `config.streaming.idle_timeout_ms` → 0 (disabled). Disabled by default because
+ * a too-aggressive value could abort a legitimate long generation; Anthropic SSE
+ * emits periodic `ping` events, so a multi-minute silence is the safe signal.
+ *
+ * @param {any} cfg
+ * @returns {number} timeout in ms, or 0 to disable
+ */
+function resolveStreamIdleTimeoutMs(cfg) {
+  const envRaw = process.env.OPENCODE_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS;
+  if (envRaw != null && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  const c = cfg?.streaming?.idle_timeout_ms;
+  if (typeof c === "number" && Number.isFinite(c) && c >= 0) return Math.floor(c);
+  return 0;
+}
+
+/**
  * Wrap a response body stream to strip mcp_ prefix from tool names,
  * extract token usage stats from SSE events, and detect mid-stream
  * account-specific errors (so the account can be marked for the NEXT request).
@@ -8878,6 +8971,10 @@ function transformResponse(response, onUsage, onAccountError) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const EMPTY_CHUNK = new Uint8Array();
+
+  // Byte-stream idle-timeout watchdog (parity with CC tengu_byte_stream_idle_timeout_ms).
+  // 0 = disabled (default). See resolveStreamIdleTimeoutMs.
+  const idleTimeoutMs = resolveStreamIdleTimeoutMs(_pluginConfig);
 
   /** @type {UsageStats} */
   const stats = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -8958,7 +9055,38 @@ function transformResponse(response, onUsage, onAccountError) {
 
   const stream = new ReadableStream({
     async pull(controller) {
-      const { done, value } = await reader.read();
+      let readResult;
+      if (idleTimeoutMs > 0) {
+        /** @type {ReturnType<typeof setTimeout> | undefined} */
+        let idleTimer;
+        try {
+          readResult = await Promise.race([
+            reader.read(),
+            new Promise((_resolve, reject) => {
+              idleTimer = setTimeout(
+                () => reject(new Error(`stream idle timeout: no bytes for ${idleTimeoutMs}ms`)),
+                idleTimeoutMs,
+              );
+            }),
+          ]);
+        } catch (err) {
+          // Idle timeout (or read error): cancel the upstream reader and surface a
+          // clear error so the consumer can retry instead of waiting on a dead
+          // connection. Mirrors CC's stream-idle watchdog (no silent hang).
+          try {
+            await reader.cancel();
+          } catch {
+            // Reader may already be released; nothing to do.
+          }
+          controller.error(err instanceof Error ? err : new Error(String(err)));
+          return;
+        } finally {
+          clearTimeout(idleTimer);
+        }
+      } else {
+        readResult = await reader.read();
+      }
+      const { done, value } = readResult;
       if (done) {
         processSSEBuffer(true);
 
@@ -9310,6 +9438,8 @@ AnthropicAuthPlugin.__testing__ = {
   buildSystemPromptBlocks,
   stripMcpPrefixFromParsedEvent,
   CORE_TOOL_NAMES,
+  // exposed for subagent-detection tests (x-parent-session-id header extraction)
+  getIncomingHeader,
   // exposed for determinism regression tests (phase C1)
   applyContextHintCompaction,
   // exposed for session-dedupe regression tests (phase C3)
@@ -9345,14 +9475,19 @@ AnthropicAuthPlugin.__testing__ = {
   },
 };
 
-export default AnthropicAuthPlugin;
-
 /**
- * Internal cache helpers exported for unit testing only. Not part of the public
- * plugin API — do not rely on these outside the test suite.
+ * Internal cache helpers exposed for unit testing only. Not part of the public
+ * plugin API. Attached as a PROPERTY of the function for the SAME reason as
+ * `__testing__` above: a bare `export const __cacheInternals = {...}` object
+ * export breaks Opencode's plugin loader, which iterates `Object.values(mod)`
+ * and throws "Plugin export is not a function" on ANY non-function export —
+ * silently disabling the whole plugin (no slash command, no OAuth). Tests reach
+ * these via `AnthropicAuthPlugin.__cacheInternals`.
  */
-export const __cacheInternals = {
+AnthropicAuthPlugin.__cacheInternals = {
   resolveCacheTtl,
   shouldPlaceToolBreakpoint,
   updateBoundaryStability,
 };
+
+export default AnthropicAuthPlugin;

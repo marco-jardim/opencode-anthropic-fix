@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { __cacheInternals } from "../index.mjs";
+import { AnthropicAuthPlugin } from "../index.mjs";
 
-const { resolveCacheTtl, shouldPlaceToolBreakpoint, updateBoundaryStability } = __cacheInternals;
+// __cacheInternals is attached as a property of the plugin function (not a bare
+// named export) so Opencode's plugin loader — which requires every module export
+// to be a function — still accepts the module. See index.mjs near __cacheInternals.
+const { resolveCacheTtl, shouldPlaceToolBreakpoint, updateBoundaryStability } = AnthropicAuthPlugin.__cacheInternals;
 
 describe("resolveCacheTtl — mirrors decompiled CC 2.1.154 REH()", () => {
   const base = { configuredTtl: "1h", roleScopedTtl: true, isMainForCache: true };
@@ -37,6 +40,74 @@ describe("resolveCacheTtl — mirrors decompiled CC 2.1.154 REH()", () => {
 
   it("honors a custom configured TTL for the main role", () => {
     expect(resolveCacheTtl({ ...base, configuredTtl: "5m", env: {} })).toBe("5m");
+  });
+});
+
+describe("resolveCacheTtl — subagent one-shot 5m downgrade (x-parent-session-id)", () => {
+  const base = { configuredTtl: "1h", roleScopedTtl: true, isMainForCache: true };
+
+  it("forces 5m for a subagent even when it classifies as main role", () => {
+    // opencode subagents look like "main" (real messages + large max_tokens) but
+    // carry x-parent-session-id → isSubagent true → cheap 5m write tier.
+    expect(resolveCacheTtl({ ...base, isSubagent: true, env: {} })).toBe("5m");
+  });
+
+  it("keeps configured 1h for a non-subagent main request", () => {
+    expect(resolveCacheTtl({ ...base, isSubagent: false, env: {} })).toBe("1h");
+  });
+
+  it("defaults isSubagent to false (omitted) → main keeps 1h", () => {
+    expect(resolveCacheTtl({ ...base, env: {} })).toBe("1h");
+  });
+
+  it("respects the role-scoped master switch (no subagent downgrade when off)", () => {
+    expect(resolveCacheTtl({ ...base, isSubagent: true, roleScopedTtl: false, env: {} })).toBe("1h");
+  });
+
+  it("ENABLE_PROMPT_CACHING_1H override beats the subagent 5m downgrade", () => {
+    expect(resolveCacheTtl({ ...base, isSubagent: true, env: { ENABLE_PROMPT_CACHING_1H: "1" } })).toBe("1h");
+  });
+
+  it("FORCE_PROMPT_CACHING_5M still wins (consistent with non-subagent)", () => {
+    expect(resolveCacheTtl({ ...base, isSubagent: true, env: { FORCE_PROMPT_CACHING_5M: "1" } })).toBe("5m");
+  });
+});
+
+describe("getIncomingHeader — subagent marker extraction (all header shapes)", () => {
+  const { getIncomingHeader } = AnthropicAuthPlugin.__testing__;
+  const NAME = "x-parent-session-id";
+
+  it("reads from a fetch init Headers object (case-insensitive)", () => {
+    const init = { headers: new Headers({ "X-Parent-Session-Id": "ses_parent_1" }) };
+    expect(getIncomingHeader(undefined, init, NAME)).toBe("ses_parent_1");
+  });
+
+  it("reads from an init.headers plain object", () => {
+    const init = { headers: { "x-parent-session-id": "ses_parent_2" } };
+    expect(getIncomingHeader(undefined, init, NAME)).toBe("ses_parent_2");
+  });
+
+  it("reads from an init.headers array of pairs (case-insensitive key)", () => {
+    const init = { headers: [["X-PARENT-SESSION-ID", "ses_parent_3"]] };
+    expect(getIncomingHeader(undefined, init, NAME)).toBe("ses_parent_3");
+  });
+
+  it("reads from a Request input's headers", () => {
+    const req = new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-parent-session-id": "ses_parent_4" },
+    });
+    expect(getIncomingHeader(req, {}, NAME)).toBe("ses_parent_4");
+  });
+
+  it("returns null when the header is absent (main-thread request)", () => {
+    expect(getIncomingHeader(undefined, { headers: { "x-session-affinity": "ses_main" } }, NAME)).toBeNull();
+    expect(getIncomingHeader(undefined, {}, NAME)).toBeNull();
+    expect(getIncomingHeader(undefined, undefined, NAME)).toBeNull();
+  });
+
+  it("treats empty/whitespace header value as absent", () => {
+    expect(getIncomingHeader(undefined, { headers: { "x-parent-session-id": "  " } }, NAME)).toBeNull();
   });
 });
 

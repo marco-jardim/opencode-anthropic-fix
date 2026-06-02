@@ -1442,6 +1442,31 @@ describe("E2E: systemPromptTailing default (A2)", () => {
   });
 });
 
+describe("context_management body field — lockstep with context-management beta", () => {
+  // Regression: a top-level context_management field WITHOUT the beta returns
+  // 400 "context_management: Extra inputs are not permitted". The field must only
+  // be injected when token_economy.context_management is on (which also emits the
+  // beta). Default config has it OFF, so a thinking request must NOT carry the field.
+  let client, fetchFn;
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    client = makeClient();
+    fetchFn = await setupFetchFn(client);
+  });
+
+  it("omits context_management on a thinking request when the beta is off (default)", async () => {
+    const { body, headers } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-6",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    // Sanity: thinking is active (otherwise the field path would not run).
+    expect(body.thinking?.type).toBe("adaptive");
+    // Beta off by default → the field MUST be absent so the API does not 400.
+    expect(headers.get("anthropic-beta") || "").not.toContain("context-management-2025-06-27");
+    expect(body.context_management).toBeUndefined();
+  });
+});
+
 describe("E2E: Version is 2.1.159", () => {
   let client, fetchFn;
 
