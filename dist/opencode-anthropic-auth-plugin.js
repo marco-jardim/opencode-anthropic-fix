@@ -9378,8 +9378,16 @@ function isSonnet46Model(model) {
   if (!model) return false;
   return /claude-sonnet-4[._-]6|sonnet[._-]4[._-]6/i.test(model);
 }
+function isFable5Model(model) {
+  if (!model) return false;
+  return /claude-fable-5|fable[._-]5/i.test(model);
+}
+function isMythos5Model(model) {
+  if (!model) return false;
+  return /claude-mythos-5|mythos[._-]5/i.test(model);
+}
 function isAdaptiveThinkingModel(model) {
-  return isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model) || isSonnet46Model(model);
+  return isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model) || isSonnet46Model(model) || isFable5Model(model) || isMythos5Model(model);
 }
 function isEligibleFor1MContext(model) {
   if (!model) return false;
@@ -10871,5 +10879,8 @@ AnthropicAuthPlugin.__cacheInternals = {
 var index_default = AnthropicAuthPlugin;
 export {
   AnthropicAuthPlugin,
-  index_default as default
+  index_default as default,
+  isAdaptiveThinkingModel,
+  isFable5Model,
+  isMythos5Model
 };

@@ -6661,7 +6661,7 @@ function getClaudeEntrypoint() {
 }
 
 /**
- * @param {string | undefined} body
+ * @param {string | undefined} model
  * @returns {string | undefined}
  */
 function logTransformedSystemPrompt(body) {
@@ -6773,8 +6773,33 @@ function isSonnet46Model(model) {
  * @param {string | undefined} body
  * @returns {boolean}
  */
-function isAdaptiveThinkingModel(model) {
-  return isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model) || isSonnet46Model(model);
+export function isFable5Model(model) {
+  if (!model) return false;
+  return /claude-fable-5|fable[._-]5/i.test(model);
+}
+
+/**
+ * @param {string | undefined} model
+ * @returns {boolean}
+ */
+export function isMythos5Model(model) {
+  if (!model) return false;
+  return /claude-mythos-5|mythos[._-]5/i.test(model);
+}
+
+/**
+ * @param {string | undefined} model
+ * @returns {boolean}
+ */
+export function isAdaptiveThinkingModel(model) {
+  return (
+    isOpus46Model(model) ||
+    isOpus47Model(model) ||
+    isOpus48Model(model) ||
+    isSonnet46Model(model) ||
+    isFable5Model(model) ||
+    isMythos5Model(model)
+  );
 }
 
 /**
