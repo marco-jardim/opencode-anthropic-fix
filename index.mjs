@@ -30,6 +30,7 @@ import {
   parseRateLimitReason,
   parseRetryAfterHeader,
   parseRetryAfterMsHeader,
+  parseUnifiedResetMsHeader,
   parseShouldRetryHeader,
   TRANSIENT_RETRY_THRESHOLD_MS,
 } from "./lib/backoff.mjs";
@@ -3745,7 +3746,10 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                   // Account-specific errors (429/401/billing/permission)
                   if (accountSpecific) {
                     const reason = parseRateLimitReason(response.status, errorBody);
-                    const retryAfterMs = parseRetryAfterMsHeader(response) ?? parseRetryAfterHeader(response);
+                    const retryAfterMs =
+                      parseRetryAfterMsHeader(response) ??
+                      parseRetryAfterHeader(response) ??
+                      parseUnifiedResetMsHeader(response);
 
                     // Transient 429: short retry-after (<=10s) is a burst throttle.
                     // Retry on the SAME account instead of rotating — avoids wasting
@@ -7087,6 +7091,14 @@ const MAX_SUBAGENT_CC_PREFIX = MAX_SAFE_SYSTEM_TEXT_LENGTH;
 const SUBAGENT_CC_ANCHOR = "You are an interactive";
 let cachedCCPrompt = null;
 
+// Perf: module-scope regexes reused across per-request hot paths. None use the
+// `/g` flag and all are consumed via `.test()`, so a single shared instance is
+// stateless and safe (no `lastIndex` to reset between calls).
+const CLAUDE_3_MODEL_RE = /claude-3-/i;
+const TAIL_IMPORTANT_RE = /\b(MUST|NEVER|CRITICAL|IMPORTANT|REQUIRED|DO NOT|ALWAYS|FORBIDDEN)\b/i;
+const TAIL_HEADER_RE = /^#{1,4}\s/;
+const TAIL_LIST_ITEM_RE = /^\s*[-*]\s/;
+
 function sanitizeSystemText(text) {
   // QA fix M4: use word boundaries to avoid mangling URLs and code identifiers
   let sanitized = text.replace(/\bOpenCode\b/g, "Claude Code").replace(/\bopencode\b/gi, "Claude");
@@ -7109,9 +7121,9 @@ function tailSystemBlock(text, maxChars, turnThreshold) {
   const lines = text.split("\n");
   const kept = [];
   let charCount = 0;
-  const importantRe = /\b(MUST|NEVER|CRITICAL|IMPORTANT|REQUIRED|DO NOT|ALWAYS|FORBIDDEN)\b/i;
-  const headerRe = /^#{1,4}\s/;
-  const listItemRe = /^\s*[-*]\s/;
+  const importantRe = TAIL_IMPORTANT_RE;
+  const headerRe = TAIL_HEADER_RE;
+  const listItemRe = TAIL_LIST_ITEM_RE;
   // Always keep the first paragraph (identity/role definition)
   let firstParaEnd = 0;
   for (let j = 0; j < lines.length; j++) {
@@ -7600,6 +7612,22 @@ function buildSystemPromptBlocks(system, signature) {
  *   accumulates fast-mode independently of actual body content.
  * @returns {string}
  */
+// Mirrors CC's Kw(model) effort eligibility: returns false for claude-3-* and the
+// explicit older 4.x exclusion set (opus-4-0/4-1, sonnet-4-0/4-5, haiku-4-5), true
+// for every other model (effort-capable: Opus 4.5/4.6/4.7/4.8, Sonnet 4.6, etc.).
+const _EFFORT_EXCLUDED_MODELS = [
+  /claude-opus-4-0/i,
+  /claude-opus-4-1/i,
+  /claude-sonnet-4-0/i,
+  /claude-sonnet-4-5/i,
+  /claude-haiku-4-5/i,
+];
+function isEffortCapableModel(model) {
+  if (!model) return false;
+  if (CLAUDE_3_MODEL_RE.test(model)) return false;
+  return !_EFFORT_EXCLUDED_MODELS.some((re) => re.test(model));
+}
+
 function buildAnthropicBetaHeader(
   incomingBeta,
   signatureEnabled,
@@ -7653,13 +7681,15 @@ function buildAnthropicBetaHeader(
 
   // v2.1.150: fast-mode-2026-02-01 removed from always-on (CC sends only when speed feature active).
 
-  // v2.1.150: effort-2025-11-24 removed from always-on (CC sends only when effort is explicitly requested).
+  // v2.1.195: effort-2025-11-24 is no longer always-on; it is now a model-gated
+  // default emitted in the conditional section below for effort-capable models
+  // (mirrors CC's Kw(model)).
 
   // Interleaved thinking — real CC's i01 pushes via hv4(model), which is
   // (firstParty && non-Claude-3). Claude 3.x models don't support interleaved
   // thinking and real CC never sends this flag for them, so emitting it
   // diverges the fingerprint for legacy Haiku/Sonnet 3.x requests.
-  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && !/claude-3-/i.test(model)) {
+  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && !CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("interleaved-thinking-2025-05-14");
   }
 
@@ -7685,9 +7715,26 @@ function buildAnthropicBetaHeader(
 
   // === CONDITIONAL BETAS (model/context-dependent) ===
 
-  // v2.1.150: context-management gated behind opt-in (CC has hardcoded && false).
-  if (te.context_management && !/claude-3-/i.test(model)) {
+  // First-party provider predicate (OAuth path). Mirrors CC's ZO(provider) which
+  // excludes bedrock/vertex/mantle. context-management and effort are first-party
+  // only here, so they must never be pushed on bedrock/vertex.
+  const isFirstPartyProvider = provider !== "vertex" && provider !== "bedrock" && provider !== "mantle";
+
+  // v2.1.195: context-management-2025-06-27 is default-ON for first-party non-claude-3
+  // models (incl. Haiku 4.5), mirroring CC's n0d(model) eligibility path. Earlier
+  // analyses read only the separate USE_API_CONTEXT_MANAGEMENT env term (hardcoded
+  // && false) and recorded it as off; 2.1.195 confirms it ships by default for modern
+  // first-party models. Opt out via token_economy.context_management = false.
+  if (te.context_management !== false && isFirstPartyProvider && !CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("context-management-2025-06-27");
+  }
+
+  // v2.1.195: effort-2025-11-24 is a model-gated default for effort-capable models
+  // (Opus 4.5/4.6/4.7/4.8, Sonnet 4.6), mirroring CC's Kw(model). Excluded for
+  // claude-3-*, opus-4-0, opus-4-1, sonnet-4-0, sonnet-4-5, haiku-4-5. First-party
+  // only; opt out via token_economy.effort = false.
+  if (te.effort !== false && isFirstPartyProvider && isEffortCapableModel(model)) {
+    betas.push(_EFFORT_BETA_FLAG);
   }
 
   // v2.1.150: structured-outputs gated behind opt-in (CC has behind tengu_tool_pear flag).
@@ -7704,7 +7751,7 @@ function buildAnthropicBetaHeader(
   // (tengu_sage_compass2) and firstParty+isLoggedIn. Since we can't check
   // CC's feature flags, include it unconditionally for Claude 4+ models.
   // CC v108 sends it in MITM captures for Max/Pro users.
-  if (!/claude-3-/i.test(model)) {
+  if (!CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("advisor-tool-2026-03-01");
   }
 
@@ -7716,12 +7763,11 @@ function buildAnthropicBetaHeader(
   // token-efficient context compaction. Sticky: disabled permanently on
   // 400/409/529 errors referencing the hint. Users can opt out via
   // token_economy.context_hint = false.
-  const isFirstPartyProvider = provider !== "vertex" && provider !== "bedrock" && provider !== "mantle";
   // Mimicry note: real CC gates context-hint on querySource.startsWith("repl_main_thread").
   // We infer main-thread from body shape via classifyRequestRole and pass it via
   // tokenEconomy.__requestRole. Treat absent marker as "main" for backward compat.
   const _isMainThread = te.__requestRole == null || te.__requestRole === "main";
-  if (isFirstPartyProvider && !/claude-3-/i.test(model) && te.context_hint !== false && _isMainThread) {
+  if (isFirstPartyProvider && !CLAUDE_3_MODEL_RE.test(model) && te.context_hint !== false && _isMainThread) {
     betas.push("context-hint-2026-04-09");
   }
 
@@ -7739,13 +7785,13 @@ function buildAnthropicBetaHeader(
 
   // v2.1.150: redact-thinking is default-ON in CC (first-party, non-SDK, thinking models).
   // Opt out via `/anthropic set redact-thinking off` to see thinking content.
-  if (te.redact_thinking !== false && !disableExperimentalBetas && !/claude-3-/i.test(model)) {
+  if (te.redact_thinking !== false && !disableExperimentalBetas && !CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("redact-thinking-2026-02-12");
   }
 
   // v2.1.150: thinking-token-count for token budget tracking (behind tengu_chert_bezel in CC).
   // Default ON for token economy visibility. Opt out via token_economy.thinking_token_count = false.
-  if (te.thinking_token_count !== false && !disableExperimentalBetas && !/claude-3-/i.test(model)) {
+  if (te.thinking_token_count !== false && !disableExperimentalBetas && !CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("thinking-token-count-2026-05-13");
   }
 
@@ -8039,7 +8085,9 @@ function buildRequestHeaders(
       requestHeaders.set("x-anthropic-additional-protection", "true");
     }
 
-    // x-client-request-id: NOT sent by real CC (confirmed via proxy capture). Removed.
+    // x-client-request-id: real CC 2.1.195's first-party fetch middleware (Ukd) sets
+    // this to crypto.randomUUID() on every first-party request. Re-emit a random uuid.
+    requestHeaders.set("x-client-request-id", randomUUID());
   }
   requestHeaders.delete("x-api-key");
   // x-session-affinity: set by opencode SDK but NOT in real CC. Strip it.
@@ -8180,16 +8228,16 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
       delete parsed.temperature;
 
       // Claude Code v2.1.84: inject the context_management body field ONLY when the
-      // context-management beta is actually enabled (token_economy.context_management,
-      // the SAME flag that gates the beta in buildAnthropicBetaHeader). A top-level
-      // context_management field WITHOUT the beta is rejected by the API with
-      // "context_management: Extra inputs are not permitted". Keeping the field and
-      // the anthropic-beta header in lockstep prevents that 400 — previously the
-      // field was injected on every thinking turn regardless of the beta, which only
-      // worked if the beta happened to be forced on via custom_betas/ANTHROPIC_BETAS.
+      // user has explicitly opted in via token_economy.context_management. Note: as of
+      // v2.1.195 the context-management *beta header* is default-ON for first-party
+      // non-claude-3 models (see buildAnthropicBetaHeader), but the body field stays
+      // opt-in. A top-level context_management field WITHOUT the beta is rejected with
+      // "context_management: Extra inputs are not permitted"; the beta being present
+      // without the field is fine. Gating the field on explicit opt-in keeps the field
+      // ⊆ beta invariant, so the 400 never fires.
       if (
         config?.token_economy?.context_management &&
-        !/claude-3-/i.test(parsed.model || "") &&
+        !CLAUDE_3_MODEL_RE.test(parsed.model || "") &&
         !parsed.context_management
       ) {
         parsed.context_management = {

@@ -765,13 +765,17 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.159");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.195");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.has("x-api-key")).toBe(false);
+    // v2.1.195: CC's first-party middleware re-emits x-client-request-id as a random uuid.
+    expect(headers.get("x-client-request-id")).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
   });
 
   it("adds ?beta=true to /v1/messages URL", async () => {
@@ -3000,7 +3004,7 @@ describe("header handling", () => {
     expect(init.headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
   });
 
-  it("adds effort beta AND interleaved-thinking for Opus 4.6 models (both always-on)", async () => {
+  it("adds effort + context-management AND interleaved-thinking for Opus 4.6 models", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -3011,7 +3015,10 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    expect(betaHeader).not.toContain("effort-2025-11-24");
+    // v2.1.195: effort is a model-gated default (Kw(model)) for Opus 4.5/4.6/4.7/4.8 & Sonnet 4.6.
+    expect(betaHeader).toContain("effort-2025-11-24");
+    // v2.1.195: context-management is default-on (n0d(model)) for first-party non-claude-3.
+    expect(betaHeader).toContain("context-management-2025-06-27");
     expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).not.toContain("fast-mode-2026-02-01");
     // Claude Code v2.1.81: interleaved-thinking is now always-on (not model-gated)
@@ -3275,8 +3282,10 @@ describe("header handling", () => {
     expect(betaHeader).toContain("claude-code-20250219");
     expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).not.toContain("fast-mode-2026-02-01");
-    // Real CC's Lyz() only pushes effort for Opus/Sonnet 4.6 — not Haiku
+    // Real CC's Kw(model) only pushes effort for Opus 4.5+/Sonnet 4.6 — not Haiku/claude-3
     expect(betaHeader).not.toContain("effort-2025-11-24");
+    // claude-3 models are excluded from context-management (n0d(model) → !claude-3)
+    expect(betaHeader).not.toContain("context-management-2025-06-27");
     // Real CC's hv4() excludes Claude 3.x from interleaved thinking
     expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
   });
@@ -3294,8 +3303,10 @@ describe("header handling", () => {
     const betaHeader = init.headers.get("anthropic-beta");
     // Haiku 4.5 is Claude 4+ firstParty → hv4=true → interleaved pushed
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
-    // Haiku 4.5 is NOT rE(model) → effort must NOT be pushed
+    // Haiku 4.5 is in Kw(model)'s exclusion set → effort must NOT be pushed
     expect(betaHeader).not.toContain("effort-2025-11-24");
+    // Haiku 4.5 is first-party non-claude-3 → n0d(model)=true → context-management pushed
+    expect(betaHeader).toContain("context-management-2025-06-27");
     // Other always-on betas still present
     expect(betaHeader).toContain("claude-code-20250219");
     expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
@@ -3313,8 +3324,10 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    // Sonnet 4.6 is rE(model) → effort pushed
-    expect(betaHeader).not.toContain("effort-2025-11-24");
+    // Sonnet 4.6 is effort-capable (Kw(model)) → effort pushed
+    expect(betaHeader).toContain("effort-2025-11-24");
+    // Sonnet 4.6 is first-party non-claude-3 → n0d(model)=true → context-management pushed
+    expect(betaHeader).toContain("context-management-2025-06-27");
     // Sonnet 4.6 is Claude 4+ → hv4=true → interleaved pushed
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
   });
@@ -3478,9 +3491,11 @@ describe("header handling", () => {
     // Non-experimental betas survive
     expect(betaHeader).toContain("oauth-2025-04-20");
     expect(betaHeader).toContain("claude-code-20250219");
-    // effort-2025-11-24 is no longer always-on so it is not present
-    expect(betaHeader).not.toContain("effort-2025-11-24");
-    // All EXPERIMENTAL_BETA_FLAGS members are filtered out
+    // effort-2025-11-24 is a model-gated default NOT in EXPERIMENTAL_BETA_FLAGS,
+    // so it survives the disable guard for an effort-capable model (opus-4-6).
+    expect(betaHeader).toContain("effort-2025-11-24");
+    // All EXPERIMENTAL_BETA_FLAGS members are filtered out (incl. context-management)
+    expect(betaHeader).not.toContain("context-management-2025-06-27");
     expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).not.toContain("prompt-caching-scope-2026-01-05");
     expect(betaHeader).not.toContain("tool-examples-2025-10-29");

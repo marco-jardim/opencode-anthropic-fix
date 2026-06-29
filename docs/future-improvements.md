@@ -339,3 +339,43 @@ In addition to the v2.1.105 list above, monitor these for upcoming versions:
   starts appearing inside always-on emit paths.
 - `claude-opus-4-8`, `claude-sonnet-4-7` and friends — model registry expansions.
 - `stop_details` — confirm SSE re-emitter preserves the field on responses.
+- `server-side-fallback-2026-06-01` / `fallback-credit-2026-06-01` (registered
+  2.1.195) — flag the day either appears outside the opt-in `fallbacks` path.
+- `x-cc-atis` (2.1.195 first-party attestation header) — if it becomes mandatory
+  (server starts rejecting requests without it), the plugin has no way to mint a
+  valid token; escalate immediately.
+- `anthropic-ratelimit-unified-overage-*` — track for rotation/economy parsing.
+
+---
+
+## N. Claude Code 2.1.195 re-convergence (from 2026-06-29 binary analysis)
+
+Full detail: `docs/claude-code-2.1.195-analysis.md`. Prioritized backlog:
+
+**Mimicry — close default-set under-send (highest fingerprint value):**
+
+1. Send `context-management-2025-06-27` by default for first-party non-`claude-3`
+   models (incl. Haiku). Real CC sends it via `n0d(model)`; plugin omits it.
+2. Send `effort-2025-11-24` for effort-capable models (Opus 4.5/4.6/4.7/4.8,
+   Sonnet 4.6), mirroring `Kw(model)`'s exclusion list.
+3. Re-emit `x-client-request-id: <crypto.randomUUID()>` (CC's first-party
+   middleware adds it on every request; plugin currently strips it).
+
+**OAuth token-call (behavioral — test the 429 guard before shipping):** 4. Token UA `axios/1.13.6` → `anthropic-sdk-typescript/0.94.0 userOAuthProvider`;
+add `anthropic-beta: oauth-2025-04-20` to the token POST; re-evaluate the
+axios-style `Accept`. Gate behind a flag / A-B until refresh reliability is proven.
+
+**Over-send hygiene (lower priority):** 5. Make always-on `extended-cache-ttl-2025-04-11` 1h-conditional; treat
+`advisor-tool` / `context-hint` as the GrowthBook-gated (default-off) betas they
+are in CC. Verify `x-stainless-helper` is not over-sent on normal main turns.
+
+**Economy / rotation:** 6. Parse the expanded `anthropic-ratelimit-unified-*` response family (overage
+status/reset, channel/monthly utilization) to drive smarter pre-429 rotation.
+
+**Perf (no wire impact):** 7. Hoist per-request regexes to module scope; cache the billing fingerprint and
+serialize the request body once per attempt; confirm `loadConfig()` isn't
+re-parsing JSON per request. See analysis §9.
+
+Version-tracking constants to bump: `FALLBACK_CLAUDE_CLI_VERSION → 2.1.195`,
+`CLAUDE_CODE_BUILD_TIME → 2026-06-26T01:00:56Z`,
+`CLAUDE_CODE_GIT_SHA → 4603aa3f2ea164bd0974f82eb413ae7acc99a7ee` (SDK stays `0.94.0`).

@@ -361,6 +361,33 @@ clone using raw `fetch()` (which sends no `Accept` header and a custom `User-Age
 2026-03-21, this fingerprint is actively enforced — requests without the correct axios
 signature receive HTTP 429.
 
+> ⚠ **UPDATE — Claude Code 2.1.195 (2026-06-29 analysis).** Upstream CC has **moved off
+> axios for OAuth.** The 2.1.195 native binary contains **no `axios/1.x.x` UA string**
+> for the OAuth path; token exchange/refresh now go through the Anthropic TS SDK's
+> native-`fetch` OAuth provider `userOAuthProvider` (`@92887`):
+>
+> ```js
+> // userOAuthProvider — token refresh/exchange (SDK, native fetch)
+> headers: {
+>   "Content-Type": "application/json",
+>   "anthropic-beta": "oauth-2025-04-20",                         // NEW on token POST
+>   "User-Agent": `anthropic-sdk-typescript/0.94.0 userOAuthProvider`,
+> }
+> // no explicit Accept header (fetch default)
+> ```
+>
+> The `application/json, text/plain, */*` `Accept` value still appears in the bundle,
+> but it is axios's default `headers.common.Accept` config (axios remains bundled for
+> other uses) — **not** the OAuth path. The enterprise OIDC flow uses
+> `anthropic-sdk-typescript/0.94.0 oidcFederationProvider` with
+> `anthropic-beta: oauth-2025-04-20,oidc-federation-2026-04-01`.
+>
+> **Plugin status:** still emits the `axios/1.13.6` fingerprint above (unchanged code).
+> The current `lib/oauth.mjs` behavior and the conformance test that asserts
+> `axios/1.13.6` therefore now reflect a _historical_ CC version, not 2.1.195. Migrating
+> is a behavioral change with 429 risk — see `docs/claude-code-2.1.195-analysis.md` §6
+> before touching `lib/oauth.mjs` or its tests.
+
 **Contrast with API calls:** Regular API calls (`/v1/messages`) do NOT go through axios. They
 go through a custom fetch interceptor that sets `User-Agent: claude-cli/{version} (external,
 cli)` and all the Stainless headers. Only the OAuth token endpoint uses the axios client.
@@ -575,28 +602,40 @@ X-Stainless-Timeout: 600
 
 ### 3.4 Beta Headers (anthropic-beta) — Complete List
 
-| Beta Value                        | Purpose                                                          |
-| --------------------------------- | ---------------------------------------------------------------- |
-| `claude-code-20250219`            | **Main Claude Code client beta** — always present for firstParty |
-| `oauth-2025-04-20`                | **OAuth authentication** — always added when OAuth token used    |
-| `interleaved-thinking-2025-05-14` | Interleaved thinking                                             |
-| `context-1m-2025-08-07`           | 1M context window (if model supports)                            |
-| `context-management-2025-06-27`   | Context management                                               |
-| `structured-outputs-2025-12-15`   | Structured outputs                                               |
-| `web-search-2025-03-05`           | Web search                                                       |
-| `advanced-tool-use-2025-11-20`    | Advanced tool use                                                |
-| `task-budgets-2026-03-13`         | Task budgets (output_config limits for subagent tasks)           |
-| `tool-search-tool-2025-10-19`     | Tool search                                                      |
-| `effort-2025-11-24`               | Effort parameter                                                 |
-| `prompt-caching-scope-2026-01-05` | Prompt caching scope                                             |
-| `fast-mode-2026-02-01`            | Fast mode (Haiku turbo)                                          |
-| `redact-thinking-2026-02-12`      | Redact thinking                                                  |
-| `afk-mode-2026-01-31`             | Auto/AFK mode classifier                                         |
-| `files-api-2025-04-14`            | Files API operations                                             |
-| `token-counting-2024-11-01`       | Token counting endpoint                                          |
-| `skills-2025-10-02`               | Skills API                                                       |
-| `ccr-byoc-2025-07-29`             | BYOC sessions polling                                            |
-| `ccr-triggers-2026-01-30`         | CCR automation triggers                                          |
+| Beta Value                            | Purpose                                                                 |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `claude-code-20250219`                | **Main Claude Code client beta** — always present for firstParty        |
+| `oauth-2025-04-20`                    | **OAuth authentication** — always added when OAuth token used           |
+| `interleaved-thinking-2025-05-14`     | Interleaved thinking                                                    |
+| `context-1m-2025-08-07`               | 1M context window (if model supports)                                   |
+| `context-management-2025-06-27`       | Context management                                                      |
+| `structured-outputs-2025-12-15`       | Structured outputs                                                      |
+| `web-search-2025-03-05`               | Web search                                                              |
+| `advanced-tool-use-2025-11-20`        | Advanced tool use                                                       |
+| `task-budgets-2026-03-13`             | Task budgets (output_config limits for subagent tasks)                  |
+| `tool-search-tool-2025-10-19`         | Tool search                                                             |
+| `effort-2025-11-24`                   | Effort parameter                                                        |
+| `prompt-caching-scope-2026-01-05`     | Prompt caching scope                                                    |
+| `fast-mode-2026-02-01`                | Fast mode (Haiku turbo)                                                 |
+| `redact-thinking-2026-02-12`          | Redact thinking                                                         |
+| `afk-mode-2026-01-31`                 | Auto/AFK mode classifier                                                |
+| `files-api-2025-04-14`                | Files API operations                                                    |
+| `token-counting-2024-11-01`           | Token counting endpoint                                                 |
+| `skills-2025-10-02`                   | Skills API                                                              |
+| `ccr-byoc-2025-07-29`                 | BYOC sessions polling                                                   |
+| `ccr-triggers-2026-01-30`             | CCR automation triggers                                                 |
+| `thinking-token-count-2026-05-13`     | Thinking token count (default-on, firstParty)                           |
+| `summarize-connector-text-2026-03-13` | `narration_summaries` (GrowthBook `pewter_owl_header`, default-off)     |
+| `server-side-fallback-2026-06-01`     | **NEW 2.1.195** — opt-in, only with a `fallbacks:[{model}]` body param  |
+| `fallback-credit-2026-06-01`          | **NEW 2.1.195** — client refusal-fallback repricing middleware (opt-in) |
+
+> **2.1.195 registry note:** the canonical in-binary registry (`Udd`) holds **28**
+> frozen `{name,header}` entries. The two genuinely new vs 2.1.159 are
+> `server-side-fallback-2026-06-01` and `fallback-credit-2026-06-01` (both gated/opt-in;
+> not on a default `/v1/messages` turn). **Registry membership ≠ default emission.** For
+> the precise default-set wiring on OAuth firstParty models — including that real CC
+> sends `context-management-2025-06-27` and `effort-2025-11-24` **by default** on modern
+> models (which the plugin omits) — see `docs/claude-code-2.1.195-analysis.md` §5.
 
 ### 3.5 Beta Header Composition Logic
 

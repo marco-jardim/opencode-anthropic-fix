@@ -242,17 +242,19 @@ describe("Fix #2: EXPERIMENTAL_BETA_FLAGS filter behavior", () => {
 
   it("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 strips most always-on betas", async () => {
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
-    // Use opus-4-6 so effort-2025-11-24 is actually pushed — real CC's Lyz()
-    // only emits this flag for rE(model) (Opus/Sonnet 4.6).
+    // Use opus-4-6 so effort-2025-11-24 is model-gated ON — real CC's Kw(model)
+    // emits effort for Opus 4.5/4.6/4.7/4.8 and Sonnet 4.6.
     const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const betaHeader = headers.get("anthropic-beta");
 
-    // Survivors: oauth, claude-code
+    // Survivors: oauth, claude-code, and effort (model-gated default, NOT a member
+    // of EXPERIMENTAL_BETA_FLAGS, so the disable guard does not strip it).
     expect(betaHeader).toContain("oauth-2025-04-20");
     expect(betaHeader).toContain("claude-code-20250219");
-    expect(betaHeader).not.toContain("effort-2025-11-24");
+    expect(betaHeader).toContain("effort-2025-11-24");
 
-    // Stripped: experimental set
+    // Stripped: experimental set (context-management IS in EXPERIMENTAL_BETA_FLAGS)
+    expect(betaHeader).not.toContain("context-management-2025-06-27");
     expect(betaHeader).not.toContain("interleaved-thinking-2025-05-14");
     expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).not.toContain("fast-mode-2026-02-01");
@@ -1164,6 +1166,15 @@ describe("E2E: Full header set on a standard request", () => {
     expect(headers.has("x-stainless-helper-method")).toBe(false);
   });
 
+  it("emits x-client-request-id as a random uuid (CC 2.1.195 first-party middleware)", async () => {
+    const { headers } = await sendRequest(fetchFn);
+
+    // Real CC 2.1.195's first-party fetch middleware (Ukd) sets x-client-request-id
+    // to crypto.randomUUID() on every first-party request.
+    const reqId = headers.get("x-client-request-id");
+    expect(reqId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+  });
+
   it("User-Agent follows claude-cli pattern for API calls", async () => {
     const { headers } = await sendRequest(fetchFn);
     const ua = headers.get("user-agent");
@@ -1246,22 +1257,24 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all required always-on betas for non-Haiku model (v2.1.159 set — unchanged from 2.1.154)", async () => {
-    // Use opus-4-6: real CC's Lyz() only pushes effort-2025-11-24 for
-    // rE(model) (Opus/Sonnet 4.6), so this test needs an adaptive model to
-    // verify the full always-on set including effort.
+  it("contains all required always-on betas for non-Haiku effort-capable model (v2.1.195 set)", async () => {
+    // Use opus-4-6: real CC's Kw(model) pushes effort-2025-11-24 for Opus 4.5/4.6/
+    // 4.7/4.8 and Sonnet 4.6, and n0d(model) pushes context-management for any
+    // first-party non-claude-3 model — so this model carries BOTH.
     const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const beta = headers.get("anthropic-beta");
 
-    // RE doc §15.16 always-on set — synced to v2.1.159 (no always-on change vs 2.1.154)
+    // RE doc §15.16 always-on set — synced to v2.1.195
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
     expect(beta).not.toContain("advanced-tool-use-2025-11-20");
     expect(beta).not.toContain("fast-mode-2026-02-01");
-    expect(beta).not.toContain("effort-2025-11-24");
+    // v2.1.195: effort is a model-gated default for effort-capable models.
+    expect(beta).toContain("effort-2025-11-24");
     expect(beta).toContain("interleaved-thinking-2025-05-14");
     expect(beta).toContain("prompt-caching-scope-2026-01-05");
-    expect(beta).not.toContain("context-management-2025-06-27");
+    // v2.1.195: context-management is default-on for first-party non-claude-3.
+    expect(beta).toContain("context-management-2025-06-27");
     expect(beta).toContain("extended-cache-ttl-2025-04-11");
     expect(beta).toContain("thinking-token-count-2026-05-13");
     expect(beta).toContain("redact-thinking-2026-02-12");
@@ -1529,11 +1542,13 @@ describe("E2E: systemPromptTailing default (A2)", () => {
   });
 });
 
-describe("context_management body field — lockstep with context-management beta", () => {
+describe("context_management body field — field ⊆ beta invariant", () => {
   // Regression: a top-level context_management field WITHOUT the beta returns
-  // 400 "context_management: Extra inputs are not permitted". The field must only
-  // be injected when token_economy.context_management is on (which also emits the
-  // beta). Default config has it OFF, so a thinking request must NOT carry the field.
+  // 400 "context_management: Extra inputs are not permitted". As of v2.1.195 the
+  // context-management beta header is default-ON for first-party non-claude-3
+  // models, but the body field stays opt-in (token_economy.context_management).
+  // Default config does NOT opt in, so a thinking request carries the beta but NOT
+  // the field — which is safe (field-without-beta is the only 400 case).
   let client, fetchFn;
   beforeEach(async () => {
     vi.resetAllMocks();
@@ -1541,20 +1556,21 @@ describe("context_management body field — lockstep with context-management bet
     fetchFn = await setupFetchFn(client);
   });
 
-  it("omits context_management on a thinking request when the beta is off (default)", async () => {
+  it("emits the beta by default but omits the body field unless opted in", async () => {
     const { body, headers } = await sendRequest(fetchFn, {
       model: "claude-opus-4-6",
       messages: [{ role: "user", content: "hi" }],
     });
     // Sanity: thinking is active (otherwise the field path would not run).
     expect(body.thinking?.type).toBe("adaptive");
-    // Beta off by default → the field MUST be absent so the API does not 400.
-    expect(headers.get("anthropic-beta") || "").not.toContain("context-management-2025-06-27");
+    // v2.1.195: beta is default-on for first-party non-claude-3 models.
+    expect(headers.get("anthropic-beta") || "").toContain("context-management-2025-06-27");
+    // Field stays opt-in → absent by default (keeps field ⊆ beta; no 400).
     expect(body.context_management).toBeUndefined();
   });
 });
 
-describe("E2E: Version is 2.1.159", () => {
+describe("E2E: Version is 2.1.195", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1563,17 +1579,17 @@ describe("E2E: Version is 2.1.159", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.159", async () => {
+  it("User-Agent contains 2.1.195", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.159");
+    expect(headers.get("user-agent")).toContain("2.1.195");
   });
 
-  it("billing header contains 2.1.159", async () => {
+  it("billing header contains 2.1.195", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.159");
+    expect(body.system[0].text).toContain("2.1.195");
   });
 });
 

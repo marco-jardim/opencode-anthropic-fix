@@ -1,75 +1,114 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
-<!-- Last verified against: Claude Code 2.1.159 — DECOMPILED from the real
-     linux-x64 native binary (@anthropic-ai/claude-code-linux-x64@2.1.159, Bun-
-     embedded JS). Primary-source fingerprints confirmed:
-       VERSION    = "2.1.159"
-       BUILD_TIME = "2026-05-31T16:22:50Z"
-       GIT_SHA    = "dd8c11fc8d05cea0b2b9fc8f5a99a5c5c5dffc9b"
-       SDK (NQ)   = "0.94.0"                  (wire-verified, no bump from 2.1.154)
-     Diff vs 2.1.154: ONE registered beta added —
-       rD("narration_summaries","summarize-connector-text-2026-03-13"), gated by
-       GrowthBook flag "pewter_owl_header" (t36()) + first-party + NOT in fast-mode;
-       it reoccupies the dead `v76;` slot the beta vacated in v2.1.90. Plugin keeps
-       it OFF by default (correct — pewter_owl_header is default-off). New header
-       x-is-refusal-fallback gated by server clientData flag convolute_arcades
-       (default-off) — plugin omits. OAuth byte-identical. See
-       docs/claude-code-2.1.159-analysis.md for the full diff.
-     Prior baseline (2.1.154 win32-x64): BUILD_TIME 2026-05-28T12:27:24Z,
-       GIT_SHA b84d2da9ada13121515426fc644786a303e9ac53.
-     Beta registry: 24 rD("label","flag") entries (was 23 _W() in 2.1.154; see list below).
-     cc_version 3-char suffix algo CONFIRMED: sha256(SALT + msg[4]+msg[7]+msg[20]
-       + VERSION).slice(0,3), SALT="59cf53e54c78" — plugin matches byte-for-byte.
+<!-- Last verified against: Claude Code 2.1.195 — DECOMPILED from the real
+     linux-x64 native binary (@anthropic-ai/claude-code-linux-x64@2.1.195, Bun-
+     embedded JS, carved bundle header "// @bun @bytecode @bun-cjs"). Primary-source
+     fingerprints confirmed:
+       VERSION    = "2.1.195"
+       BUILD_TIME = "2026-06-26T01:00:56Z"
+       GIT_SHA    = "4603aa3f2ea164bd0974f82eb413ae7acc99a7ee"
+       SDK (PK)   = "0.94.0"                  (wire-verified, no bump from 2.1.159)
+       README_URL = "https://code.claude.com/docs/en/overview"  (docs domain change)
+     Diff vs 2.1.159 (see docs/claude-code-2.1.195-analysis.md for full detail):
+       * Beta registry 24 -> 28: ADDED server-side-fallback-2026-06-01 and
+         fallback-credit-2026-06-01 (both opt-in/gated by the refusal-fallback
+         feature; NOT on a default /v1/messages turn). NONE retired. These two
+         supersede the 2.1.159 x-is-refusal-fallback header experiment.
+       * DEFAULT-SET drift the plugin must close: real CC sends
+         context-management-2025-06-27 (first-party non-claude-3, incl. Haiku, via
+         n0d(model)) AND effort-2025-11-24 (effort-capable models: Opus 4.5/4.6/4.7/4.8,
+         Sonnet 4.6) by default. Plugin currently OMITS both -> under-send fingerprint.
+       * OAuth token-call client migrated axios -> SDK native fetch provider:
+         User-Agent now "anthropic-sdk-typescript/0.94.0 userOAuthProvider" and the
+         token POST carries anthropic-beta: oauth-2025-04-20. Plugin still mimics
+         axios/1.13.6 + Accept: application/json,text/plain,*/* (lib/oauth.mjs).
+         BEHAVIORAL change — test against the 429 guard before adopting.
+       * Header wiring: CC re-adds x-client-request-id:<uuid> via first-party
+         middleware (plugin DELETES it -> presence drift); new conditional x-cc-atis
+         attestation header (unmimicable, server-issued); anthropic-dispatch-id
+         experimental (GrowthBook tengu_cedar_lattice, default-off; plugin omits =
+         correct); x-stainless-helper NOT present on a genuine main turn (plugin may
+         over-send). New optional ", workload/<n>" User-Agent segment (absent in
+         normal interactive use). anthropic-dangerous-direct-browser-access:true
+         CONFIRMED on wire (dangerouslyAllowBrowser:!0) — plugin matches.
+       * OAuth login flow / scopes / client_id / PKCE byte-identical.
+       * anthropic-ratelimit-unified-* RESPONSE family expanded (overage/utilization/
+         representative-claim/upgrade-paths) — rotation/backoff parsing opportunity.
+     Distribution: still a thin npm wrapper that hardlinks a per-platform native Bun
+       single-file binary (~225-245MB) from optionalDependencies; no readable cli.js.
+     Prior baseline (2.1.159 linux-x64): BUILD_TIME 2026-05-31T16:22:50Z,
+       GIT_SHA dd8c11fc8d05cea0b2b9fc8f5a99a5c5c5dffc9b.
+     Beta registry: 28 OE("label","flag") frozen entries in array Udd (was 24 rD()
+       in 2.1.159; see list below). Helper sets: S2r=bedrock-unsupported filter
+       {interleaved_thinking,long_context,tool-search-tool} (matches plugin); E2r=
+       countTokens allowlist {claude_code,interleaved_thinking,context_management,oauth};
+       Pvi=3rd-party allowlist (no-op for first-party OAuth).
+     cc_version 3-char suffix algo CONFIRMED unchanged: sha256(SALT + msg[4]+msg[7]+
+       msg[20] + VERSION).slice(0,3), SALT="59cf53e54c78" — plugin matches byte-for-byte.
      Thinking ctx-mgmt: jq_({hasThinking}) => {edits:[{type:"clear_thinking_20251015",
        keep:"all"}]} only when thinking active — plugin matches. -->
 
-## Binary-verified beta registry (2.1.159, 24 entries)
+## Binary-verified beta registry (2.1.195, 28 entries in `Udd`)
 
-These are the exact `rD("internal_label", "beta-flag")` registrations in the
-2.1.159 binary (the constructor was `_W(...)` in 2.1.154; minifier rename only).
-The sole addition vs 2.1.154 is `narration_summaries` (see row below, marked NEW). The plugin emits a subset always-on, gates some on body
-features (effort, fast-mode, tool-search via incoming passthrough), and keeps
-the rest in `EXPERIMENTAL_BETA_FLAGS` as a disable-guard. No plugin-emitted beta
-is absent from this list (no over-broadcast).
+These are the exact `OE("internal_label", "beta-flag")` frozen registrations in the
+2.1.195 binary array `Udd` (the constructor/array were `rD(...)` in 2.1.159 — minifier
+rename only). The table below shows 26 entries; the two not listed —
+`claude_code` (`claude-code-20250219`) and `oauth_auth` (`oauth-2025-04-20`) — are the
+two always-present entries handled separately by the plugin (claude_code skipped on
+Haiku; oauth always on in OAuth mode). The two NEW vs 2.1.159 are `server_side_fallback`
+and `fallback_credit` (marked NEW; both opt-in/gated, see rows). The plugin emits a
+subset always-on, gates some on body features (effort, fast-mode, tool-search via
+incoming passthrough), and keeps the rest in `EXPERIMENTAL_BETA_FLAGS` as a
+disable-guard.
 
-| label                   | flag                                                                                                                                |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| advisor_tool            | advisor-tool-2026-03-01                                                                                                             |
-| afk_mode                | afk-mode-2026-01-31                                                                                                                 |
-| cache_diagnosis         | cache-diagnosis-2026-04-07                                                                                                          |
-| ccr_byoc                | ccr-byoc-2025-07-29                                                                                                                 |
-| context_hint            | context-hint-2026-04-09                                                                                                             |
-| context_management      | context-management-2025-06-27                                                                                                       |
-| effort                  | effort-2025-11-24                                                                                                                   |
-| environments            | environments-2025-11-01                                                                                                             |
-| extended_cache_ttl      | extended-cache-ttl-2025-04-11                                                                                                       |
-| files_api               | files-api-2025-04-14                                                                                                                |
-| interleaved_thinking    | interleaved-thinking-2025-05-14                                                                                                     |
-| long_context            | context-1m-2025-08-07                                                                                                               |
-| mcp_servers             | mcp-servers-2025-12-04                                                                                                              |
-| mid_conversation_system | mid-conversation-system-2026-04-07                                                                                                  |
-| narration_summaries     | summarize-connector-text-2026-03-13 (NEW 2.1.159; gated by GrowthBook `pewter_owl_header`, stripped in fast-mode; plugin keeps OFF) |
-| prompt_caching_scope    | prompt-caching-scope-2026-01-05                                                                                                     |
-| redact_thinking         | redact-thinking-2026-02-12                                                                                                          |
-| speed                   | fast-mode-2026-02-01                                                                                                                |
-| structured_outputs      | structured-outputs-2025-12-15                                                                                                       |
-| task_budgets            | task-budgets-2026-03-13                                                                                                             |
-| thinking_token_count    | thinking-token-count-2026-05-13                                                                                                     |
-| tool_search             | advanced-tool-use-2025-11-20                                                                                                        |
-| tool_search             | tool-search-tool-2025-10-19                                                                                                         |
-| web_search              | web-search-2025-03-05                                                                                                               |
+> ⚠ DEFAULT-SET drift (see `docs/claude-code-2.1.195-analysis.md` §5): real CC sends
+> `context-management-2025-06-27` and `effort-2025-11-24` by DEFAULT on modern
+> first-party models; the plugin currently omits both (under-send). Conversely the
+> plugin's always-on `extended-cache-ttl` / `advisor-tool` / `context-hint` are
+> GrowthBook/condition-gated in CC (over-send risk). Registry membership ≠ default
+> emission — the gating, not the table, is the contract.
+
+| label                   | flag                                                                                                                                                                    |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| advisor_tool            | advisor-tool-2026-03-01                                                                                                                                                 |
+| afk_mode                | afk-mode-2026-01-31                                                                                                                                                     |
+| cache_diagnosis         | cache-diagnosis-2026-04-07                                                                                                                                              |
+| ccr_byoc                | ccr-byoc-2025-07-29                                                                                                                                                     |
+| context_hint            | context-hint-2026-04-09                                                                                                                                                 |
+| context_management      | context-management-2025-06-27                                                                                                                                           |
+| effort                  | effort-2025-11-24                                                                                                                                                       |
+| environments            | environments-2025-11-01                                                                                                                                                 |
+| extended_cache_ttl      | extended-cache-ttl-2025-04-11                                                                                                                                           |
+| fallback_credit         | fallback-credit-2026-06-01 (NEW 2.1.195; opt-in — client refusal-fallback repricing middleware; NOT on a default turn; plugin keeps OFF)                                |
+| files_api               | files-api-2025-04-14                                                                                                                                                    |
+| interleaved_thinking    | interleaved-thinking-2025-05-14                                                                                                                                         |
+| long_context            | context-1m-2025-08-07                                                                                                                                                   |
+| mcp_servers             | mcp-servers-2025-12-04                                                                                                                                                  |
+| mid_conversation_system | mid-conversation-system-2026-04-07                                                                                                                                      |
+| narration_summaries     | summarize-connector-text-2026-03-13 (NEW 2.1.159; gated by GrowthBook `pewter_owl_header`, stripped in fast-mode; plugin keeps OFF)                                     |
+| prompt_caching_scope    | prompt-caching-scope-2026-01-05                                                                                                                                         |
+| redact_thinking         | redact-thinking-2026-02-12                                                                                                                                              |
+| server_side_fallback    | server-side-fallback-2026-06-01 (NEW 2.1.195; opt-in — only with a `fallbacks:[{model}]` body param; rejected on Batches; n/a Bedrock/Vertex/Foundry; plugin keeps OFF) |
+| speed                   | fast-mode-2026-02-01                                                                                                                                                    |
+| structured_outputs      | structured-outputs-2025-12-15                                                                                                                                           |
+| task_budgets            | task-budgets-2026-03-13                                                                                                                                                 |
+| thinking_token_count    | thinking-token-count-2026-05-13                                                                                                                                         |
+| tool_search             | advanced-tool-use-2025-11-20                                                                                                                                            |
+| tool_search             | tool-search-tool-2025-10-19                                                                                                                                             |
+| web_search              | web-search-2025-03-05                                                                                                                                                   |
 
 ## Version history (mimicry-relevant changes)
 
-| CC version | SDK bundled | Beta additions                                                                                                                                                                                                                                                    | Beta removals                                                                 | OAuth change                                                              |
-| ---------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| 2.1.159    | 0.94.0      | `summarize-connector-text-2026-03-13` revived as registry label `narration_summaries`, gated by GrowthBook `pewter_owl_header` (default-off) + first-party + non-fast-mode. New header `x-is-refusal-fallback` gated by server `convolute_arcades` (default-off). | none                                                                          | none (byte-identical)                                                     |
-| 2.1.154    | 0.94.0\*    | Opus 4.8 launch (2026-05-28) support: claude-opus-4-8 routed as adaptive-thinking + 1M context + fast-mode eligible                                                                                                                                               | none (vs 2.1.150)                                                             | none                                                                      |
-| 2.1.150    | 0.94.0      | 26-entry registry; redact-thinking-2026-02-12 default ON; extended-cache-ttl + thinking-token-count default ON (plugin)                                                                                                                                           | advanced-tool-use, tool-search-tool, fast-mode, effort removed from always-on | none                                                                      |
-| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on)                                                                                                                                                                                                   | none                                                                          | none on wire; client-side refresh telemetry expanded (legacy-lock detect) |
-| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01                                                                                                                                                                                                            | none                                                                          | none                                                                      |
-| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                                                                                                                                                                                                                        | none                                                                          | none                                                                      |
-| 2.1.117    | 0.81.0      | (baseline for this doc)                                                                                                                                                                                                                                           | none                                                                          | none                                                                      |
+| CC version | SDK bundled | Beta additions                                                                                                                                                                                                                                                                                                                                                                                       | Beta removals                                                                 | OAuth change                                                                                                                                                                                  |
+| ---------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2.1.195    | 0.94.0      | Registry 24→28: `+ server-side-fallback-2026-06-01`, `+ fallback-credit-2026-06-01` (both opt-in/gated, not default). CONFIRMED default-on for modern first-party models: `context-management-2025-06-27` (`n0d(model)`) + `effort-2025-11-24` (`Kw(model)`) — plugin under-sends both. CC re-adds `x-client-request-id:<uuid>` + conditional `x-cc-atis`. New optional `, workload/<n>` UA segment. | none                                                                          | **Token-call client axios→SDK fetch**: UA `anthropic-sdk-typescript/0.94.0 userOAuthProvider` + `anthropic-beta: oauth-2025-04-20` on token POST. Login flow/scopes/client_id byte-identical. |
+| 2.1.159    | 0.94.0      | `summarize-connector-text-2026-03-13` revived as registry label `narration_summaries`, gated by GrowthBook `pewter_owl_header` (default-off) + first-party + non-fast-mode. New header `x-is-refusal-fallback` gated by server `convolute_arcades` (default-off).                                                                                                                                    | none                                                                          | none (byte-identical)                                                                                                                                                                         |
+| 2.1.154    | 0.94.0\*    | Opus 4.8 launch (2026-05-28) support: claude-opus-4-8 routed as adaptive-thinking + 1M context + fast-mode eligible                                                                                                                                                                                                                                                                                  | none (vs 2.1.150)                                                             | none                                                                                                                                                                                          |
+| 2.1.150    | 0.94.0      | 26-entry registry; redact-thinking-2026-02-12 default ON; extended-cache-ttl + thinking-token-count default ON (plugin)                                                                                                                                                                                                                                                                              | advanced-tool-use, tool-search-tool, fast-mode, effort removed from always-on | none                                                                                                                                                                                          |
+| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on)                                                                                                                                                                                                                                                                                                                                      | none                                                                          | none on wire; client-side refresh telemetry expanded (legacy-lock detect)                                                                                                                     |
+| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01                                                                                                                                                                                                                                                                                                                                               | none                                                                          | none                                                                                                                                                                                          |
+| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                                                                                                                                                                                                                                                                                                                                                           | none                                                                          | none                                                                                                                                                                                          |
+| 2.1.117    | 0.81.0      | (baseline for this doc)                                                                                                                                                                                                                                                                                                                                                                              | none                                                                          | none                                                                                                                                                                                          |
 
 ### 2.1.155–2.1.159 changes (narration_summaries revival, 2026-05-31)
 
@@ -385,6 +424,11 @@ It also injects optional env-driven headers:
 - `CLAUDE_AGENT_SDK_CLIENT_APP` => `x-client-app`
 - `CLAUDE_CODE_ADDITIONAL_PROTECTION=1/true/yes` => `x-anthropic-additional-protection: true`
 - `x-client-request-id: <uuid>` (v2.1.84+, unique per request for debugging stream timeouts)
+  - ⚠ 2.1.195: CC's first-party fetch middleware (`Ukd`) sets `x-client-request-id`
+    to `crypto.randomUUID()` on **every** first-party request when absent. If the
+    plugin currently strips/omits it (see `index.mjs` ~L8042), that is a presence/
+    absence drift — CC always carries this header. Re-emit a random UUID. See
+    `docs/claude-code-2.1.195-analysis.md` §7.
 
 ### 4.3 OAuth token-layer user-agent mimicry
 
@@ -392,13 +436,29 @@ OAuth token calls use axios-fingerprint headers matching the real CLI's bundled 
 
 - `POST /v1/oauth/token` (exchange and refresh)
 
-Headers sent:
+Headers sent (plugin, current):
 
 - `User-Agent: axios/1.13.6`
 - `Accept: application/json, text/plain, */*`
 - `Content-Type: application/json`
 
-Without these headers, Anthropic's OAuth token endpoints return HTTP 429.
+Without these headers, Anthropic's OAuth token endpoints (historically) return HTTP 429.
+
+> ⚠ **DRIFT — Claude Code 2.1.195 (see `docs/claude-code-2.1.195-analysis.md` §6).**
+> Upstream CC migrated the OAuth token client from axios to the Anthropic TS SDK's
+> native fetch OAuth provider (`userOAuthProvider`). The real 2.1.195 token POST now
+> sends:
+>
+> - `User-Agent: anthropic-sdk-typescript/0.94.0 userOAuthProvider`
+> - `anthropic-beta: oauth-2025-04-20` ← **new on the token endpoint**
+> - `Content-Type: application/json`
+> - (no explicit `Accept` — native `fetch` default)
+>
+> There is **no `axios/1.x.x` UA constructed for OAuth** anywhere in the 2.1.195
+> bundle. The plugin still emits the older axios fingerprint above. To re-converge,
+> switch the token-call UA, add the `anthropic-beta` header, and re-evaluate the
+> `Accept` header — **but test against the 429 guard first**; `axios/1.13.6` may still
+> be allow-listed, and a bad change here breaks token refresh for every account.
 
 ### 4.4 WebFetch user-agent (intentional divergence)
 
