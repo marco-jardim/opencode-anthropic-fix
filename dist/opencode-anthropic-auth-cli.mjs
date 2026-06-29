@@ -324,18 +324,17 @@ var DEFAULT_CONFIG = {
     /** Also inject numeric length anchors (≤25 words between tool calls, ≤100 words final). */
     length_anchors: true
   },
-  /** OAuth token-endpoint request fingerprint. HIGH-RISK knob — leave OFF unless
-   *  validated against a live refresh. */
+  /** OAuth token-endpoint request fingerprint. */
   oauth: {
-    /** When true, the OAuth token EXCHANGE/REFRESH POSTs use Claude Code
-     *  2.1.195's SDK-native-fetch fingerprint (`User-Agent:
+    /** When true (DEFAULT), the OAuth token EXCHANGE/REFRESH POSTs use Claude
+     *  Code 2.1.195's SDK-native-fetch fingerprint (`User-Agent:
      *  anthropic-sdk-typescript/0.94.0 userOAuthProvider`, `anthropic-beta:
-     *  oauth-2025-04-20`, no axios `Accept`). When false (DEFAULT), the legacy
-     *  axios fingerprint (`User-Agent: axios/1.13.6`, axios `Accept` header) is
-     *  sent byte-for-byte as before.
-     *  Default OFF: the token endpoint historically 429'd requests lacking the
-     *  axios UA, so this stays opt-in until proven against live refresh. */
-    sdk_token_useragent: false
+     *  oauth-2025-04-20`, no axios `Accept`). When false, the legacy axios
+     *  fingerprint (`User-Agent: axios/1.13.6`, axios `Accept` header) is sent
+     *  byte-for-byte as before.
+     *  Default ON to match upstream CC 2.1.195's userOAuthProvider. Set to
+     *  `false` to revert to the legacy axios/1.13.6 + `Accept` fingerprint. */
+    sdk_token_useragent: true
   }
 };
 var VALID_STRATEGIES = ["sticky", "round-robin", "hybrid"];
