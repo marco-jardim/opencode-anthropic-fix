@@ -323,6 +323,19 @@ var DEFAULT_CONFIG = {
     enabled: true,
     /** Also inject numeric length anchors (≤25 words between tool calls, ≤100 words final). */
     length_anchors: true
+  },
+  /** OAuth token-endpoint request fingerprint. HIGH-RISK knob — leave OFF unless
+   *  validated against a live refresh. */
+  oauth: {
+    /** When true, the OAuth token EXCHANGE/REFRESH POSTs use Claude Code
+     *  2.1.195's SDK-native-fetch fingerprint (`User-Agent:
+     *  anthropic-sdk-typescript/0.94.0 userOAuthProvider`, `anthropic-beta:
+     *  oauth-2025-04-20`, no axios `Accept`). When false (DEFAULT), the legacy
+     *  axios fingerprint (`User-Agent: axios/1.13.6`, axios `Accept` header) is
+     *  sent byte-for-byte as before.
+     *  Default OFF: the token endpoint historically 429'd requests lacking the
+     *  axios UA, so this stays opt-in until proven against live refresh. */
+    sdk_token_useragent: false
   }
 };
 var VALID_STRATEGIES = ["sticky", "round-robin", "hybrid"];
@@ -354,7 +367,8 @@ function createDefaultConfig() {
     token_budget: { ...DEFAULT_CONFIG.token_budget },
     microcompact: { ...DEFAULT_CONFIG.microcompact },
     overload_recovery: { ...DEFAULT_CONFIG.overload_recovery },
-    account_management: { ...DEFAULT_CONFIG.account_management }
+    account_management: { ...DEFAULT_CONFIG.account_management },
+    oauth: { ...DEFAULT_CONFIG.oauth }
   };
 }
 function getConfigDir() {
@@ -778,6 +792,15 @@ function validateConfig(raw) {
       length_anchors: typeof av.length_anchors === "boolean" ? av.length_anchors : DEFAULT_CONFIG.anti_verbosity.length_anchors
     };
   }
+  if (raw.oauth && typeof raw.oauth === "object") {
+    const o = (
+      /** @type {Record<string, unknown>} */
+      raw.oauth
+    );
+    config.oauth = {
+      sdk_token_useragent: typeof o.sdk_token_useragent === "boolean" ? o.sdk_token_useragent : DEFAULT_CONFIG.oauth.sdk_token_useragent
+    };
+  }
   return config;
 }
 function applyEnvOverrides(config) {
@@ -1152,6 +1175,9 @@ var OAUTH_REVOKE_URL = `https://${OAUTH_CONSOLE_HOST}/v1/oauth/revoke`;
 var OAUTH_AXIOS_VERSION = "1.13.6";
 var OAUTH_USER_AGENT = `axios/${OAUTH_AXIOS_VERSION}`;
 var OAUTH_ACCEPT = "application/json, text/plain, */*";
+var OAUTH_SDK_VERSION = "0.94.0";
+var OAUTH_SDK_USER_AGENT = `anthropic-sdk-typescript/${OAUTH_SDK_VERSION} userOAuthProvider`;
+var OAUTH_SDK_BETA = "oauth-2025-04-20";
 var OAUTH_MAX_RETRIES = 2;
 var OAUTH_MAX_RETRY_DELAY_MS = 3e4;
 var OAUTH_RATE_LIMIT_COOLDOWN_MS = 3e4;
@@ -1174,6 +1200,28 @@ function generatePKCE() {
   const challenge = base64url(createHash2("sha256").update(verifier).digest());
   const state = base64url(randomBytes3(32));
   return { verifier, challenge, state };
+}
+function useSdkTokenFingerprint(override) {
+  if (typeof override === "boolean") return override;
+  try {
+    return loadConfig()?.oauth?.sdk_token_useragent === true;
+  } catch {
+    return false;
+  }
+}
+function buildTokenHeaders(useSdk) {
+  if (useSdk) {
+    return {
+      "Content-Type": "application/json",
+      "anthropic-beta": OAUTH_SDK_BETA,
+      "User-Agent": OAUTH_SDK_USER_AGENT
+    };
+  }
+  return {
+    Accept: OAUTH_ACCEPT,
+    "Content-Type": "application/json",
+    "User-Agent": OAUTH_USER_AGENT
+  };
 }
 function sleep(ms) {
   if (ms <= 0) return Promise.resolve();
@@ -1315,7 +1363,8 @@ function parseOAuthCallback(input) {
   }
   return { code: trimmed, state: null };
 }
-async function exchange(code, verifier) {
+async function exchange(code, verifier, options = {}) {
+  const tokenHeaders = buildTokenHeaders(useSdkTokenFingerprint(options.sdkTokenUserAgent));
   const fail = (status, rawText = "", cooldownHint = { retryAfterMs: null }) => {
     const { errorCode, reason } = parseOAuthErrorBody(rawText);
     const retryAfterMs = Number.isFinite(cooldownHint?.retryAfterMs) && cooldownHint.retryAfterMs > 0 ? Number(cooldownHint.retryAfterMs) : null;
@@ -1347,11 +1396,7 @@ async function exchange(code, verifier) {
       };
       result = await fetch(OAUTH_TOKEN_URL, {
         method: "POST",
-        headers: {
-          Accept: OAUTH_ACCEPT,
-          "Content-Type": "application/json",
-          "User-Agent": OAUTH_USER_AGENT
-        },
+        headers: tokenHeaders,
         body: JSON.stringify(_exchangeBody),
         signal: AbortSignal.timeout(15e3)
       });

@@ -40,7 +40,8 @@ function createDefaultConfig() {
     token_budget: { ...DEFAULT_CONFIG.token_budget },
     microcompact: { ...DEFAULT_CONFIG.microcompact },
     overload_recovery: { ...DEFAULT_CONFIG.overload_recovery },
-    account_management: { ...DEFAULT_CONFIG.account_management }
+    account_management: { ...DEFAULT_CONFIG.account_management },
+    oauth: { ...DEFAULT_CONFIG.oauth }
   };
 }
 function getConfigDir() {
@@ -462,6 +463,15 @@ function validateConfig(raw) {
     config.anti_verbosity = {
       enabled: typeof av.enabled === "boolean" ? av.enabled : DEFAULT_CONFIG.anti_verbosity.enabled,
       length_anchors: typeof av.length_anchors === "boolean" ? av.length_anchors : DEFAULT_CONFIG.anti_verbosity.length_anchors
+    };
+  }
+  if (raw.oauth && typeof raw.oauth === "object") {
+    const o = (
+      /** @type {Record<string, unknown>} */
+      raw.oauth
+    );
+    config.oauth = {
+      sdk_token_useragent: typeof o.sdk_token_useragent === "boolean" ? o.sdk_token_useragent : DEFAULT_CONFIG.oauth.sdk_token_useragent
     };
   }
   return config;
@@ -910,6 +920,19 @@ var init_config = __esm({
         enabled: true,
         /** Also inject numeric length anchors (≤25 words between tool calls, ≤100 words final). */
         length_anchors: true
+      },
+      /** OAuth token-endpoint request fingerprint. HIGH-RISK knob — leave OFF unless
+       *  validated against a live refresh. */
+      oauth: {
+        /** When true, the OAuth token EXCHANGE/REFRESH POSTs use Claude Code
+         *  2.1.195's SDK-native-fetch fingerprint (`User-Agent:
+         *  anthropic-sdk-typescript/0.94.0 userOAuthProvider`, `anthropic-beta:
+         *  oauth-2025-04-20`, no axios `Accept`). When false (DEFAULT), the legacy
+         *  axios fingerprint (`User-Agent: axios/1.13.6`, axios `Accept` header) is
+         *  sent byte-for-byte as before.
+         *  Default OFF: the token endpoint historically 429'd requests lacking the
+         *  axios UA, so this stays opt-in until proven against live refresh. */
+        sdk_token_useragent: false
       }
     };
     VALID_STRATEGIES = ["sticky", "round-robin", "hybrid"];
@@ -1177,6 +1200,14 @@ function parseRetryAfterHeader(response) {
   }
   return null;
 }
+function parseUnifiedResetMsHeader(response) {
+  const header = response.headers.get("anthropic-ratelimit-unified-reset") ?? response.headers.get("anthropic-ratelimit-unified-overage-reset");
+  if (!header) return null;
+  const epochSeconds = Number(header);
+  if (isNaN(epochSeconds)) return null;
+  const ms = epochSeconds * 1e3 - Date.now();
+  return ms > 0 ? ms : null;
+}
 function extractErrorSignals(body) {
   let errorType = "";
   let message = "";
@@ -1424,6 +1455,28 @@ function generatePKCE() {
   const state = base64url(randomBytes3(32));
   return { verifier, challenge, state };
 }
+function useSdkTokenFingerprint(override) {
+  if (typeof override === "boolean") return override;
+  try {
+    return loadConfig()?.oauth?.sdk_token_useragent === true;
+  } catch {
+    return false;
+  }
+}
+function buildTokenHeaders(useSdk) {
+  if (useSdk) {
+    return {
+      "Content-Type": "application/json",
+      "anthropic-beta": OAUTH_SDK_BETA,
+      "User-Agent": OAUTH_SDK_USER_AGENT
+    };
+  }
+  return {
+    Accept: OAUTH_ACCEPT,
+    "Content-Type": "application/json",
+    "User-Agent": OAUTH_USER_AGENT
+  };
+}
 function sleep(ms) {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve2) => setTimeout(resolve2, ms));
@@ -1564,7 +1617,8 @@ function parseOAuthCallback(input) {
   }
   return { code: trimmed, state: null };
 }
-async function exchange(code, verifier) {
+async function exchange(code, verifier, options = {}) {
+  const tokenHeaders = buildTokenHeaders(useSdkTokenFingerprint(options.sdkTokenUserAgent));
   const fail = (status, rawText = "", cooldownHint = { retryAfterMs: null }) => {
     const { errorCode, reason } = parseOAuthErrorBody(rawText);
     const retryAfterMs = Number.isFinite(cooldownHint?.retryAfterMs) && cooldownHint.retryAfterMs > 0 ? Number(cooldownHint.retryAfterMs) : null;
@@ -1596,11 +1650,7 @@ async function exchange(code, verifier) {
       };
       result = await fetch(OAUTH_TOKEN_URL, {
         method: "POST",
-        headers: {
-          Accept: OAUTH_ACCEPT,
-          "Content-Type": "application/json",
-          "User-Agent": OAUTH_USER_AGENT
-        },
+        headers: tokenHeaders,
         body: JSON.stringify(_exchangeBody),
         signal: AbortSignal.timeout(15e3)
       });
@@ -1668,16 +1718,13 @@ async function revoke(refreshToken2) {
 }
 async function refreshToken(refreshTokenValue, options = {}) {
   const signal = options.signal ?? AbortSignal.timeout(3e4);
+  const tokenHeaders = buildTokenHeaders(useSdkTokenFingerprint(options.sdkTokenUserAgent));
   for (let attempt = 0; attempt <= OAUTH_MAX_RETRIES; attempt++) {
     let resp;
     try {
       resp = await fetch(OAUTH_TOKEN_URL, {
         method: "POST",
-        headers: {
-          Accept: OAUTH_ACCEPT,
-          "Content-Type": "application/json",
-          "User-Agent": OAUTH_USER_AGENT
-        },
+        headers: tokenHeaders,
         body: JSON.stringify({
           grant_type: "refresh_token",
           refresh_token: refreshTokenValue,
@@ -1714,7 +1761,7 @@ async function refreshToken(refreshTokenValue, options = {}) {
     return resp.json();
   }
 }
-var OAUTH_CONSOLE_HOST, OAUTH_MAX_HOST, OAUTH_REDIRECT_URI, OAUTH_TOKEN_URL, OAUTH_REVOKE_URL, OAUTH_AXIOS_VERSION, OAUTH_USER_AGENT, OAUTH_ACCEPT, OAUTH_MAX_RETRIES, OAUTH_MAX_RETRY_DELAY_MS, OAUTH_RATE_LIMIT_COOLDOWN_MS, OAUTH_RETRY_AFTER_SOURCE_HEADER_MS, OAUTH_RETRY_AFTER_SOURCE_HEADER, OAUTH_RETRY_AFTER_SOURCE_FALLBACK_429, CLAUDE_AI_SCOPES, CONSOLE_SCOPES;
+var OAUTH_CONSOLE_HOST, OAUTH_MAX_HOST, OAUTH_REDIRECT_URI, OAUTH_TOKEN_URL, OAUTH_REVOKE_URL, OAUTH_AXIOS_VERSION, OAUTH_USER_AGENT, OAUTH_ACCEPT, OAUTH_SDK_VERSION, OAUTH_SDK_USER_AGENT, OAUTH_SDK_BETA, OAUTH_MAX_RETRIES, OAUTH_MAX_RETRY_DELAY_MS, OAUTH_RATE_LIMIT_COOLDOWN_MS, OAUTH_RETRY_AFTER_SOURCE_HEADER_MS, OAUTH_RETRY_AFTER_SOURCE_HEADER, OAUTH_RETRY_AFTER_SOURCE_FALLBACK_429, CLAUDE_AI_SCOPES, CONSOLE_SCOPES;
 var init_oauth = __esm({
   "lib/oauth.mjs"() {
     init_config();
@@ -1727,6 +1774,9 @@ var init_oauth = __esm({
     OAUTH_AXIOS_VERSION = "1.13.6";
     OAUTH_USER_AGENT = `axios/${OAUTH_AXIOS_VERSION}`;
     OAUTH_ACCEPT = "application/json, text/plain, */*";
+    OAUTH_SDK_VERSION = "0.94.0";
+    OAUTH_SDK_USER_AGENT = `anthropic-sdk-typescript/${OAUTH_SDK_VERSION} userOAuthProvider`;
+    OAUTH_SDK_BETA = "oauth-2025-04-20";
     OAUTH_MAX_RETRIES = 2;
     OAUTH_MAX_RETRY_DELAY_MS = 3e4;
     OAUTH_RATE_LIMIT_COOLDOWN_MS = 3e4;
@@ -4067,9 +4117,9 @@ var AccountManager = class _AccountManager {
 init_oauth();
 
 // lib/request-headers.mjs
-var FALLBACK_CLAUDE_CLI_VERSION = "2.1.159";
+var FALLBACK_CLAUDE_CLI_VERSION = "2.1.195";
 var CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
-var CLAUDE_CODE_BUILD_TIME = "2026-05-31T16:22:50Z";
+var CLAUDE_CODE_BUILD_TIME = "2026-06-26T01:00:56Z";
 var EXPERIMENTAL_BETA_FLAGS = /* @__PURE__ */ new Set([
   "adaptive-thinking-2026-01-28",
   "advanced-tool-use-2025-11-20",
@@ -4086,6 +4136,10 @@ var EXPERIMENTAL_BETA_FLAGS = /* @__PURE__ */ new Set([
   "context-management-2025-06-27",
   "environments-2025-11-01",
   "extended-cache-ttl-2025-04-11",
+  // Refusal-fallback credit beta from the upstream Udd registry (CC 2.1.195).
+  // Opt-in/GrowthBook-gated; never auto-emitted on a default /v1/messages turn.
+  // Listed here for the disable-experimental guard + manual opt-in ONLY.
+  "fallback-credit-2026-06-01",
   "fast-mode-2026-02-01",
   "files-api-2025-04-14",
   "interleaved-thinking-2025-05-14",
@@ -4098,6 +4152,10 @@ var EXPERIMENTAL_BETA_FLAGS = /* @__PURE__ */ new Set([
   "mid-conversation-system-2026-04-07",
   "prompt-caching-scope-2026-01-05",
   "redact-thinking-2026-02-12",
+  // Server-side refusal-fallback beta from the upstream Udd registry (CC 2.1.195).
+  // Opt-in/GrowthBook-gated; never auto-emitted on a default /v1/messages turn.
+  // Listed here for the disable-experimental guard + manual opt-in ONLY.
+  "server-side-fallback-2026-06-01",
   "structured-outputs-2025-12-15",
   // Revived in CC 2.1.159 as registry label `narration_summaries` (it was a dead
   // slot from v2.1.90-2.1.154). Real CC emits it only when GrowthBook flag
@@ -4145,7 +4203,10 @@ var BETA_SHORTCUTS = /* @__PURE__ */ new Map([
   ["ccr-byoc", "ccr-byoc-2025-07-29"],
   ["connector-text", "summarize-connector-text-2026-03-13"],
   ["narration-summaries", "summarize-connector-text-2026-03-13"],
-  ["summarize-connector-text", "summarize-connector-text-2026-03-13"]
+  ["summarize-connector-text", "summarize-connector-text-2026-03-13"],
+  ["server-side-fallback", "server-side-fallback-2026-06-01"],
+  ["fallback", "server-side-fallback-2026-06-01"],
+  ["fallback-credit", "fallback-credit-2026-06-01"]
 ]);
 function resolveBetaShortcut(value) {
   if (!value) return "";
@@ -7451,7 +7512,7 @@ ${message}`);
                   }
                   if (accountSpecific) {
                     const reason = parseRateLimitReason(response.status, errorBody);
-                    const retryAfterMs = parseRetryAfterMsHeader(response) ?? parseRetryAfterHeader(response);
+                    const retryAfterMs = parseRetryAfterMsHeader(response) ?? parseRetryAfterHeader(response) ?? parseUnifiedResetMsHeader(response);
                     if (response.status === 429 && reason === "RATE_LIMIT_EXCEEDED" && retryAfterMs != null && retryAfterMs > 0 && retryAfterMs <= TRANSIENT_RETRY_THRESHOLD_MS) {
                       debugLog("transient 429: sleeping before same-account retry", {
                         retryAfterMs,
@@ -9225,6 +9286,7 @@ function extractFirstUserMessageText(messages) {
   return "";
 }
 var CLAUDE_CODE_BETA_FLAG = "claude-code-20250219";
+var _EFFORT_BETA_FLAG = "effort-2025-11-24";
 var FAST_MODE_BETA_FLAG = "fast-mode-2026-02-01";
 var TOKEN_COUNTING_BETA_FLAG = "token-counting-2024-11-01";
 var CLAUDE_CODE_IDENTITY_STRING = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -9530,6 +9592,10 @@ var MAX_SAFE_SYSTEM_TEXT_LENGTH = 5e3;
 var MAX_SUBAGENT_CC_PREFIX = MAX_SAFE_SYSTEM_TEXT_LENGTH;
 var SUBAGENT_CC_ANCHOR = "You are an interactive";
 var cachedCCPrompt = null;
+var CLAUDE_3_MODEL_RE = /claude-3-/i;
+var TAIL_IMPORTANT_RE = /\b(MUST|NEVER|CRITICAL|IMPORTANT|REQUIRED|DO NOT|ALWAYS|FORBIDDEN)\b/i;
+var TAIL_HEADER_RE = /^#{1,4}\s/;
+var TAIL_LIST_ITEM_RE = /^\s*[-*]\s/;
 function sanitizeSystemText(text) {
   let sanitized = text.replace(/\bOpenCode\b/g, "Claude Code").replace(/\bopencode\b/gi, "Claude");
   const ccStandardStart = sanitized.indexOf("You are an interactive");
@@ -9542,9 +9608,9 @@ function tailSystemBlock(text, maxChars, turnThreshold) {
   const lines = text.split("\n");
   const kept = [];
   let charCount = 0;
-  const importantRe = /\b(MUST|NEVER|CRITICAL|IMPORTANT|REQUIRED|DO NOT|ALWAYS|FORBIDDEN)\b/i;
-  const headerRe = /^#{1,4}\s/;
-  const listItemRe = /^\s*[-*]\s/;
+  const importantRe = TAIL_IMPORTANT_RE;
+  const headerRe = TAIL_HEADER_RE;
+  const listItemRe = TAIL_LIST_ITEM_RE;
   let firstParaEnd = 0;
   for (let j = 0; j < lines.length; j++) {
     if (lines[j].trim() === "" && j > 0) {
@@ -9772,6 +9838,18 @@ function buildSystemPromptBlocks(system, signature) {
     };
   });
 }
+var _EFFORT_EXCLUDED_MODELS = [
+  /claude-opus-4-0/i,
+  /claude-opus-4-1/i,
+  /claude-sonnet-4-0/i,
+  /claude-sonnet-4-5/i,
+  /claude-haiku-4-5/i
+];
+function isEffortCapableModel(model) {
+  if (!model) return false;
+  if (CLAUDE_3_MODEL_RE.test(model)) return false;
+  return !_EFFORT_EXCLUDED_MODELS.some((re) => re.test(model));
+}
 function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provider, customBetas, strategy, requestPath, hasFileReferences, adaptiveOverride, tokenEconomy, microcompactBetas, fastModeActive) {
   const incomingBetasList = incomingBeta.split(",").map((b) => b.trim()).filter(Boolean);
   const betas = ["oauth-2025-04-20"];
@@ -9794,7 +9872,7 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
   const isRoundRobin = strategy === "round-robin";
   const te = tokenEconomy || {};
   betas.push(CLAUDE_CODE_BETA_FLAG);
-  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && !/claude-3-/i.test(model)) {
+  if (!isTruthyEnv(process.env.DISABLE_INTERLEAVED_THINKING) && !CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("interleaved-thinking-2025-05-14");
   }
   {
@@ -9809,8 +9887,12 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
   if (te.extended_cache_ttl !== false && !isRoundRobin) {
     betas.push("extended-cache-ttl-2025-04-11");
   }
-  if (te.context_management && !/claude-3-/i.test(model)) {
+  const isFirstPartyProvider = provider !== "vertex" && provider !== "bedrock" && provider !== "mantle";
+  if (te.context_management !== false && isFirstPartyProvider && !CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("context-management-2025-06-27");
+  }
+  if (te.effort !== false && isFirstPartyProvider && isEffortCapableModel(model)) {
+    betas.push(_EFFORT_BETA_FLAG);
   }
   if (te.structured_outputs && supportsStructuredOutputs(model)) {
     betas.push("structured-outputs-2025-12-15");
@@ -9818,12 +9900,11 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
   if (supportsWebSearch(model)) {
     betas.push("web-search-2025-03-05");
   }
-  if (!/claude-3-/i.test(model)) {
+  if (!CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("advisor-tool-2026-03-01");
   }
-  const isFirstPartyProvider = provider !== "vertex" && provider !== "bedrock" && provider !== "mantle";
   const _isMainThread = te.__requestRole == null || te.__requestRole === "main";
-  if (isFirstPartyProvider && !/claude-3-/i.test(model) && te.context_hint !== false && _isMainThread) {
+  if (isFirstPartyProvider && !CLAUDE_3_MODEL_RE.test(model) && te.context_hint !== false && _isMainThread) {
     betas.push("context-hint-2026-04-09");
   }
   if (isFilesEndpoint || hasFileReferences) {
@@ -9832,10 +9913,10 @@ function buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provide
   if (isMessagesCountTokensPath) {
     betas.push(TOKEN_COUNTING_BETA_FLAG);
   }
-  if (te.redact_thinking !== false && !disableExperimentalBetas && !/claude-3-/i.test(model)) {
+  if (te.redact_thinking !== false && !disableExperimentalBetas && !CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("redact-thinking-2026-02-12");
   }
-  if (te.thinking_token_count !== false && !disableExperimentalBetas && !/claude-3-/i.test(model)) {
+  if (te.thinking_token_count !== false && !disableExperimentalBetas && !CLAUDE_3_MODEL_RE.test(model)) {
     betas.push("thinking-token-count-2026-05-13");
   }
   if (microcompactBetas?.length) {
@@ -9997,6 +10078,7 @@ function buildRequestHeaders(input, requestInit, accessToken, requestBody, reque
     if (isTruthyEnv(process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION)) {
       requestHeaders.set("x-anthropic-additional-protection", "true");
     }
+    requestHeaders.set("x-client-request-id", randomUUID());
   }
   requestHeaders.delete("x-api-key");
   requestHeaders.delete("x-session-affinity");
@@ -10063,7 +10145,7 @@ function transformRequestBody(body, signature, runtime, betaHeader, config) {
     const thinkingActive = parsed.thinking && typeof parsed.thinking === "object" && (parsed.thinking.type === "adaptive" || parsed.thinking.type === "enabled");
     if (thinkingActive) {
       delete parsed.temperature;
-      if (config?.token_economy?.context_management && !/claude-3-/i.test(parsed.model || "") && !parsed.context_management) {
+      if (config?.token_economy?.context_management && !CLAUDE_3_MODEL_RE.test(parsed.model || "") && !parsed.context_management) {
         parsed.context_management = {
           edits: [{ type: "clear_thinking_20251015", keep: "all" }]
         };
