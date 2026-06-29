@@ -1501,7 +1501,7 @@ describe("fetch interceptor — token refresh", () => {
     const [refreshUrl, refreshInit] = mockFetch.mock.calls[0];
     expect(refreshUrl).toBe("https://platform.claude.com/v1/oauth/token");
     expect(JSON.parse(refreshInit.body).grant_type).toBe("refresh_token");
-    expect(refreshInit.headers["User-Agent"]).toBe("axios/1.13.6");
+    expect(refreshInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.94.0 userOAuthProvider");
 
     // Second call should use the fresh token
     const [, apiInit] = mockFetch.mock.calls[1];
@@ -2762,7 +2762,7 @@ describe("OAuth exchange failure", () => {
 
     expect(credentials.type).toBe("failed");
     const [, exchangeInit] = mockFetch.mock.calls[0];
-    expect(exchangeInit.headers["User-Agent"]).toBe("axios/1.13.6");
+    expect(exchangeInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.94.0 userOAuthProvider");
     // saveAccounts should NOT have been called
     expect(saveAccounts).not.toHaveBeenCalled();
   });

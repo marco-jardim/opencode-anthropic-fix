@@ -361,9 +361,12 @@ Full detail: `docs/claude-code-2.1.195-analysis.md`. Prioritized backlog:
 3. Re-emit `x-client-request-id: <crypto.randomUUID()>` (CC's first-party
    middleware adds it on every request; plugin currently strips it).
 
-**OAuth token-call (behavioral — test the 429 guard before shipping):** 4. Token UA `axios/1.13.6` → `anthropic-sdk-typescript/0.94.0 userOAuthProvider`;
-add `anthropic-beta: oauth-2025-04-20` to the token POST; re-evaluate the
-axios-style `Accept`. Gate behind a flag / A-B until refresh reliability is proven.
+**OAuth token-call — ✅ SHIPPED (default-on):** 4. Token UA `axios/1.13.6` →
+`anthropic-sdk-typescript/0.94.0 userOAuthProvider`; `anthropic-beta:
+oauth-2025-04-20` added to the token POST; axios-style `Accept` dropped on the
+SDK path. Gated behind config flag `oauth.sdk_token_useragent`, which now
+**defaults to `true`** (token-endpoint 429 risk accepted). Set the flag to
+`false` to revert to the byte-identical axios/1.13.6 + `Accept` fingerprint.
 
 **Over-send hygiene (lower priority):** 5. Make always-on `extended-cache-ttl-2025-04-11` 1h-conditional; treat
 `advisor-tool` / `context-hint` as the GrowthBook-gated (default-off) betas they

@@ -432,33 +432,33 @@ It also injects optional env-driven headers:
 
 ### 4.3 OAuth token-layer user-agent mimicry
 
-OAuth token calls use axios-fingerprint headers matching the real CLI's bundled HTTP client:
+OAuth token calls (`POST /v1/oauth/token`, exchange and refresh) now default to
+Claude Code 2.1.195's SDK native-fetch OAuth-provider fingerprint
+(`userOAuthProvider`). This is controlled by the config flag
+`oauth.sdk_token_useragent`, which **defaults to `true`**.
 
-- `POST /v1/oauth/token` (exchange and refresh)
+Headers sent by default (flag `true`, matching CC 2.1.195):
 
-Headers sent (plugin, current):
+- `User-Agent: anthropic-sdk-typescript/0.94.0 userOAuthProvider`
+- `anthropic-beta: oauth-2025-04-20` ← new on the token endpoint
+- `Content-Type: application/json`
+- (no explicit `Accept` — native `fetch` default)
+
+Set `oauth.sdk_token_useragent` to `false` to revert to the legacy axios
+fingerprint (byte-identical to the historical CLI):
 
 - `User-Agent: axios/1.13.6`
 - `Accept: application/json, text/plain, */*`
 - `Content-Type: application/json`
 
-Without these headers, Anthropic's OAuth token endpoints (historically) return HTTP 429.
-
-> ⚠ **DRIFT — Claude Code 2.1.195 (see `docs/claude-code-2.1.195-analysis.md` §6).**
+> ✅ **RE-CONVERGED — Claude Code 2.1.195 (see `docs/claude-code-2.1.195-analysis.md` §6).**
 > Upstream CC migrated the OAuth token client from axios to the Anthropic TS SDK's
-> native fetch OAuth provider (`userOAuthProvider`). The real 2.1.195 token POST now
-> sends:
->
-> - `User-Agent: anthropic-sdk-typescript/0.94.0 userOAuthProvider`
-> - `anthropic-beta: oauth-2025-04-20` ← **new on the token endpoint**
-> - `Content-Type: application/json`
-> - (no explicit `Accept` — native `fetch` default)
->
-> There is **no `axios/1.x.x` UA constructed for OAuth** anywhere in the 2.1.195
-> bundle. The plugin still emits the older axios fingerprint above. To re-converge,
-> switch the token-call UA, add the `anthropic-beta` header, and re-evaluate the
-> `Accept` header — **but test against the 429 guard first**; `axios/1.13.6` may still
-> be allow-listed, and a bad change here breaks token refresh for every account.
+> native fetch OAuth provider (`userOAuthProvider`). The plugin now matches this by
+> default (`oauth.sdk_token_useragent` default `true`). Historically the token
+> endpoint 429'd requests lacking the axios UA; that risk is accepted for the
+> default-on path. Set the flag to `false` to fall back to the byte-identical
+> `axios/1.13.6` + `Accept: application/json, text/plain, */*` fingerprint if a
+> live refresh ever regresses.
 
 ### 4.4 WebFetch user-agent (intentional divergence)
 
