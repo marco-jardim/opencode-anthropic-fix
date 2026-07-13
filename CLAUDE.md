@@ -22,6 +22,8 @@ branches; `index.mjs` must maintain 56% statements and 52% branches; and `cli.mj
 branches. The entry-point thresholds ratchet upward in Wave 3. Keep
 [the coverage baseline](docs/plans/qa/coverage-baseline.md) current when thresholds change.
 
+- Live probe: `RUN_LIVE_PROBE=1 node scripts/live-probe.mjs` (or the `RUN_LIVE_PROBE`-gated test) sends ONE real request to verify mimicry end-to-end against a live account; default `npx vitest run test/live/probe` replays a recorded response and needs no credentials.
+
 ## Decision tables index
 
 - [Beta decision table](docs/mimicry/beta-decision-table.md)
