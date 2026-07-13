@@ -43,6 +43,18 @@ import {
   resolveStreamIdleTimeoutMs,
   stripMcpPrefixFromParsedEvent,
 } from "./lib/mimicry/response-stream.mjs";
+import { isFalsyEnv, isTruthyEnv } from "./lib/env.mjs";
+import {
+  CLAUDE_3_MODEL_RE,
+  isOpus46Model,
+  isOpus47Model,
+  isOpus48Model,
+  isSonnet46Model,
+  isAdaptiveThinkingModel,
+  normalizeThinkingBlock,
+} from "./lib/mimicry/models.mjs";
+
+export { isFable5Model, isMythos5Model, isAdaptiveThinkingModel } from "./lib/mimicry/models.mjs";
 
 // Max times a single logical request may fall back from fast->standard speed on
 // the same account before giving up the fast attempt entirely. 1 is enough: one
@@ -6707,22 +6719,10 @@ function shouldDebugSystemPrompt() {
  * @param {string | undefined} value
  * @returns {boolean}
  */
-function isTruthyEnv(value) {
-  if (!value) return false;
-  const normalized = value.trim().toLowerCase();
-  return normalized === "1" || normalized === "true" || normalized === "yes";
-}
-
 /**
  * @param {string | undefined} value
  * @returns {boolean}
  */
-function isFalsyEnv(value) {
-  if (!value) return false;
-  const normalized = value.trim().toLowerCase();
-  return normalized === "0" || normalized === "false" || normalized === "no";
-}
-
 /**
  * @returns {boolean}
  */
@@ -6800,45 +6800,6 @@ function supportsThinking(model) {
 }
 
 /**
- * Detects claude-opus-4.6 / claude-opus-4-6 model IDs.
- * These models use adaptive thinking (effort parameter) instead of
- * manual budgetTokens.
- * @param {string | undefined} body
- * @returns {boolean}
- */
-function isOpus46Model(model) {
-  if (!model) return false;
-  // Match standard IDs (claude-opus-4-6, claude-opus-4.6) and Bedrock ARNs
-  // (arn:aws:bedrock:...anthropic.claude-opus-4-6-...).
-  // Also match bare "opus-4-6" / "opus-4.6" fragments for non-standard strings.
-  return /claude-opus-4[._-]6|opus[._-]4[._-]6/i.test(model);
-}
-
-/**
- * Detects claude-opus-4.7 / claude-opus-4-7 model IDs.
- * @param {string | undefined} model
- * @returns {boolean}
- */
-function isOpus47Model(model) {
-  if (!model) return false;
-  return /claude-opus-4[._-]7|opus[._-]4[._-]7/i.test(model);
-}
-
-/**
- * Detects claude-opus-4.8 / claude-opus-4-8 model IDs.
- * Opus 4.8 (launched 2026-05-28) is an adaptive-thinking model: manual
- * `thinking: {type: "enabled", budget_tokens}` returns a 400 — it MUST use
- * `thinking: {type: "adaptive"}` + the effort parameter. It also supports
- * `speed: "fast"` (fast-mode research preview) and 1M context by default.
- * @param {string | undefined} model
- * @returns {boolean}
- */
-function isOpus48Model(model) {
-  if (!model) return false;
-  return /claude-opus-4[._-]8|opus[._-]4[._-]8/i.test(model);
-}
-
-/**
  * Models eligible for the "simple system prompt" mode that real CC ships in
  * v2.1.133+ under GrowthBook flag `tengu_vellum_lantern` (or forced via
  * `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=1`).
@@ -6856,51 +6817,6 @@ function isSimpleSystemPromptEligible(model) {
   // -eap suffix variant, e.g. "claude-opus-4-7-eap" or "claude-opus-4-7-eap[1m]"
   if (/-eap(?:\[|$|-)/i.test(model)) return true;
   return false;
-}
-
-/**
- * Detects claude-sonnet-4.6 / claude-sonnet-4-6 model IDs.
- * @param {string | undefined} body
- * @returns {boolean}
- */
-function isSonnet46Model(model) {
-  if (!model) return false;
-  return /claude-sonnet-4[._-]6|sonnet[._-]4[._-]6/i.test(model);
-}
-
-/**
- * Detects models that support adaptive thinking ({type: "adaptive"}).
- * Currently: Opus 4.6, Opus 4.7, Opus 4.8, and Sonnet 4.6.
- * @param {string | undefined} body
- * @returns {boolean}
- */
-export function isFable5Model(model) {
-  if (!model) return false;
-  return /claude-fable-5|fable[._-]5/i.test(model);
-}
-
-/**
- * @param {string | undefined} model
- * @returns {boolean}
- */
-export function isMythos5Model(model) {
-  if (!model) return false;
-  return /claude-mythos-5|mythos[._-]5/i.test(model);
-}
-
-/**
- * @param {string | undefined} model
- * @returns {boolean}
- */
-export function isAdaptiveThinkingModel(model) {
-  return (
-    isOpus46Model(model) ||
-    isOpus47Model(model) ||
-    isOpus48Model(model) ||
-    isSonnet46Model(model) ||
-    isFable5Model(model) ||
-    isMythos5Model(model)
-  );
 }
 
 /**
@@ -7191,7 +7107,6 @@ let cachedCCPrompt = null;
 // Perf: module-scope regexes reused across per-request hot paths. None use the
 // `/g` flag and all are consumed via `.test()`, so a single shared instance is
 // stateless and safe (no `lastIndex` to reset between calls).
-const CLAUDE_3_MODEL_RE = /claude-3-/i;
 const TAIL_IMPORTANT_RE = /\b(MUST|NEVER|CRITICAL|IMPORTANT|REQUIRED|DO NOT|ALWAYS|FORBIDDEN)\b/i;
 const TAIL_HEADER_RE = /^#{1,4}\s/;
 const TAIL_LIST_ITEM_RE = /^\s*[-*]\s/;
@@ -7975,31 +7890,6 @@ function budgetTokensToEffort(budgetTokens) {
  * @param {string} model
  * @returns {any}
  */
-function normalizeThinkingBlock(thinking, model) {
-  // If thinking is absent or not an object, pass through
-  if (!thinking || typeof thinking !== "object") {
-    return thinking;
-  }
-
-  // Adaptive thinking models always get { type: "adaptive" }
-  // regardless of what format the incoming thinking block has
-  if (isAdaptiveThinkingModel(model)) {
-    // Check for env-var override to force budget_tokens fallback
-    if (isTruthyEnv(process.env.OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING)) {
-      // Fallback: return as-is if already budget_tokens shape, otherwise default
-      if (thinking.type === "enabled" && typeof thinking.budget_tokens === "number") {
-        return thinking;
-      }
-      const parsedBudget = parseInt(process.env.MAX_THINKING_TOKENS, 10);
-      return { type: "enabled", budget_tokens: Number.isNaN(parsedBudget) ? 16000 : parsedBudget };
-    }
-    return { type: "adaptive" };
-  }
-
-  // Non-adaptive models: pass through unchanged
-  return thinking;
-}
-
 /**
  * Map Node.js platform to Stainless OS header value.
  * @param {NodeJS.Platform} value
