@@ -38,7 +38,7 @@ Full analysis: `docs/claude-code-2.1.143-analysis.md`. Verified via `strings` ex
 
 - `mid-conversation-system-2026-04-07` auto-emission — wait for MITM evidence of real CC sending it before mirroring the body shape and 422 retry path.
 - Subagent identity header propagation (`x-claude-code-agent-id` / `x-claude-code-parent-agent-id`) — needs OpenCode to surface subagent identity through `experimental.chat.params`. Today it does not.
-- `stop_details` response passthrough verification — added as a P3 TODO; a smoke test in the SSE re-emitter is recommended.
+- `stop_details` response passthrough verification — ✅ resolved: covered by `test/conformance/stream-transform.test.mjs` (W0-plan Wave 2·P2.4), which drives a `message_delta` carrying `stop_details` through the real interceptor and asserts byte-identical passthrough. (Originally a P3 TODO.)
 
 **Tests:** 1141/1141 pass.
 
