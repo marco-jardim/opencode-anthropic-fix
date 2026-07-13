@@ -20,6 +20,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "check:invariants": "node scripts/check-invariants.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
