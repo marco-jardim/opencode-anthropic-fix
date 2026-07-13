@@ -44,6 +44,7 @@ import {
   stripMcpPrefixFromParsedEvent,
 } from "./lib/mimicry/response-stream.mjs";
 import { isFalsyEnv, isTruthyEnv } from "./lib/env.mjs";
+import { resolveCacheTtl, shouldPlaceToolBreakpoint, updateBoundaryStability } from "./lib/mimicry/cache.mjs";
 import {
   CLAUDE_3_MODEL_RE,
   isOpus46Model,
@@ -4591,29 +4592,6 @@ const cacheBreakState = {
   boundaryStability: new Map(),
 };
 
-/**
- * Update per-boundary stability counters by diffing the current request's cache
- * source hashes against the previous turn's. A boundary that is unchanged gets
- * its counter incremented; a changed (or newly-appeared) boundary resets to 0.
- *
- * @param {Map<string,string>} current - hashes for this turn (source -> hash)
- * @param {Map<string,string>} previous - hashes from the prior turn
- * @param {Map<string,number>} stability - mutated in place
- */
-function updateBoundaryStability(current, previous, stability) {
-  for (const [source, hash] of current) {
-    if (previous.get(source) === hash) {
-      stability.set(source, (stability.get(source) || 0) + 1);
-    } else {
-      stability.set(source, 0);
-    }
-  }
-  // Drop boundaries that no longer appear so stale entries don't linger.
-  for (const source of [...stability.keys()]) {
-    if (!current.has(source)) stability.delete(source);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Microcompact state (Phase 3, Task 3.4)
 // ---------------------------------------------------------------------------
@@ -4844,41 +4822,6 @@ function tryQuotaAwareAccountSwitch(account, accountManager, config) {
  * @returns {Map<string, string>} source_id → hash
  */
 /**
- * Resolve the prompt-cache TTL for tool/message breakpoints, mirroring the
- * decompiled Claude Code 2.1.154 `REH(querySource)` precedence.
- *
- * Precedence (highest first):
- *   1. FORCE_PROMPT_CACHING_5M truthy  -> "5m"
- *   2. ENABLE_PROMPT_CACHING_1H truthy -> "1h"
- *   3. role-scoping on AND not the main role -> "5m" (side-queries are cheap)
- *   4. otherwise -> configuredTtl (main interactive thread, default "1h")
- *
- * @param {object} args
- * @param {string} args.configuredTtl - Default TTL when 1h is eligible (usually "1h").
- * @param {boolean} args.roleScopedTtl - Whether role-scoped 5m downgrade is enabled.
- * @param {boolean} args.isMainForCache - True when the request is the main/interactive role.
- * @param {boolean} [args.isSubagent] - True when the request is an opencode subagent
- *   (detected via the `x-parent-session-id` header). One-shot subagents prefer 5m.
- * @param {Record<string, string | undefined>} [args.env] - Environment (defaults to process.env).
- * @returns {string} The TTL string ("5m" or "1h"/configuredTtl).
- */
-function resolveCacheTtl({ configuredTtl, roleScopedTtl, isMainForCache, isSubagent = false, env = process.env }) {
-  // Env overrides (exact CC REH() behavior). isTruthyEnv mirrors CC's uH().
-  if (isTruthyEnv(env.FORCE_PROMPT_CACHING_5M)) return "5m";
-  if (isTruthyEnv(env.ENABLE_PROMPT_CACHING_1H)) return "1h";
-  // Subagent requests (opencode marks them with the x-parent-session-id header)
-  // are usually one-shot, and opencode runs them sequentially with a DIFFERENT
-  // system prompt than the main thread, so they rarely re-hit a 1h cache. Prefer
-  // the cheap 5m write tier (~1.25x base) over the 1h tier (~2x base) to avoid
-  // paying the long-cache write premium on a prefix that won't be reused. Gated
-  // on the same role-scoped master switch as the side-query downgrade below.
-  if (roleScopedTtl && isSubagent) return "5m";
-  // Role-scoped downgrade: non-main (side-query) requests use the cheap 5m tier.
-  if (roleScopedTtl && !isMainForCache) return "5m";
-  return configuredTtl;
-}
-
-/**
  * Read a single incoming request header by name (case-insensitive) from either a
  * `Request` input or a fetch `init.headers` (Headers | array | plain object).
  * Returns the trimmed value or null. Used to detect opencode's subagent marker
@@ -4916,41 +4859,6 @@ function getIncomingHeader(input, requestInit, name) {
     // unexpected header shape — treat as absent
   }
   return null;
-}
-
-/**
- * Decide whether to place the prompt-cache breakpoint on the last tool.
- *
- * Default (no stability data, or detector disabled): TRUE — exact Claude Code
- * behavior (breakpoint on the last tool).
- *
- * Adaptive override: returns FALSE only when there is concrete evidence that the
- * tool boundary is thrashing (a `tool:*` source changed within the last turn,
- * i.e. stability 0) WHILE the system-prompt boundary is stable (unchanged for
- * >= STABLE_TURNS turns). In that case the stable system-prompt breakpoint is a
- * better cache anchor than a tool array that moves every turn.
- *
- * @param {Map<string, number> | null | undefined} stability - source -> consecutive-unchanged turns
- * @returns {boolean} whether to stamp cache_control on the last tool
- */
-function shouldPlaceToolBreakpoint(stability) {
-  if (!stability || stability.size === 0) return true; // no data -> CC behavior
-  const STABLE_TURNS = 2;
-  const systemStability = stability.get("system_prompt");
-  const systemIsStable = typeof systemStability === "number" && systemStability >= STABLE_TURNS;
-  if (!systemIsStable) return true; // system not proven stable -> keep CC behavior
-
-  // Is any tool boundary thrashing right now (changed within the last turn)?
-  let toolThrashing = false;
-  for (const [source, turns] of stability) {
-    if (source.startsWith("tool:") && turns === 0) {
-      toolThrashing = true;
-      break;
-    }
-  }
-  // Skip the last-tool breakpoint only when tools thrash AND system is the
-  // stable anchor. Otherwise fall back to CC behavior.
-  return !toolThrashing;
 }
 
 function extractCacheSourceHashes(bodyStr, parsedBody = undefined) {
