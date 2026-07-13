@@ -54,6 +54,13 @@ import { isFalsyEnv, isTruthyEnv } from "./lib/env.mjs";
 import { sessionMetrics, createInitialSessionMetrics, getAverageCacheHitRate } from "./lib/session-metrics.mjs";
 import { repairOrphanedToolUseBlocks } from "./lib/mimicry/request-helpers.mjs";
 import { resolveCacheTtl, shouldPlaceToolBreakpoint, updateBoundaryStability } from "./lib/mimicry/cache.mjs";
+import { SERVICE_WIDE_MAX_RETRIES, CONSECUTIVE_529_FALLBACK_THRESHOLD } from "./lib/tuning.mjs";
+import {
+  computeServiceRetrySleepMs,
+  selectFallbackModel,
+  shouldServiceRetry,
+  isTransientRateLimit,
+} from "./lib/retry/overload-loop.mjs";
 import {
   buildRequestHeaders,
   buildAnthropicBetaHeader,
@@ -2706,7 +2713,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
               const maxServiceRetries =
                 requestClass === "background"
                   ? (config.request_classification?.background_max_service_retries ?? 0)
-                  : 2;
+                  : SERVICE_WIDE_MAX_RETRIES;
               const maxShouldRetries =
                 requestClass === "background" ? (config.request_classification?.background_max_should_retries ?? 1) : 3;
               let _adaptiveDecisionMade = false; // Ensure adaptive context decision is made only once per logical request
@@ -3829,13 +3836,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     // Transient 429: short retry-after (<=10s) is a burst throttle.
                     // Retry on the SAME account instead of rotating — avoids wasting
                     // the account pool on momentary rate spikes.
-                    if (
-                      response.status === 429 &&
-                      reason === "RATE_LIMIT_EXCEEDED" &&
-                      retryAfterMs != null &&
-                      retryAfterMs > 0 &&
-                      retryAfterMs <= TRANSIENT_RETRY_THRESHOLD_MS
-                    ) {
+                    if (isTransientRateLimit(response.status, reason, retryAfterMs, TRANSIENT_RETRY_THRESHOLD_MS)) {
                       debugLog("transient 429: sleeping before same-account retry", {
                         retryAfterMs,
                         account: account.email || `Account ${account.index + 1}`,
@@ -3926,26 +3927,19 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 
                   // 529 (overloaded) and 503 (service unavailable) — brief sleep-and-retry
                   // per RE doc u00a75.5 (Stainless SDK retries 500+ codes up to maxServiceRetries times)
-                  if (
-                    (response.status === 529 || response.status === 503) &&
-                    serviceWideRetryCount < maxServiceRetries
-                  ) {
+                  if (shouldServiceRetry(response.status, serviceWideRetryCount, maxServiceRetries)) {
                     serviceWideRetryCount++;
 
                     // Track consecutive 529s for model fallback
                     if (response.status === 529) {
                       consecutive529Count++;
-                      if (consecutive529Count >= 3 && requestInit.body) {
+                      if (consecutive529Count >= CONSECUTIVE_529_FALLBACK_THRESHOLD && requestInit.body) {
                         try {
                           // QA fix: parse from requestInit.body (pre-transform) to avoid
                           // double-transformation (mcp_ prefix, system blocks, metadata).
                           const parsedForFallback = JSON.parse(requestInit.body);
                           const currentModel = parsedForFallback.model || "";
-                          let fallbackModel = null;
-                          if (/opus-4-6|opus-4/i.test(currentModel))
-                            fallbackModel = currentModel.replace(/opus/i, "sonnet");
-                          else if (/sonnet-4-6|sonnet-4/i.test(currentModel))
-                            fallbackModel = currentModel.replace(/sonnet/i, "haiku");
+                          const fallbackModel = selectFallbackModel(currentModel);
 
                           if (fallbackModel) {
                             parsedForFallback.model = fallbackModel;
@@ -3970,9 +3964,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       consecutive529Count = 0;
                     }
 
-                    const baseDelay = Math.min(0.5 * Math.pow(2, serviceWideRetryCount), 3);
-                    const jitter = 1 - Math.random() * 0.25;
-                    const sleepMs = Math.round(baseDelay * jitter * 1000);
+                    const sleepMs = computeServiceRetrySleepMs(serviceWideRetryCount);
                     const retryLabel = response.status === 529 ? "overloaded" : "unavailable";
                     debugLog(`service-wide ${retryLabel} error, sleeping before retry`, {
                       status: response.status,
