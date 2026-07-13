@@ -114,6 +114,32 @@ describe("deliver — auto-PR path", () => {
     expect(call[2].body).toContain("2.1.90"); // shows previous version
   });
 
+  it("PR body includes a beta-sync section when beta flags change", async () => {
+    const extracted = clone(BASE);
+    extracted.version = "2.1.91";
+    extracted.experimentalBetas = [...BASE.experimentalBetas, "test-beta-2026-07-01"];
+    const analysis = makeTrivialAnalysis(extracted);
+
+    await deliver(ENV, BASE, extracted, analysis);
+
+    const call = createPR.mock.calls[0];
+    expect(call[2].body).toContain("Mimicry beta sync");
+    expect(call[2].body).toContain("test-beta-2026-07-01");
+    expect(call[2].body).toContain("beta-decision-table");
+  });
+
+  it("PR body omits the beta-sync section when no beta changed", async () => {
+    const extracted = clone(BASE);
+    extracted.version = "2.1.91";
+    extracted.buildTime = "2026-04-02T21:58:41Z";
+    const analysis = makeTrivialAnalysis(extracted);
+
+    await deliver(ENV, BASE, extracted, analysis);
+
+    const call = createPR.mock.calls[0];
+    expect(call[2].body).not.toContain("Mimicry beta sync");
+  });
+
   it("updates existing PR body when PR already exists", async () => {
     findExistingPR.mockResolvedValue({ number: 99, html_url: "https://github.com/pr/99" });
 
