@@ -2,6 +2,45 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.1.33] — 2026-07-13
+
+### Agent-native remediation (Waves 0–4)
+
+Executed `docs/plans/agent-native-remediation-plan.md` end to end, making the repository agent-native without any
+mimicry regression (`test/conformance/regression.test.mjs` + a new byte-identical `golden-outgoing` guard stayed
+green throughout). See `docs/plans/qa/GLOBAL-review.md` for the full gate.
+
+> **Version reconciliation (chokepoint C2):** versions `0.1.28`–`0.1.32` were unreleased internal bumps with no
+> individual changelog entries. This `0.1.33` entry reconciles the CHANGELOG head with `package.json` and restores
+> git-tag alignment (`v0.1.33`).
+
+**Wave 0 — foundation:** corrected the `AGENTS.md` OpenCode/Claude-Code naming + dependency count; added root
+`CLAUDE.md` agent entrypoint; `docs/mimicry/{beta,strategy}-decision-table.md`; `lib/tuning.mjs` (documented
+retry/refresh constants) + drift-guard test; `scripts/check-invariants.mjs` sources-of-truth guard; repo hygiene.
+
+**Wave 1 — observability:** completed the `lib/redact.mjs` redaction coverage (leaf-string scrubbing, grep-proof
+fixtures); per-request correlation IDs across all debug sinks; opt-in redacted SSE capture; a `diagnose` CLI
+command emitting a redacted shareable bundle (`lib/diagnose.mjs`).
+
+**Wave 2 — verification infrastructure:** shared HTTP/SSE mock harness
+(`test/helpers/{fake-anthropic,http-mock}.mjs`); capture→fixture→replay harness + one real redacted fixture
+(`test/helpers/replay.mjs`, `scripts/capture-to-fixture.mjs`); V8 coverage tooling + thresholds; concurrency /
+stream / retry gap tests (refresh-lock race, storage collision, stream-transform, retry-injection).
+
+**Wave 3 — structural decomposition:** carved `index.mjs` from ~9688 to 5915 LOC (< 6000) into 11 unit-tested
+`lib/` modules with zero wire change: `lib/env.mjs`,
+`lib/mimicry/{models,cache,response-stream,system-prompt,request-helpers,request-body,headers}.mjs`,
+`lib/token-economy/{transforms,microcompact}.mjs`, `lib/session-metrics.mjs`, `lib/retry/overload-loop.mjs`; wired
+`lib/tuning.mjs` into the live retry path. Stateful token-economy state machines and the two distinct-by-design
+`formatResetTime` formatters were deliberately left in place (see `docs/plans/qa/preflight-notes.md`).
+
+**Wave 4 — closing the loop:** opt-in live-probe smoke test (default-skipped, replays a recorded response in CI)
+via `scripts/live-probe.mjs` + `test/live/probe.test.mjs`; the sync-watcher's auto-PR body now surfaces a mimicry
+beta-sync section (decision-table reminder + redacted fixture skeleton) when a new Claude Code version changes
+beta flags.
+
+**Tests:** 1406/1406 pass (2 skipped: gated live probe + a POSIX-perms case skipped on win32).
+
 ## [0.1.27] — 2026-05-16
 
 ### Upstream tracking — Claude Code v2.1.133 → v2.1.143 + simple-system-prompt mode + cc_workload billing tag

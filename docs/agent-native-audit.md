@@ -1,6 +1,9 @@
 # Agent-Native Readiness Audit
 
-> **Status:** Draft 1 — principal-architect review (partial pre-plan remediation applied 2026-07-07)
+> **Status:** Resolved (see plan) — full remediation executed across Waves 0–4 (2026-07-13): `index.mjs` reduced
+> from ~9688 to 5915 LOC across 11 unit-tested `lib/` modules with no mimicry regression, redaction + `diagnose`
+> bundle + replay/coverage harnesses landed, and every phase gate plus the GLOBAL gate passed senior-QA. See
+> [`docs/plans/qa/GLOBAL-review.md`](./plans/qa/GLOBAL-review.md).
 > **Date:** 2026-07-07
 > **Auditor:** Sisyphus (agentic review pass)
 > **Repo:** `opencode-anthropic-fix` @ `0.1.32` (branch `master`, tree clean)
