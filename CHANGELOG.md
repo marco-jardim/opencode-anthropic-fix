@@ -2,7 +2,7 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
-## [0.1.33] — 2026-07-13
+## [0.2.0] — 2026-07-13
 
 ### Agent-native remediation (Waves 0–4)
 
@@ -11,8 +11,8 @@ mimicry regression (`test/conformance/regression.test.mjs` + a new byte-identica
 green throughout). See `docs/plans/qa/GLOBAL-review.md` for the full gate.
 
 > **Version reconciliation (chokepoint C2):** versions `0.1.28`–`0.1.32` were unreleased internal bumps with no
-> individual changelog entries. This `0.1.33` entry reconciles the CHANGELOG head with `package.json` and restores
-> git-tag alignment (`v0.1.33`).
+> individual changelog entries. This `0.2.0` entry reconciles the CHANGELOG head with `package.json` and restores
+> git-tag alignment (`v0.2.0`).
 
 **Wave 0 — foundation:** corrected the `AGENTS.md` OpenCode/Claude-Code naming + dependency count; added root
 `CLAUDE.md` agent entrypoint; `docs/mimicry/{beta,strategy}-decision-table.md`; `lib/tuning.mjs` (documented

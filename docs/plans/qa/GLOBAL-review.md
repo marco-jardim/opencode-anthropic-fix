@@ -59,11 +59,11 @@ This review certifies the global acceptance criteria (G1–G7) and Definition of
   `coverage-baseline.md`.
 - **28 lint warnings** are pre-existing unused-vars (e.g. `haiku`, `TOOL_PREFIX`, `nonInteractive`) relocated
   verbatim during extraction; left untouched to keep the moves byte-identical.
-- **C2 sources-of-truth drift** reconciled at the Global DoD: a `[0.1.33]` CHANGELOG entry folds in the
-  undocumented 0.1.28–0.1.32 internal bumps and matches the version bump; tag `v0.1.33` restores tag/changelog/
+- **C2 sources-of-truth drift** reconciled at the Global DoD: a `[0.2.0]` CHANGELOG entry folds in the
+  undocumented 0.1.28–0.1.32 internal bumps and matches the version bump; tag `v0.2.0` restores tag/changelog/
   package alignment.
 
 ## Conclusion
 
 All global acceptance criteria are met with evidence; no blocking findings. The remediation is **PASS**. Proceed
-to the Global DoD (CHANGELOG reconcile, version bump `0.1.32 → 0.1.33`, tag `v0.1.33`, audit status flip).
+to the Global DoD (CHANGELOG reconcile, version bump `0.1.32 → 0.2.0`, tag `v0.2.0`, audit status flip).
