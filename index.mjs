@@ -15,15 +15,11 @@ import {
   FALLBACK_CLAUDE_CLI_VERSION,
   CLAUDE_CODE_NPM_LATEST_URL,
   CLAUDE_CODE_BUILD_TIME,
-  EXPERIMENTAL_BETA_FLAGS,
-  BETA_SHORTCUTS,
   resolveBetaShortcut,
-  buildExtendedUserAgent,
 } from "./lib/request-headers.mjs";
-import { loadConfig, loadConfigFresh, saveConfig, CLIENT_ID, getConfigDir } from "./lib/config.mjs";
+import { loadConfig, loadConfigFresh, saveConfig, getConfigDir } from "./lib/config.mjs";
 import { loadContextHintDisabledFlag, saveContextHintDisabledFlag } from "./lib/context-hint-persist.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
-import { applyOAuthCredentials, resetAccountTracking } from "./lib/account-state.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import {
   isAccountSpecificError,
@@ -51,7 +47,7 @@ import {
   stripMcpPrefixFromParsedEvent,
 } from "./lib/mimicry/response-stream.mjs";
 import { transformRequestBody, CORE_TOOL_NAMES } from "./lib/mimicry/request-body.mjs";
-import { isFalsyEnv, isTruthyEnv } from "./lib/env.mjs";
+import { isTruthyEnv } from "./lib/env.mjs";
 import { sessionMetrics, createInitialSessionMetrics, getAverageCacheHitRate } from "./lib/session-metrics.mjs";
 import { repairOrphanedToolUseBlocks } from "./lib/mimicry/request-helpers.mjs";
 import { resolveCacheTtl, shouldPlaceToolBreakpoint, updateBoundaryStability } from "./lib/mimicry/cache.mjs";
@@ -83,13 +79,11 @@ import {
   SUBAGENT_CC_ANCHOR,
 } from "./lib/mimicry/system-prompt.mjs";
 import {
-  CLAUDE_3_MODEL_RE,
   hasOneMillionContext,
   isEligibleFor1MContext,
   isOpus46Model,
   isOpus47Model,
   isOpus48Model,
-  isSonnet46Model,
 } from "./lib/mimicry/models.mjs";
 
 export { isFable5Model, isMythos5Model, isAdaptiveThinkingModel } from "./lib/mimicry/models.mjs";
@@ -241,7 +235,7 @@ async function runHaikuSessionSummarize(
   }
 }
 
-export async function AnthropicAuthPlugin({ client, project, directory, worktree, serverUrl, $ }) {
+export async function AnthropicAuthPlugin({ client }) {
   const config = loadConfig();
   _pluginConfig = config; // expose to module-level functions (cache stats, response headers)
   // QA fix H6: read emulation settings live from config instead of stale const capture
@@ -5576,29 +5570,12 @@ process.once("beforeExit", _beforeExitHandler);
 // The compiled Bun binary computes cch dynamically: xxHash64(body, seed) & 0xFFFFF.
 // Captured real CC v2.1.107 request shows cch=6d00f (5-hex-char, 20-bit masked hash).
 // Seed extracted from binary: 0x6E52736AC806831E (unchanged since v2.1.96).
-const CCH_SEED = 0x6e52736ac806831en; // BigInt — Attestation.zig seed
 
 /** @type {null | ((buf: Uint8Array, seed: bigint) => bigint)} */
 let _xxh64Raw = null;
 const _xxhashReady = xxhashInit().then((h) => {
   _xxh64Raw = h.h64Raw;
 });
-
-/**
- * Compute and replace the cch=00000 placeholder in the serialized body with
- * xxHash64(body, seed) & 0xFFFFF, matching the Bun binary's native attestation.
- * @param {string} body - Serialized JSON body
- * @returns {Promise<string>} Body with cch replaced
- */
-async function computeAndReplaceCCH(body) {
-  if (typeof body !== "string" || !body.includes("cch=00000")) return body;
-  await _xxhashReady;
-  if (!_xxh64Raw) return body; // fallback: send as-is if wasm failed to load
-  const bodyBytes = Buffer.from(body, "utf-8");
-  const hash = _xxh64Raw(bodyBytes, CCH_SEED);
-  const cch = (hash & 0xfffffn).toString(16).padStart(5, "0");
-  return body.replace("cch=00000", `cch=${cch}`);
-}
 
 /**
  * Extract the text content of the first user message for billing hash computation.
@@ -5701,13 +5678,6 @@ function shouldDebugSystemPrompt() {
  */
 
 /**
- * @returns {string}
- */
-function getClaudeEntrypoint() {
-  return process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
-}
-
-/**
  * @param {string | undefined} model
  * @returns {string | undefined}
  */
@@ -5732,15 +5702,6 @@ function logTransformedSystemPrompt(body) {
  * @param {string | undefined} body
  * @returns {boolean}
  */
-
-/**
- * @param {string | undefined} body
- * @returns {boolean}
- */
-function supportsThinking(model) {
-  if (!model) return true;
-  return /claude|sonnet|opus|haiku/i.test(model);
-}
 
 /**
  * @param {string | undefined} body
@@ -5831,19 +5792,6 @@ function getAccountIdentifier(account) {
  */
 
 /**
- * Return the cache_control object appropriate for the given cache policy.
- * @param {{ttl: string, ttl_supported: boolean, boundary_marker?: boolean} | undefined} cachePolicy
- * @returns {{type: string, ttl?: string}}
- */
-function getCacheControlForPolicy(cachePolicy) {
-  if (!cachePolicy) return { type: "ephemeral" };
-  if (cachePolicy.ttl === "off" || cachePolicy.ttl_supported === false) {
-    return { type: "ephemeral" };
-  }
-  return { type: "ephemeral", ttl: cachePolicy.ttl };
-}
-
-/**
  * @param {string} incomingBeta
  * @param {boolean} signatureEnabled
  * @param {string} model
@@ -5865,18 +5813,6 @@ function getCacheControlForPolicy(cachePolicy) {
 // for every other model (effort-capable: Opus 4.5/4.6/4.7/4.8, Sonnet 4.6, etc.).
 
 /** @typedef {'low' | 'medium' | 'high'} ThinkingEffort */
-
-/**
- * Map budgetTokens to an effort level.
- * Used when an Opus 4.6 request arrives with the legacy budgetTokens shape.
- * @param {number} budgetTokens
- * @returns {ThinkingEffort}
- */
-function budgetTokensToEffort(budgetTokens) {
-  if (budgetTokens <= 1024) return "low";
-  if (budgetTokens <= 8000) return "medium";
-  return "high";
-}
 
 // QA fix L3: budgetTokensToEffort() removed — dead code, never called
 // QA fix L4: isValidEffort() removed — dead code, never called
@@ -6068,19 +6004,6 @@ function isEventStreamResponse(response) {
   return contentType.toLowerCase().includes("text/event-stream");
 }
 
-/**
- * Build user-facing switch reason text for account-specific errors.
- * @param {number} status
- * @param {import('./lib/backoff.mjs').RateLimitReason} reason
- * @returns {string}
- */
-function formatSwitchReason(status, reason) {
-  if (reason === "AUTH_FAILED") return "auth failed";
-  if (status === 403 && reason === "QUOTA_EXHAUSTED") return "permission denied";
-  if (reason === "QUOTA_EXHAUSTED") return "quota exhausted";
-  return "rate-limited";
-}
-
 // ---------------------------------------------------------------------------
 // Token refresh (per-account)
 // ---------------------------------------------------------------------------
@@ -6153,7 +6076,7 @@ function applyDiskAuthIfFresher(account, diskAuth, options = {}) {
  * @returns {Promise<string>} The new access token
  * @throws {Error} If refresh fails
  */
-async function refreshAccountToken(account, client, source = "foreground", { onTokensUpdated } = {}) {
+async function refreshAccountToken(account, client, _source = "foreground", { onTokensUpdated } = {}) {
   // CC-sourced accounts must NEVER enter the OAuth HTTP refresh flow.
   // Instead, re-read credentials from the CC source.  If they're still
   // expired, let the caller handle it (the account will be skipped).

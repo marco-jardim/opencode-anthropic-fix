@@ -983,7 +983,6 @@ describe("fetch interceptor", () => {
   });
 
   it("preserves verbose system instructions when prompt compaction is off", async () => {
-    const configModule = await import("./lib/config.mjs");
     loadConfig.mockReturnValueOnce({
       ...loadConfig(),
       signature_emulation: {
@@ -1620,7 +1619,6 @@ describe("system prompt transform", () => {
   });
 
   it("keeps legacy prefix behavior when emulation is disabled", async () => {
-    const configModule = await import("./lib/config.mjs");
     loadConfig.mockReturnValueOnce({
       ...loadConfig(),
       signature_emulation: {
