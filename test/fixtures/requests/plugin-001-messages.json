@@ -1,0 +1,102 @@
+{
+  "meta": {
+    "name": "plugin-001-messages",
+    "source": "plugin",
+    "createdAt": "2026-04-14T23:21:52.540Z",
+    "note": "Recorded request paired with an authored deterministic SSE response."
+  },
+  "request": {
+    "method": "POST",
+    "url": "/v1/messages?beta=true",
+    "headers": {
+      "authorization": "Bearer [redacted sha256:6e6e750c6374]",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.108 (external, cli)",
+      "x-claude-code-session-id": "a13abe68-e091-4106-a7c0-c57ef3cf5d2c",
+      "anthropic-beta": "oauth-2025-04-20,claude-code-20250219,advanced-tool-use-2025-11-20,fast-mode-2026-02-01,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,context-management-2025-06-27,web-search-2025-03-05,advisor-tool-2026-03-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Windows",
+      "x-stainless-package-version": "0.81.0",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v24.3.0",
+      "x-stainless-timeout": "600",
+      "accept": "*/*",
+      "accept-encoding": "gzip, deflate, br, zstd",
+      "content-length": "1168"
+    },
+    "body": {
+      "model": "claude-haiku-4-5",
+      "max_tokens": 32000,
+      "temperature": 1,
+      "system": [
+        {
+          "type": "text",
+          "text": "x-anthropic-billing-header: cc_version=2.1.108.978; cc_entrypoint=cli; cch=d728b;"
+        },
+        {
+          "type": "text",
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        },
+        {
+          "type": "text",
+          "text": "You are a title generator. You output ONLY a thread title. Nothing else.\n\nRules:\n- Use the same language as the user message.\n- Output exactly one line.\n- Keep the title at or below 50 characters.\n- No explanations, prefixes, or suffixes.\n- Keep important technical terms, numbers, and filenames when present.",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Generate a title for this conversation:\n",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            },
+            {
+              "type": "text",
+              "text": "Say hello in exactly 5 words\n",
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          ]
+        }
+      ],
+      "stream": true,
+      "metadata": {
+        "user_id": "{\"device_id\":\"d7d1f81b541389e489855b7bc7cae0a1bf271af8fd5e389b64efc800e98abb20\",\"account_uuid\":\"1775664826241:[redacted sha256:0b52ef789959]\",\"session_id\":\"a13abe68-e091-4106-a7c0-c57ef3cf5d2c\"}"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sseChunks": [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"fixture thought\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_fixture\",\"name\":\"mcp_write_file\",\"input\":{}}}\n\n",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"fixture.txt\\\",\\\"content\\\":\\\"ok\\\"}\"}}\n\n",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":12}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    ]
+  }
+}
