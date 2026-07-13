@@ -40,6 +40,19 @@ vi.mock("./lib/oauth.mjs", () => ({
     expires: Date.now() + 3600_000,
     email: "new@example.com",
   })),
+  refreshToken: vi.fn(async (refreshTokenValue, options = {}) => {
+    const resp = await fetch("https://platform.claude.com/v1/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: refreshTokenValue,
+      }),
+      signal: options.signal,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  }),
   revoke: vi.fn(async () => true),
 }));
 
@@ -91,7 +104,7 @@ import {
   main,
 } from "./cli.mjs";
 import { loadAccounts, saveAccounts } from "./lib/storage.mjs";
-import { authorize, exchange, revoke } from "./lib/oauth.mjs";
+import { authorize, exchange, refreshToken, revoke } from "./lib/oauth.mjs";
 import { createInterface } from "node:readline/promises";
 import { exec } from "node:child_process";
 import { writeFile } from "node:fs/promises";
@@ -398,6 +411,7 @@ describe("refreshAccessToken", () => {
     });
 
     const token = await refreshAccessToken(account);
+    expect(refreshToken).toHaveBeenCalledWith("old-refresh", { signal: expect.any(AbortSignal) });
     expect(token).toBe("new-access");
     expect(account.access).toBe("new-access");
     expect(account.refreshToken).toBe("new-refresh");

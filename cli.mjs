@@ -29,8 +29,9 @@
  */
 
 import { loadAccounts, saveAccounts, getStoragePath, createDefaultStats } from "./lib/storage.mjs";
-import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES, CLIENT_ID } from "./lib/config.mjs";
-import { authorize, exchange, revoke } from "./lib/oauth.mjs";
+import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES } from "./lib/config.mjs";
+import { authorize, exchange, refreshToken, revoke } from "./lib/oauth.mjs";
+import { adjustActiveIndexAfterRemoval } from "./lib/account-state.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -149,18 +150,7 @@ function rpad(str, width) {
  */
 export async function refreshAccessToken(account) {
   try {
-    const resp = await fetch("https://platform.claude.com/v1/oauth/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "refresh_token",
-        refresh_token: account.refreshToken,
-        client_id: CLIENT_ID,
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!resp.ok) return null;
-    const json = await resp.json();
+    const json = await refreshToken(account.refreshToken, { signal: AbortSignal.timeout(5000) });
     account.access = json.access_token;
     account.expires = Date.now() + json.expires_in * 1000;
     if (json.refresh_token) account.refreshToken = json.refresh_token;
@@ -486,13 +476,7 @@ export async function cmdLogout(arg, opts = {}) {
   stored.accounts.splice(idx, 1);
 
   // Adjust active index
-  if (stored.accounts.length === 0) {
-    stored.activeIndex = 0;
-  } else if (stored.activeIndex >= stored.accounts.length) {
-    stored.activeIndex = stored.accounts.length - 1;
-  } else if (stored.activeIndex > idx) {
-    stored.activeIndex--;
-  }
+  adjustActiveIndexAfterRemoval(stored, idx);
 
   await saveAccounts(stored);
   console.log(c.green(`Logged out account #${n} (${label}).`));
@@ -1022,13 +1006,7 @@ export async function cmdRemove(arg, opts = {}) {
   stored.accounts.splice(idx, 1);
 
   // Adjust active index
-  if (stored.accounts.length === 0) {
-    stored.activeIndex = 0;
-  } else if (stored.activeIndex >= stored.accounts.length) {
-    stored.activeIndex = stored.accounts.length - 1;
-  } else if (stored.activeIndex > idx) {
-    stored.activeIndex--;
-  }
+  adjustActiveIndexAfterRemoval(stored, idx);
 
   await saveAccounts(stored);
   console.log(c.green(`Removed account #${n} (${label}).`));
@@ -1517,13 +1495,7 @@ export async function cmdManage() {
           if (confirm.trim().toLowerCase() === "y") {
             stored.accounts.splice(idx, 1);
             // Adjust active index
-            if (stored.accounts.length === 0) {
-              stored.activeIndex = 0;
-            } else if (stored.activeIndex >= stored.accounts.length) {
-              stored.activeIndex = stored.accounts.length - 1;
-            } else if (stored.activeIndex > idx) {
-              stored.activeIndex--;
-            }
+            adjustActiveIndexAfterRemoval(stored, idx);
             await saveAccounts(stored);
             console.log(c.green(`Removed account #${num}.`));
           } else {
