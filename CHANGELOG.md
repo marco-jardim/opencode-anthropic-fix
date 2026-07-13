@@ -2,6 +2,20 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.2.1] — 2026-07-13
+
+### Added
+
+- **`single` account-selection strategy** (#20): use exactly one account and never auto-switch. While the active
+  account is available it handles every request; when it fails or is rate-limited the request stops and alerts
+  (`No available Anthropic account for request.`) instead of falling over to another account, and it auto-resumes on
+  the same account once the rate-limit window clears. Unlike `round-robin`, it stays cache-friendly (keeps
+  `prompt-caching-scope`) because it never leaves the account — ideal for keeping separate accounts (e.g. work vs
+  personal) from ever mixing. Enable via `opencode-anthropic-auth strategy single`,
+  `OPENCODE_ANTHROPIC_STRATEGY=single`, or `"account_selection_strategy": "single"`. Wired through `selectAccount`
+  (`lib/rotation.mjs`), `VALID_STRATEGIES` (`lib/config.mjs`), the CLI, and the `/anthropic set strategy` command;
+  covered by new unit tests in `lib/rotation.test.mjs`, `lib/config.test.mjs`, and `cli.test.mjs`.
+
 ## [0.2.0] — 2026-07-13
 
 ### Agent-native remediation (Waves 0–4)
