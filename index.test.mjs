@@ -78,10 +78,70 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
-import { AnthropicAuthPlugin } from "./index.mjs";
+import {
+  AnthropicAuthPlugin,
+  createDebugCorrelationId,
+  createDebugOutgoingHeadersEntry,
+  createDebugRequestDump,
+  createDebugResponseHeadersEntry,
+  isDebugSinkEnabled,
+} from "./index.mjs";
 import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import { loadConfig, loadConfigFresh, saveConfig as saveRuntimeConfig, DEFAULT_CONFIG } from "./lib/config.mjs";
+
+describe("debug correlation IDs", () => {
+  it("uses one monotonic correlation ID across all debug records for an attempt", () => {
+    const firstCorrelationId = createDebugCorrelationId();
+    const correlationId = createDebugCorrelationId();
+    const timestamp = "2026-07-08T12:34:56.789Z";
+    const dumpTimestamp = timestamp.replace(/[:.]/g, "-");
+    const dump = createDebugRequestDump(
+      correlationId,
+      dumpTimestamp,
+      JSON.stringify({ authorization: "Bearer secret-token", message: "diagnostic" }),
+    );
+    const outgoingEntry = createDebugOutgoingHeadersEntry(correlationId, timestamp, {
+      authorization: "Bearer secret-token",
+    });
+    const responseEntry = createDebugResponseHeadersEntry(
+      correlationId,
+      timestamp,
+      { status: 200, ok: true },
+      { account: true, accountManager: true, rateLimitHeaders: {}, allHeaders: {} },
+    );
+
+    expect(firstCorrelationId).toMatch(/^[0-9a-f]{8}-[0-9a-z]{4,}$/);
+    expect(correlationId).toMatch(/^[0-9a-f]{8}-[0-9a-z]{4,}$/);
+    expect(correlationId).not.toBe(firstCorrelationId);
+    expect(parseInt(correlationId.split("-").at(-1), 36)).toBe(parseInt(firstCorrelationId.split("-").at(-1), 36) + 1);
+
+    const outgoingCorrelationId = outgoingEntry.match(/\| corr=([^ |]+) \|/)?.[1];
+    const responseCorrelationId = responseEntry.match(/\| corr=([^ |]+) \|/)?.[1];
+    expect(outgoingCorrelationId).toBe(correlationId);
+    expect(responseCorrelationId).toBe(correlationId);
+    expect(dump.filename).toContain(`-${correlationId}.json`);
+
+    const parsedDump = JSON.parse(dump.content);
+    expect(parsedDump.correlationId).toBe(correlationId);
+    expect(parsedDump.timestamp).toBe(dumpTimestamp);
+    expect(parsedDump.bodyRedacted).not.toMatch(/Bearer [A-Za-z0-9]/);
+  });
+
+  it("disables all debug-file writes when both debug flags are off", () => {
+    const config = {
+      ...DEFAULT_CONFIG,
+      debug: false,
+      token_economy: { ...DEFAULT_CONFIG.token_economy, debug_dump_bodies: false },
+    };
+    const writeDebugFile = vi.fn();
+
+    if (isDebugSinkEnabled(config, "body")) writeDebugFile("body");
+    if (isDebugSinkEnabled(config, "headers")) writeDebugFile("headers");
+
+    expect(writeDebugFile).not.toHaveBeenCalled();
+  });
+});
 
 beforeEach(() => {
   delete process.env.DISABLE_INTERLEAVED_THINKING;

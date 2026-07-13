@@ -3096,12 +3096,14 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 // mutates system[0] each turn, invalidating the prompt cache.
                 const finalBody = body;
 
+                const correlationId = createDebugCorrelationId();
+
                 // Opt-in: dump the OUTGOING body (post-cch) so diagnostics reflect
                 // exactly what went on the wire. Previously dumped `body` which
                 // still had the cch=00000 placeholder — that confused debugging.
                 // Rotates at 10 files to cap disk usage. Files live under
                 // ~/.opencode/opencode-anthropic-fix/request-dumps/.
-                if (config.token_economy?.debug_dump_bodies === true && typeof finalBody === "string") {
+                if (isDebugSinkEnabled(config, "body") && typeof finalBody === "string") {
                   try {
                     const fs = await import("node:fs");
                     const path = await import("node:path");
@@ -3117,7 +3119,8 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       fs.unlinkSync(path.join(dir, existing.shift()));
                     }
                     const ts = new Date().toISOString().replace(/[:.]/g, "-");
-                    fs.writeFileSync(path.join(dir, `req-${ts}.json`), redactString(finalBody));
+                    const dump = createDebugRequestDump(correlationId, ts, finalBody);
+                    fs.writeFileSync(path.join(dir, dump.filename), dump.content);
                   } catch {
                     // Disk full, permissions, whatever — never block the request.
                   }
@@ -3126,7 +3129,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 // Execute the request
                 let response;
                 try {
-                  if (config.debug) {
+                  if (isDebugSinkEnabled(config, "headers")) {
                     try {
                       const { existsSync, renameSync, statSync, unlinkSync, writeFileSync } = await import("node:fs");
                       const { join } = await import("node:path");
@@ -3137,11 +3140,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                         renameSync(debugFile, rotatedFile);
                       }
                       const ts = new Date().toISOString();
-                      const entry = [
-                        `\n=== ${ts} | OUTGOING request headers ===`,
-                        JSON.stringify(redactSecrets(requestHeaders), null, 2),
-                        "",
-                      ].join("\n");
+                      const entry = createDebugOutgoingHeadersEntry(correlationId, ts, requestHeaders);
                       writeFileSync(debugFile, entry, { flag: "a" });
                     } catch (e) {
                       debugLog("failed to write outgoing request headers to debug-headers.log", e);
@@ -3205,7 +3204,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 
                 // Debug: log all response headers to file for diagnosis
                 // Placed BEFORE the response.ok guard so we capture headers on ALL responses
-                if (config.debug) {
+                if (isDebugSinkEnabled(config, "headers")) {
                   const rlHeaders = {};
                   const allHeaders = {};
                   response.headers.forEach((value, key) => {
@@ -3238,12 +3237,12 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       renameSync(debugFile, rotatedFile);
                     }
                     const ts = new Date().toISOString();
-                    const entry = [
-                      `\n=== ${ts} | status=${response.status} ok=${response.ok} account=${!!account} mgr=${!!accountManager} ===`,
-                      `Rate-limit headers: ${JSON.stringify(redactedRlHeaders, null, 2)}`,
-                      `All headers: ${JSON.stringify(redactedAllHeaders, null, 2)}`,
-                      "",
-                    ].join("\n");
+                    const entry = createDebugResponseHeadersEntry(correlationId, ts, response, {
+                      account: !!account,
+                      accountManager: !!accountManager,
+                      rateLimitHeaders: redactedRlHeaders,
+                      allHeaders: redactedAllHeaders,
+                    });
                     writeFileSync(debugFile, entry, { flag: "a" });
                   } catch (e) {
                     debugLog("failed to write debug-headers.log", e);
@@ -4461,6 +4460,40 @@ function createInitialSessionMetrics() {
 }
 
 const sessionMetrics = createInitialSessionMetrics();
+const _debugSessionId = randomUUID().slice(0, 8);
+let _debugReqSeq = 0;
+
+export function createDebugCorrelationId() {
+  return `${_debugSessionId}-${(++_debugReqSeq).toString(36).padStart(4, "0")}`;
+}
+
+export function isDebugSinkEnabled(config, sink) {
+  return sink === "body" ? config.token_economy?.debug_dump_bodies === true : Boolean(config.debug);
+}
+
+export function createDebugRequestDump(correlationId, timestamp, finalBody) {
+  return {
+    filename: `req-${timestamp}-${correlationId}.json`,
+    content: JSON.stringify({ correlationId, timestamp, bodyRedacted: redactString(finalBody) }),
+  };
+}
+
+export function createDebugOutgoingHeadersEntry(correlationId, timestamp, requestHeaders) {
+  return [
+    `\n=== ${timestamp} | corr=${correlationId} | OUTGOING request headers ===`,
+    JSON.stringify(redactSecrets(requestHeaders), null, 2),
+    "",
+  ].join("\n");
+}
+
+export function createDebugResponseHeadersEntry(correlationId, timestamp, response, debugHeaders) {
+  return [
+    `\n=== ${timestamp} | corr=${correlationId} | status=${response.status} ok=${response.ok} account=${debugHeaders.account} mgr=${debugHeaders.accountManager} ===`,
+    `Rate-limit headers: ${JSON.stringify(debugHeaders.rateLimitHeaders, null, 2)}`,
+    `All headers: ${JSON.stringify(debugHeaders.allHeaders, null, 2)}`,
+    "",
+  ].join("\n");
+}
 
 // ---------------------------------------------------------------------------
 // Adaptive 1M context state
