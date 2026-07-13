@@ -48,6 +48,12 @@
      Thinking ctx-mgmt: jq_({hasThinking}) => {edits:[{type:"clear_thinking_20251015",
        keep:"all"}]} only when thinking active — plugin matches. -->
 
+> **Wave 3 implementation note:** Mimicry, token-economy, session-metrics, and
+> pure retry-decision logic were extracted from `index.mjs` into
+> `lib/mimicry/*`, `lib/token-economy/*`, `lib/session-metrics.mjs`, and
+> `lib/retry/overload-loop.mjs`. The extraction preserved wire behavior
+> byte-for-byte; `index.mjs` remains the effectful fetch/OAuth/retry shell.
+
 ## Binary-verified beta registry (2.1.195, 28 entries in `Udd`)
 
 These are the exact `OE("internal_label", "beta-flag")` frozen registrations in the
@@ -175,11 +181,12 @@ Verified by diffing the linux-x64 native binaries of 2.1.154 and 2.1.159.
 ### 2.1.151–2.1.154 changes (Opus 4.8 launch, 2026-05-28)
 
 - **`claude-opus-4-8`** is a new adaptive-thinking model (successor to 4.7). The
-  plugin detects it via `isOpus48Model()` and routes it identically to 4.6/4.7
-  for thinking, effort, 1M context, and simple-system-prompt eligibility.
+  plugin detects it via `isOpus48Model()` in `lib/mimicry/models.mjs` and routes
+  it identically to 4.6/4.7 for thinking, effort, 1M context, and
+  simple-system-prompt eligibility.
 - **Adaptive thinking is mandatory.** Manual `thinking: {type:"enabled",
 budget_tokens:N}` returns a **400** on Opus 4.7 AND 4.8. The plugin's
-  `normalizeThinkingBlock()` converts any incoming manual thinking to
+  `normalizeThinkingBlock()` in `lib/mimicry/models.mjs` converts any incoming manual thinking to
   `{type:"adaptive"}` for these models; top-level `effort` is moved into
   `output_config.effort` (default `high` for Pro/Max).
 - **Fast mode.** Per Anthropic fast-mode docs, `speed:"fast"` (beta
@@ -284,7 +291,18 @@ This document explains, at implementation level, how the plugin mimics Claude Co
 
 Primary code references:
 
-- `index.mjs`
+- `index.mjs` (effectful fetch interceptor, OAuth flow, and retry shell)
+- `lib/mimicry/headers.mjs`
+- `lib/mimicry/request-body.mjs`
+- `lib/mimicry/response-stream.mjs`
+- `lib/mimicry/system-prompt.mjs`
+- `lib/mimicry/models.mjs`
+- `lib/mimicry/cache.mjs`
+- `lib/mimicry/request-helpers.mjs`
+- `lib/token-economy/transforms.mjs`
+- `lib/token-economy/microcompact.mjs`
+- `lib/session-metrics.mjs`
+- `lib/retry/overload-loop.mjs`
 - `lib/config.mjs`
 
 ## 1) Control switch (on/off)
@@ -336,8 +354,8 @@ Inside `auth.loader().fetch(...)`:
 
 1. transform URL (`transformRequestUrl`)
 2. select account and resolve token (including refresh when needed)
-3. transform body (`transformRequestBody`) with runtime context
-4. build headers (`buildRequestHeaders`)
+3. transform body (`transformRequestBody` in `lib/mimicry/request-body.mjs`) with runtime context
+4. build headers (`buildRequestHeaders` in `lib/mimicry/headers.mjs`)
 5. execute `fetch`
 
 Important: body transform happens per-attempt/per-account (not only once), so `metadata.user_id` includes the actual `accountId` in use for that attempt.
@@ -381,7 +399,7 @@ sequenceDiagram
 
 ### 4.1 Headers always applied
 
-`buildRequestHeaders(...)` always ensures:
+`buildRequestHeaders(...)` in `lib/mimicry/headers.mjs` always ensures:
 
 - `authorization: Bearer <token>`
   - default token: account OAuth access token
@@ -426,7 +444,7 @@ It also injects optional env-driven headers:
 - `x-client-request-id: <uuid>` (v2.1.84+, unique per request for debugging stream timeouts)
   - ⚠ 2.1.195: CC's first-party fetch middleware (`Ukd`) sets `x-client-request-id`
     to `crypto.randomUUID()` on **every** first-party request when absent. If the
-    plugin currently strips/omits it (see `index.mjs` ~L8042), that is a presence/
+    plugin currently strips/omits it (see `lib/mimicry/headers.mjs`), that is a presence/
     absence drift — CC always carries this header. Re-emit a random UUID. See
     `docs/claude-code-2.1.195-analysis.md` §7.
 
@@ -477,7 +495,8 @@ The plugin instead sends a standard Chrome browser User-Agent. Rationale:
 
 ### 5.1 Beta composition rule in the plugin
 
-Function: `buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provider, customBetas, strategy, requestPath, hasFileReferences)`
+Function in `lib/mimicry/headers.mjs`:
+`buildAnthropicBetaHeader(incomingBeta, signatureEnabled, model, provider, customBetas, strategy, requestPath, hasFileReferences)`
 
 - starts with `oauth-2025-04-20`
 - preserves incoming betas (`incomingBeta`) and deduplicates on merge
@@ -619,7 +638,8 @@ This plugin no longer auto-includes `fine-grained-tool-streaming-2025-05-14` in 
 
 ### 6.1 Block normalization
 
-`normalizeSystemTextBlocks(system)` converts `system` into an array of objects:
+`normalizeSystemTextBlocks(system)` in `lib/mimicry/system-prompt.mjs` converts
+`system` into an array of objects:
 
 - strings become `{ type: "text", text: "..." }`
 - objects with string `text` are preserved
@@ -627,7 +647,7 @@ This plugin no longer auto-includes `fine-grained-tool-streaming-2025-05-14` in 
 
 ### 6.2 Text sanitization
 
-`sanitizeSystemText(text)` applies:
+`sanitizeSystemText(text)` in `lib/mimicry/system-prompt.mjs` applies:
 
 - `OpenCode` => `Claude Code`
 - `opencode`/`OpenCode` variants => `Claude`
@@ -647,7 +667,9 @@ All three values are tracked in `KNOWN_IDENTITY_STRINGS` for deduplication durin
 
 ### 6.4 Cache scoping architecture
 
-`buildSystemPromptBlocks(...)` now mirrors the real CC's three-path cache scoping strategy (src/utils/api.ts `splitSysPromptPrefix()`):
+`buildSystemPromptBlocks(...)` in `lib/mimicry/system-prompt.mjs` now mirrors the
+real CC's three-path cache scoping strategy (src/utils/api.ts
+`splitSysPromptPrefix()`):
 
 1. Sanitizes and filters all blocks (removes pre-existing billing headers and identity strings)
 2. Delegates to `splitSysPromptPrefix()` which assigns a `cacheScope` to each block
@@ -667,7 +689,7 @@ TTL is controlled by `cache_policy.ttl` config (default `"1h"`). When `ttl: "off
 
 **Role-scoped TTL applies to system blocks too (request-wide consistency).** The
 TTL written here is not the raw `cache_policy.ttl`; it is the **resolved** TTL
-from `resolveCacheTtl()` — the same value stamped on the tool and message
+from `resolveCacheTtl()` in `lib/mimicry/cache.mjs` — the same value stamped on the tool and message
 breakpoints. For the main interactive thread it stays `"1h"`; for subagent
 requests (marked by opencode with the `x-parent-session-id` header) and other
 non-main roles (`title`/`small`/`empty`) with role-scoping enabled, it
@@ -844,7 +866,8 @@ Failures at either gate result in 401 or billing-related 403 errors.
 
 ## 7) Body fields related to mimicry
 
-When mimicry is enabled, `transformRequestBody(...)` adds/updates:
+When mimicry is enabled, `transformRequestBody(...)` in
+`lib/mimicry/request-body.mjs` adds/updates:
 
 - `metadata.user_id` with format:
   - `user_<persistentUserId>_account_<accountId>_session_<sessionId>`
@@ -887,12 +910,15 @@ When `fast_mode` config is enabled and the model is Opus 4.6, Opus 4.7, or Opus 
 ```
 
 This enables server-side fast-mode processing. The plugin emits `fast-mode-2026-02-01` in `anthropic-beta`
-in lockstep with the body field: both are added together in `buildRequestHeaders` after `transformRequestBody`
+in lockstep with the body field: both are added together in
+`buildRequestHeaders` (`lib/mimicry/headers.mjs`) after `transformRequestBody`
+(`lib/mimicry/request-body.mjs`)
 has already injected `speed:"fast"`. Detection is structural (`requestBody.includes('"speed":"fast"')`), so the
 header and body cannot drift. The beta is NOT added at the pre-transform `computedBetaHeader` call site, keeping
 the session latch clean. Can be disabled via `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE=1`.
 
-Eligibility is `isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model)`.
+Eligibility is `isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model)`
+from `lib/mimicry/models.mjs`.
 Sonnet is NOT fast-mode eligible. Note: switching `speed` invalidates system +
 message prompt caches, so it should only be toggled deliberately.
 

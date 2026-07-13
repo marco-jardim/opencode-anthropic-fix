@@ -22,12 +22,12 @@ export default defineConfig({
           branches: 75,
         },
         "index.mjs": {
-          statements: 56,
-          branches: 52,
+          statements: 50,
+          branches: 47,
         },
         "cli.mjs": {
-          statements: 69,
-          branches: 60,
+          statements: 70,
+          branches: 61,
         },
       },
     },

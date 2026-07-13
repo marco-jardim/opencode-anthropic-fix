@@ -50,7 +50,7 @@ Git hooks enforce quality automatically:
 
 ```
 opencode-anthropic-auth/
-  index.mjs              Plugin entry point (OAuth flow, fetch interceptor, retry loop, slash commands)
+  index.mjs              Thin plugin shell (OAuth, fetch interceptor, effectful retry loop, slash commands)
   index.test.mjs         Plugin integration tests (lifecycle, fetch, transforms, slash commands)
   cli.mjs                Standalone CLI (17 subcommands, auth flows, live usage quotas)
   cli.test.mjs           CLI command tests (auth + account management + IO capture)
@@ -60,6 +60,12 @@ opencode-anthropic-auth/
   .prettierignore        Prettier ignore patterns
   .husky/                Git hooks (pre-commit: lint-staged, pre-push: test + format check)
   lib/
+    mimicry/             Wire mimicry (models, cache, response stream, system prompt, request helpers/body, headers)
+    token-economy/       Token transforms and microcompaction decisions
+    session-metrics.mjs  Shared token-economy session metrics singleton
+    retry/
+      overload-loop.mjs  Pure retry/overload decisions
+    tuning.mjs           Retry and token-refresh tuning constants
     oauth.mjs            Shared OAuth helpers (authorize, exchange, revoke) — used by both plugin and CLI
     accounts.mjs         AccountManager class (pool management, selection, persistence)
     accounts.test.mjs    AccountManager tests
@@ -81,6 +87,18 @@ opencode-anthropic-auth/
 
 ## Architecture Overview
 
+`index.mjs` is the thin, effectful interceptor/OAuth/retry shell. It delegates
+wire behavior to `lib/mimicry/*` (`models`, `cache`, `response-stream`,
+`system-prompt`, `request-helpers`, `request-body`, and `headers`), token economy
+to `lib/token-economy/*` (`transforms` and `microcompact`) plus
+`lib/session-metrics.mjs`, and pure retry decisions to
+`lib/retry/overload-loop.mjs`, with tuning constants in `lib/tuning.mjs`.
+
+Keep top-level `index.mjs` exports function-valued. Test-only internals belong on
+`AnthropicAuthPlugin.__testing__` or `AnthropicAuthPlugin.__cacheInternals`.
+Modules under `lib/` never import `index.mjs`; this dependency direction prevents
+cycles.
+
 ```mermaid
 graph TB
     subgraph OpenCode
@@ -89,11 +107,11 @@ graph TB
         OC -->|/anthropic| SlashCmd[Slash Command Handler]
     end
 
-    subgraph Plugin["index.mjs (Plugin)"]
+    subgraph Plugin["index.mjs (Thin Plugin Shell)"]
         Auth[Auth Methods]
         Loader[Auth Loader]
-        SysTransform[System Prompt Transform]
         FetchInterceptor[Fetch Interceptor]
+        RetryLoop[Effectful Retry Loop]
         SlashCmd -->|in-process| CLI[cli.mjs dispatch]
         SlashCmd -->|login/reauth| OAuthFlow[Slash OAuth Flow]
     end
@@ -105,6 +123,11 @@ graph TB
         Backoff[Backoff Calculator]
         Config[Config Loader]
         Storage[Account Storage]
+        Mimicry[lib/mimicry/*]
+        TokenEconomy[lib/token-economy/*]
+        SessionMetrics[session-metrics.mjs]
+        RetryDecisions[retry/overload-loop.mjs]
+        Tuning[tuning.mjs]
     end
 
     subgraph External
@@ -118,7 +141,13 @@ graph TB
     Auth -->|add account| AM
     Loader -->|init| AM
     FetchInterceptor -->|select account| AM
-    FetchInterceptor -->|build headers| Anthropic
+    FetchInterceptor -->|delegate wire transforms| Mimicry
+    FetchInterceptor --> RetryLoop
+    FetchInterceptor --> TokenEconomy
+    TokenEconomy --> SessionMetrics
+    RetryLoop --> RetryDecisions
+    RetryDecisions --> Tuning
+    RetryLoop -->|send request| Anthropic
     FetchInterceptor -->|on account-specific errors| Backoff
     AM -->|select| Rotation
     AM -->|persist| Storage
