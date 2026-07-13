@@ -67,10 +67,10 @@ Do not run `git commit` manually for small edits — `pre-commit` runs
 - **System prompt sanitization:** "OpenCode" → "Claude Code" is mandatory (the
   API blocks the literal string "OpenCode"). This rewrite applies **only** to the
   system prompt sent to Anthropic — NEVER to code, docs (including this file), or
-  paths. Paths like `/path/to/opencode-foo` must be preserved. (If a doc appears to
-  contain a broken `"Claude Code" → "Claude Code"` rule or a `Claude-anthropic-fix`
-  path, you are reading a sanitized copy — the on-disk source says `OpenCode` and
-  `opencode-anthropic-fix`.)
+  paths. Paths like `/path/to/opencode-foo` must be preserved. (If a doc's
+  sanitization rule appears to have two identical sides, or shows a
+  `Claude-anthropic-fix` path, you are reading a sanitized copy — the real on-disk
+  source says `OpenCode → Claude Code` and `opencode-anthropic-fix`.)
 - **Tool names get an `mcp_` prefix on the way out and are stripped on the way
   back** (response stream transform). Keep both sides in sync.
 - **Config is runtime-mutable.** `/anthropic set ...` writes to
