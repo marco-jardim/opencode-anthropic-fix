@@ -28,3 +28,4 @@ debug-headers.log
 debug-headers.log.1
 request-dumps/
 opencode-anthropic-diagnose-*.json
+dist/
