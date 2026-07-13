@@ -1,0 +1,49 @@
+{
+  "headers": {
+    "anthropic-beta": "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-version": "2023-06-01",
+    "authorization": "Bearer test-access",
+    "content-type": "application/json",
+    "user-agent": "claude-cli/2.1.195 (external, cli)",
+    "x-app": "cli",
+    "x-claude-code-session-id": "<normalized>",
+    "x-client-request-id": "<normalized>",
+    "x-stainless-arch": "x64",
+    "x-stainless-lang": "js",
+    "x-stainless-os": "Windows",
+    "x-stainless-package-version": "0.94.0",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v24.15.0",
+    "x-stainless-timeout": "600"
+  },
+  "body": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 8000,
+    "system": [
+      {
+        "type": "text",
+        "text": "x-anthropic-billing-header: cc_version=2.1.195.325; cc_entrypoint=cli; cch=00000;"
+      },
+      {
+        "type": "text",
+        "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "cache_control": {
+          "type": "ephemeral",
+          "ttl": "1h"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ],
+    "temperature": 1,
+    "metadata": {
+      "user_id": "<normalized>"
+    }
+  }
+}
