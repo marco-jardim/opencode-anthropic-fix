@@ -37,6 +37,7 @@ import {
 import { callHaiku } from "./lib/haiku-call.mjs";
 import { summarize as rollingSummarize } from "./lib/rolling-summarizer.mjs";
 import { staleReadEviction, perToolClassPrune } from "./lib/message-transform.mjs";
+import { redactSecrets, redactString } from "./lib/redact.mjs";
 
 // Max times a single logical request may fall back from fast->standard speed on
 // the same account before giving up the fast attempt entirely. 1 is enough: one
@@ -3116,7 +3117,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       fs.unlinkSync(path.join(dir, existing.shift()));
                     }
                     const ts = new Date().toISOString().replace(/[:.]/g, "-");
-                    fs.writeFileSync(path.join(dir, `req-${ts}.json`), finalBody);
+                    fs.writeFileSync(path.join(dir, `req-${ts}.json`), redactString(finalBody));
                   } catch {
                     // Disk full, permissions, whatever — never block the request.
                   }
@@ -3125,6 +3126,27 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                 // Execute the request
                 let response;
                 try {
+                  if (config.debug) {
+                    try {
+                      const { existsSync, renameSync, statSync, unlinkSync, writeFileSync } = await import("node:fs");
+                      const { join } = await import("node:path");
+                      const debugFile = join(getConfigDir(), "debug-headers.log");
+                      const rotatedFile = `${debugFile}.1`;
+                      if (existsSync(debugFile) && statSync(debugFile).size > 2 * 1024 * 1024) {
+                        if (existsSync(rotatedFile)) unlinkSync(rotatedFile);
+                        renameSync(debugFile, rotatedFile);
+                      }
+                      const ts = new Date().toISOString();
+                      const entry = [
+                        `\n=== ${ts} | OUTGOING request headers ===`,
+                        JSON.stringify(redactSecrets(requestHeaders), null, 2),
+                        "",
+                      ].join("\n");
+                      writeFileSync(debugFile, entry, { flag: "a" });
+                    } catch (e) {
+                      debugLog("failed to write outgoing request headers to debug-headers.log", e);
+                    }
+                  }
                   response = await fetch(requestInput, {
                     ...requestInit,
                     body: finalBody,
@@ -3192,6 +3214,8 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       rlHeaders[key] = value;
                     }
                   });
+                  const redactedRlHeaders = redactSecrets(rlHeaders);
+                  const redactedAllHeaders = redactSecrets(allHeaders);
                   debugLog(
                     "response status:",
                     response.status,
@@ -3202,17 +3226,22 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     "accountManager:",
                     !!accountManager,
                   );
-                  debugLog("ALL response headers:", allHeaders);
+                  debugLog("ALL response headers:", redactedAllHeaders);
                   // Write to file for reliable access
                   try {
-                    const { writeFileSync } = await import("node:fs");
+                    const { existsSync, renameSync, statSync, unlinkSync, writeFileSync } = await import("node:fs");
                     const { join } = await import("node:path");
                     const debugFile = join(getConfigDir(), "debug-headers.log");
+                    const rotatedFile = `${debugFile}.1`;
+                    if (existsSync(debugFile) && statSync(debugFile).size > 2 * 1024 * 1024) {
+                      if (existsSync(rotatedFile)) unlinkSync(rotatedFile);
+                      renameSync(debugFile, rotatedFile);
+                    }
                     const ts = new Date().toISOString();
                     const entry = [
                       `\n=== ${ts} | status=${response.status} ok=${response.ok} account=${!!account} mgr=${!!accountManager} ===`,
-                      `Rate-limit headers: ${JSON.stringify(rlHeaders, null, 2)}`,
-                      `All headers: ${JSON.stringify(allHeaders, null, 2)}`,
+                      `Rate-limit headers: ${JSON.stringify(redactedRlHeaders, null, 2)}`,
+                      `All headers: ${JSON.stringify(redactedAllHeaders, null, 2)}`,
                       "",
                     ].join("\n");
                     writeFileSync(debugFile, entry, { flag: "a" });

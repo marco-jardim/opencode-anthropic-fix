@@ -20,3 +20,9 @@ RESEARCH_SUMMARY.txt
 .claude/
 .opencode/
 .wrangler/
+
+# debug / diagnostic artifacts (may contain request/response data)
+debug-headers.log
+debug-headers.log.1
+request-dumps/
+opencode-anthropic-diagnose-*.json
