@@ -59,6 +59,7 @@ import {
   stripMcpPrefixFromParsedEvent,
 } from "./lib/mimicry/response-stream.mjs";
 import { isFalsyEnv, isTruthyEnv } from "./lib/env.mjs";
+import { sessionMetrics, createInitialSessionMetrics, getAverageCacheHitRate } from "./lib/session-metrics.mjs";
 import { resolveCacheTtl, shouldPlaceToolBreakpoint, updateBoundaryStability } from "./lib/mimicry/cache.mjs";
 import {
   buildSystemPromptBlocks,
@@ -4460,63 +4461,9 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
 // Session-level cache & cost tracking (Phase 4)
 // ---------------------------------------------------------------------------
 
-/** @type {{turns: number, totalInput: number, totalOutput: number, totalCacheRead: number, totalCacheWrite: number, totalWebSearchRequests: number, recentCacheRates: number[], sessionCostUsd: number, costBreakdown: {input: number, output: number, cacheRead: number, cacheWrite: number}, sessionStartTime: number, lastQuota: {tokens: number, requests: number, inputTokens: number, updatedAt: number, fiveHour: {utilization: number, resets_at: string|null, status: string|null, surpassedThreshold: number|null}, sevenDay: {utilization: number, resets_at: string|null, status: string|null, surpassedThreshold: number|null}, overallStatus: string|null, representativeClaim: string|null, fallback: string|null, fallbackPercentage: number|null, overageStatus: string|null, overageReason: string|null, lastPollAt: number}, lastStopReason: string | null, perModel: Record<string, {input: number, output: number, cacheRead: number, cacheWrite: number, costUsd: number, turns: number}>, lastModelId: string | null, lastRequestBody: string | null, tokenBudget: {limit: number, used: number, continuations: number, outputHistory: number[]}}} */
 /** Module-level config ref for functions outside AnthropicAuthPlugin closure. */
 let _pluginConfig = null;
 
-/**
- * Factory for the initial sessionMetrics shape. Returns a fresh object each
- * call so the reset helper (and any future test hook) doesn't alias nested
- * state (lastQuota, perModel, costBreakdown, tokenBudget, usedTools Set).
- * Keep this in sync with the type annotation above.
- */
-function createInitialSessionMetrics() {
-  return {
-    turns: 0,
-    totalInput: 0,
-    totalOutput: 0,
-    totalCacheRead: 0,
-    totalCacheWrite: 0,
-    totalWebSearchRequests: 0,
-    recentCacheRates: [], // rolling window of last 5 turns
-    sessionCostUsd: 0,
-    costBreakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    sessionStartTime: Date.now(),
-    lastQuota: {
-      tokens: 0,
-      requests: 0,
-      inputTokens: 0,
-      updatedAt: 0,
-      // Window-based unified headers from response
-      fiveHour: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
-      sevenDay: { utilization: 0, resets_at: null, status: null, surpassedThreshold: null },
-      // Overall/fallback/overage from response headers
-      overallStatus: null,
-      representativeClaim: null,
-      fallback: null,
-      fallbackPercentage: null,
-      overageStatus: null,
-      overageReason: null,
-      // Usage endpoint polling (A6)
-      lastPollAt: 0,
-    },
-    lastStopReason: null, // tracks most recent stop_reason for output cap escalation
-    perModel: {}, // Map<modelId, { input, output, cacheRead, cacheWrite, costUsd, turns }>
-    lastModelId: null,
-    lastRequestBody: null, // Last intercepted request body (JSON string, capped 2MB) for /anthropic context
-    /** Token budget tracking (A9) */
-    tokenBudget: {
-      limit: 0, // 0 = unset
-      used: 0, // accumulated output tokens
-      continuations: 0,
-      outputHistory: [], // last 5 output token deltas
-    },
-    /** Tools used in this session (populated from assistant tool_use blocks in messages) */
-    usedTools: new Set(),
-  };
-}
-
-const sessionMetrics = createInitialSessionMetrics();
 const _debugSessionId = randomUUID().slice(0, 8);
 let _debugReqSeq = 0;
 
@@ -5413,16 +5360,6 @@ function updateSessionMetrics(usage, model) {
       sessionMetrics.tokenBudget.outputHistory.shift();
     }
   }
-}
-
-/**
- * Get rolling average cache hit rate over last 5 turns.
- * @returns {number} 0-1
- */
-function getAverageCacheHitRate() {
-  const rates = sessionMetrics.recentCacheRates;
-  if (rates.length === 0) return 0;
-  return rates.reduce((a, b) => a + b, 0) / rates.length;
 }
 
 /**
