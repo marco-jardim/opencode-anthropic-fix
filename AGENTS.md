@@ -12,7 +12,7 @@ architecture, `README.md` for user-facing features, and
 OpenCode plugin + standalone CLI (`index.mjs` + `cli.mjs`, both ESM `.mjs`) that
 lets Claude Pro/Max subscribers use OpenCode over OAuth, with multi-account
 rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
-(typing is via JSDoc). One production dep: `@openauthjs/openauth`.
+(typing is via JSDoc). Two production deps: `@openauthjs/openauth` and `xxhash-wasm`.
 
 ## Layout (what matters)
 
@@ -39,7 +39,7 @@ rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
 ## Commands
 
 ```
-npm test              # full suite (root + worker/sync-watcher, ~13s, ~951 tests)
+npm test              # full suite (root + worker/sync-watcher, ~14s)
 npm run test:watch
 npx vitest run <name> # single file by name substring
 npm run lint          # eslint flat config
@@ -65,8 +65,12 @@ Do not run `git commit` manually for small edits — `pre-commit` runs
   `docs/mimese-http-header-system-prompt.md`, tests in `index.test.mjs`, and
   `test/conformance/regression.test.mjs`.
 - **System prompt sanitization:** "OpenCode" → "Claude Code" is mandatory (the
-  API blocks the literal string "OpenCode"). Paths like
-  `/path/to/opencode-foo` must be preserved.
+  API blocks the literal string "OpenCode"). This rewrite applies **only** to the
+  system prompt sent to Anthropic — NEVER to code, docs (including this file), or
+  paths. Paths like `/path/to/opencode-foo` must be preserved. (If a doc appears to
+  contain a broken `"Claude Code" → "Claude Code"` rule or a `Claude-anthropic-fix`
+  path, you are reading a sanitized copy — the on-disk source says `OpenCode` and
+  `opencode-anthropic-fix`.)
 - **Tool names get an `mcp_` prefix on the way out and are stripped on the way
   back** (response stream transform). Keep both sides in sync.
 - **Config is runtime-mutable.** `/anthropic set ...` writes to
@@ -120,7 +124,7 @@ Do not run `git commit` manually for small edits — `pre-commit` runs
 
 ## Don't do
 
-- Don't add a second production dependency without strong reason — the bundled
+- Don't add another production dependency without strong reason — the bundled
   output size and mimicry surface area both matter.
 - Don't introduce TypeScript — the project is deliberately `.mjs` + JSDoc.
 - Don't touch `rateLimitResetTimes` / `consecutiveFailures` schema in
