@@ -1153,6 +1153,7 @@ export async function cmdStrategy(arg) {
       sticky: "Stay on one account until it fails or is rate-limited",
       "round-robin": "Rotate through accounts on every request",
       hybrid: "Prefer healthy accounts, rotate when degraded",
+      single: "Use one account only; stop and alert when it fails or is rate-limited",
     };
 
     for (const s of VALID_STRATEGIES) {

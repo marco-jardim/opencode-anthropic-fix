@@ -26,6 +26,7 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
   return {
     ...original,
     loadConfig: vi.fn(() => ({ ...original.DEFAULT_CONFIG })),
+    saveConfig: vi.fn(),
     getConfigPath: vi.fn(() => "/home/user/.config/opencode/anthropic-auth.json"),
     getConfigDir: vi.fn(() => "/home/user/.config/opencode"),
   };
@@ -101,9 +102,11 @@ import {
   cmdConfig,
   cmdDiagnose,
   cmdHelp,
+  cmdStrategy,
   main,
 } from "./cli.mjs";
 import { loadAccounts, saveAccounts } from "./lib/storage.mjs";
+import { saveConfig } from "./lib/config.mjs";
 import { authorize, exchange, refreshToken, revoke } from "./lib/oauth.mjs";
 import { createInterface } from "node:readline/promises";
 import { exec } from "node:child_process";
@@ -119,6 +122,15 @@ beforeEach(() => {
   mockFetch.mockReset();
   // Default: all fetches fail gracefully (usage endpoints return null)
   mockFetch.mockResolvedValue({ ok: false, status: 500 });
+});
+
+describe("cmdStrategy", () => {
+  it("accepts the single strategy", async () => {
+    const code = await cmdStrategy("single");
+
+    expect(code).toBe(0);
+    expect(saveConfig).toHaveBeenCalledWith({ account_selection_strategy: "single" });
+  });
 });
 
 describe("diagnose command", () => {
