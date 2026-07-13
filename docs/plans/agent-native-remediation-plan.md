@@ -74,14 +74,19 @@ carries the ENVIRONMENT block (`D:\git\opencode-anthropic-fix`, win32, pwsh) and
 
 ### A5. Per-phase ceremony (applies to _every_ phase)
 
-1. **Pre-flight check** — run the phase's listed pre-flight before writing code. If pre-flight fails,
-   fix the environment first (or STOP if class-2).
+1. **Pre-flight check** — run the phase's listed pre-flight before writing code. **Fix every issue you
+   find during pre-flight**, with ONE exception: if the issue is explicitly scoped to a LATER phase in
+   this plan, do NOT fix it now — record it in `docs/plans/qa/preflight-notes.md` (phase, issue,
+   file:line, which future phase owns it) and proceed. If pre-flight surfaces a class-2 blocker, STOP.
 2. **Implement** tasks respecting §A2 ownership.
 3. **New tests** — author the phase's test list with edge cases; run them green.
 4. **Phase acceptance** — verify the phase's acceptance criteria (evidence, not assertion).
-5. **Senior QA review** — dispatch a `[heavy]` (or orchestrator-as-opus) QA pass using the §B QA rubric,
-   producer ≠ reviewer. Record findings in `docs/plans/qa/W<n>P<n>-review.md`.
-6. **Fix all QA findings** — loop until the QA reviewer returns PASS. Re-run tests.
+5. **Senior QA review (`[heavy]`, mandatory after EVERY phase)** — run a heavy-tier senior-engineer QA
+   pass using the §B rubric, producer ≠ reviewer (reviewer tier ≥ producer). If the orchestrator itself
+   is opus, it may perform the review directly instead of self-dispatching. Record findings in
+   `docs/plans/qa/W<n>P<n>-review.md`.
+6. **Fix ALL QA findings** — loop (implement → re-review) until the QA reviewer returns PASS. Re-run
+   tests after each fix round. A phase does not close with any open QA finding.
 7. **Commit** the phase's work (multiple commits per §A3).
 8. Proceed to next phase (per §A1).
 
