@@ -47,6 +47,14 @@ vi.mock("node:child_process", () => ({
   exec: vi.fn(),
 }));
 
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal();
+  return {
+    ...original,
+    writeFile: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 // Mock readline for interactive commands
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
@@ -78,6 +86,7 @@ import {
   cmdStats,
   cmdResetStats,
   cmdConfig,
+  cmdDiagnose,
   cmdHelp,
   main,
 } from "./cli.mjs";
@@ -85,6 +94,7 @@ import { loadAccounts, saveAccounts } from "./lib/storage.mjs";
 import { authorize, exchange, revoke } from "./lib/oauth.mjs";
 import { createInterface } from "node:readline/promises";
 import { exec } from "node:child_process";
+import { writeFile } from "node:fs/promises";
 
 // ---------------------------------------------------------------------------
 // Global fetch mock — prevents real HTTP calls and speeds up tests
@@ -96,6 +106,57 @@ beforeEach(() => {
   mockFetch.mockReset();
   // Default: all fetches fail gracefully (usage endpoints return null)
   mockFetch.mockResolvedValue({ ok: false, status: 500 });
+});
+
+describe("diagnose command", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    loadAccounts.mockResolvedValue(null);
+    writeFile.mockResolvedValue(undefined);
+  });
+
+  it("writes a diagnostic file and prints its absolute path", async () => {
+    const logs = [];
+    const errors = [];
+    const code = await main(["dg"], {
+      io: {
+        log: (...args) => logs.push(args.join(" ")),
+        error: (...args) => errors.push(args.join(" ")),
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(errors).toHaveLength(0);
+    expect(writeFile).toHaveBeenCalledOnce();
+    const [outputPath, contents, encoding] = writeFile.mock.calls[0];
+    expect(outputPath).toMatch(/opencode-anthropic-diagnose-.*\.json$/);
+    expect(logs).toEqual([outputPath]);
+    expect(encoding).toBe("utf8");
+    expect(JSON.parse(contents)).toHaveProperty("meta");
+  });
+
+  it("prints JSON without writing when --stdout is set", async () => {
+    const logs = [];
+    const errors = [];
+    const code = await main(["diagnose", "--stdout"], {
+      io: {
+        log: (...args) => logs.push(args.join(" ")),
+        error: (...args) => errors.push(args.join(" ")),
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(errors).toHaveLength(0);
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(JSON.parse(logs.join("\n"))).toHaveProperty("artifacts");
+  });
+
+  it("cmdDiagnose returns non-zero when writing fails", async () => {
+    writeFile.mockRejectedValueOnce(new Error("disk full"));
+    const code = await cmdDiagnose(undefined);
+
+    expect(code).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -32,10 +32,13 @@ import { loadAccounts, saveAccounts, getStoragePath, createDefaultStats } from "
 import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES, CLIENT_ID } from "./lib/config.mjs";
 import { authorize, exchange, revoke } from "./lib/oauth.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { exec } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import { buildDiagnosticBundle } from "./lib/diagnose.mjs";
 
 // ---------------------------------------------------------------------------
 // Color helpers — zero dependencies, respects NO_COLOR / TTY
@@ -1558,6 +1561,34 @@ export async function cmdManage() {
 }
 
 /**
+ * Write or print a redacted diagnostic bundle.
+ *
+ * @param {string | undefined} _arg
+ * @param {{ stdout?: boolean }} [opts]
+ * @returns {Promise<number>} exit code
+ */
+export async function cmdDiagnose(_arg, opts = {}) {
+  try {
+    const bundle = await buildDiagnosticBundle();
+    const json = JSON.stringify(bundle, null, 2);
+    if (opts.stdout) {
+      console.log(json);
+      return 0;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const outputPath = path.resolve(process.cwd(), `opencode-anthropic-diagnose-${timestamp}.json`);
+    await writeFile(outputPath, `${json}\n`, "utf8");
+    console.log(outputPath);
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(c.red(`Failed to create diagnostic bundle: ${message}`));
+    return 1;
+  }
+}
+
+/**
  * Show help text.
  */
 export function cmdHelp() {
@@ -1588,6 +1619,7 @@ ${c.dim("Account Commands:")}
   ${pad(c.cyan("strategy") + " [name]", 22)}Show or change selection strategy
   ${pad(c.cyan("config"), 22)}Show configuration and file paths
   ${pad(c.cyan("manage"), 22)}Interactive account management menu
+  ${pad(c.cyan("diagnose"), 22)}Write a redacted diagnostic bundle ${c.dim("(dg; --stdout to print)")}
   ${pad(c.cyan("help"), 22)}Show this help message
 
 ${c.dim("Options:")}
@@ -1732,6 +1764,9 @@ async function dispatch(argv) {
     case "manage":
     case "mg":
       return cmdManage();
+    case "diagnose":
+    case "dg":
+      return cmdDiagnose(arg, { stdout: flags.includes("--stdout") });
     case "help":
     case "-h":
     case "--help":

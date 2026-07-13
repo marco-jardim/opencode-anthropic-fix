@@ -41,6 +41,8 @@ For multi-agent work, respect file-ownership locks and treat `index.mjs` as one 
 
 ## Where things live
 
+Use `node cli.mjs diagnose` (or `dg`) to create a redacted diagnostic bundle; pass `--stdout` to print it.
+
 | Subsystem                                                                                                                    | Location                               |
 | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
 | OAuth, fetch interceptor, retry/overload loop, request/response mimicry, and token-economy state machines                    | `index.mjs`                            |

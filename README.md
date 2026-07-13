@@ -597,6 +597,8 @@ Account credentials are stored with restrictive file permissions (owner read/wri
 
 ## Troubleshooting
 
+Run `opencode-anthropic-auth diagnose` to write a redacted, shareable diagnostic bundle, or add `--stdout` to print it.
+
 ### "Provider not showing up"
 
 Make sure the plugin is installed in `~/.config/opencode/plugin/`. Restart OpenCode after installing.
