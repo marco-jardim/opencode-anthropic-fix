@@ -69,6 +69,8 @@ import {
 } from "./lib/mimicry/system-prompt.mjs";
 import {
   CLAUDE_3_MODEL_RE,
+  hasOneMillionContext,
+  isEligibleFor1MContext,
   isOpus46Model,
   isOpus47Model,
   isOpus48Model,
@@ -5806,36 +5808,6 @@ function isHaikuModel(model) {
 function supportsThinking(model) {
   if (!model) return true;
   return /claude|sonnet|opus|haiku/i.test(model);
-}
-
-/**
- * Check if a model is eligible for 1M context (can receive context-1m beta).
- * Real CC v2.1.97 U01(): claude-sonnet-4* || opus-4-6 are eligible.
- * Also matches explicit "1m" in the name (e.g. "claude-opus-4-6[1m]").
- * @param {string} model
- * @returns {boolean}
- */
-function isEligibleFor1MContext(model) {
-  if (!model) return false;
-  // Explicit 1m suffix/tag in model name
-  if (/(^|[-_ ])1m($|[-_ ])|context[-_]?1m|\[1m\]/i.test(model)) return true;
-  // CC v2.1.97 U01: claude-sonnet-4* (any Sonnet 4.x) or opus-4-6.
-  // Opus 4.7 / 4.8 (successors to 4.6) are also 1M-context eligible.
-  // Opus 4.8 ships with 1M context by default on the Claude API.
-  return (
-    /claude-sonnet-4|sonnet[._-]4/i.test(model) || isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model)
-  );
-}
-
-/**
- * Check if a model should ALWAYS use 1M context (static mode, no adaptive gating).
- * Only models with explicit "1m" in the name — NOT bare Opus 4.6.
- * When adaptive_context is enabled, Opus 4.6 uses the adaptive decision instead.
- * @param {string} model
- * @returns {boolean}
- */
-function hasOneMillionContext(model) {
-  return /(^|[-_ ])1m($|[-_ ])|context[-_]?1m/i.test(model);
 }
 
 /**
