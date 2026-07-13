@@ -1158,6 +1158,131 @@ describe("fetch interceptor", () => {
     expect(text).toContain("mcp_write_file");
   });
 
+  it("captures redacted SSE to res-*.sse when debug_dump_bodies on", async () => {
+    const writeFileSync = vi.fn();
+    vi.doMock("node:fs", async (importOriginal) => ({
+      ...(await importOriginal()),
+      mkdirSync: vi.fn(),
+      readdirSync: vi.fn(() => []),
+      unlinkSync: vi.fn(),
+      writeFileSync,
+    }));
+
+    const baseConfig = loadConfig();
+    loadConfig.mockReturnValueOnce({
+      ...baseConfig,
+      token_economy: {
+        ...baseConfig.token_economy,
+        debug_dump_bodies: true,
+      },
+    });
+    const captureFetchFn = await setupFetchFn(client);
+    const responseBody =
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Authorization: Bearer sk-secret-value"}}\n\n';
+    mockFetch.mockResolvedValueOnce(
+      new Response(responseBody, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await captureFetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+    await response.text();
+    vi.doUnmock("node:fs");
+
+    const requestWrite = writeFileSync.mock.calls.find(([filename]) => String(filename).endsWith(".json"));
+    const responseWrite = writeFileSync.mock.calls.find(([filename]) => String(filename).endsWith(".sse"));
+    expect(requestWrite).toBeDefined();
+    expect(responseWrite).toBeDefined();
+    const requestDump = JSON.parse(String(requestWrite[1]));
+    expect(String(responseWrite[0])).toMatch(new RegExp(`res-.*-${requestDump.correlationId}\\.sse$`));
+    expect(String(responseWrite[1])).not.toContain("sk-secret-value");
+    expect(String(responseWrite[1])).toContain("[redacted sha256:");
+  });
+
+  it("writes no SSE capture when debug_dump_bodies off", async () => {
+    const writeFileSync = vi.fn();
+    vi.doMock("node:fs", async (importOriginal) => ({
+      ...(await importOriginal()),
+      mkdirSync: vi.fn(),
+      readdirSync: vi.fn(() => []),
+      unlinkSync: vi.fn(),
+      writeFileSync,
+    }));
+
+    const baseConfig = loadConfig();
+    loadConfig.mockReturnValueOnce({
+      ...baseConfig,
+      token_economy: {
+        ...baseConfig.token_economy,
+        debug_dump_bodies: false,
+      },
+    });
+    const noCaptureFetchFn = await setupFetchFn(client);
+    mockFetch.mockResolvedValueOnce(
+      new Response('data: {"type":"message_stop"}\n\n', {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await noCaptureFetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+    await response.text();
+    vi.doUnmock("node:fs");
+
+    expect(writeFileSync.mock.calls.some(([filename]) => String(filename).endsWith(".sse"))).toBe(false);
+  });
+
+  it("keeps downstream bytes byte-identical regardless of SSE capture", async () => {
+    vi.doMock("node:fs", async (importOriginal) => ({
+      ...(await importOriginal()),
+      mkdirSync: vi.fn(),
+      readdirSync: vi.fn(() => []),
+      unlinkSync: vi.fn(),
+      writeFileSync: vi.fn(),
+    }));
+    const responseBody = [
+      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_write_file","id":"t1"}}',
+      "",
+      'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Bearer sk-byte-guard"}}',
+      "",
+    ].join("\n");
+
+    const runWithCapture = async (debugDumpBodies) => {
+      const baseConfig = loadConfig();
+      loadConfig.mockReturnValueOnce({
+        ...baseConfig,
+        token_economy: {
+          ...baseConfig.token_economy,
+          debug_dump_bodies: debugDumpBodies,
+        },
+      });
+      const configuredFetchFn = await setupFetchFn(client);
+      mockFetch.mockResolvedValueOnce(
+        new Response(responseBody, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+      );
+      const response = await configuredFetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ messages: [] }),
+      });
+      return new Uint8Array(await response.arrayBuffer());
+    };
+
+    const withCapture = await runWithCapture(true);
+    const withoutCapture = await runWithCapture(false);
+    vi.doUnmock("node:fs");
+    expect(withCapture).toEqual(withoutCapture);
+  });
+
   it("does not show account usage toast for non-message endpoints", async () => {
     mockFetch.mockResolvedValueOnce(new Response("{}", { status: 200 }));
 

@@ -3750,7 +3750,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       status: response.status,
                       errorBody: typeof errorBody === "string" ? errorBody.slice(0, 600) : errorBody,
                     });
-                    return transformResponse(response);
+                    return transformResponse(response, undefined, undefined, correlationId);
                   }
 
                   const accountSpecific = isAccountSpecificError(response.status, errorBody);
@@ -3991,7 +3991,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                       status: response.status,
                     });
                   }
-                  return transformResponse(response);
+                  return transformResponse(response, undefined, undefined, correlationId);
                 }
 
                 // Success
@@ -4177,7 +4177,7 @@ export async function AnthropicAuthPlugin({ client, project, directory, worktree
                     }
                   : null;
 
-                return transformResponse(response, usageCallback, accountErrorCallback);
+                return transformResponse(response, usageCallback, accountErrorCallback, correlationId);
               }
 
               // All accounts tried
@@ -4476,6 +4476,26 @@ export function createDebugRequestDump(correlationId, timestamp, finalBody) {
     filename: `req-${timestamp}-${correlationId}.json`,
     content: JSON.stringify({ correlationId, timestamp, bodyRedacted: redactString(finalBody) }),
   };
+}
+
+async function writeSseCapture(correlationId, buf, truncated) {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const os = await import("node:os");
+  const dir = path.join(os.homedir(), ".opencode", "opencode-anthropic-fix", "request-dumps");
+  fs.mkdirSync(dir, { recursive: true });
+  const existing = fs
+    .readdirSync(dir)
+    .filter((f) => f.startsWith("res-") && f.endsWith(".sse"))
+    .sort();
+  while (existing.length >= 10) {
+    fs.unlinkSync(path.join(dir, existing.shift()));
+  }
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  fs.writeFileSync(
+    path.join(dir, `res-${ts}-${correlationId}.sse`),
+    redactString(buf) + (truncated ? "\n[capture truncated at 256KB]" : ""),
+  );
 }
 
 export function createDebugOutgoingHeadersEntry(correlationId, timestamp, requestHeaders) {
@@ -9115,9 +9135,10 @@ function resolveStreamIdleTimeoutMs(cfg) {
  * @param {((stats: UsageStats) => void) | null} [onUsage] - Called when stream ends with final usage
  * @param {((details: {reason: import('./lib/backoff.mjs').RateLimitReason, invalidateToken: boolean}) => void) | null} [onAccountError]
  *   Called if a mid-stream error looks account-specific
+ * @param {string} [correlationId]
  * @returns {Response}
  */
-function transformResponse(response, onUsage, onAccountError) {
+function transformResponse(response, onUsage, onAccountError, correlationId) {
   if (!response.body) return response;
 
   const reader = response.body.getReader();
@@ -9128,6 +9149,10 @@ function transformResponse(response, onUsage, onAccountError) {
   // Byte-stream idle-timeout watchdog (parity with CC tengu_byte_stream_idle_timeout_ms).
   // 0 = disabled (default). See resolveStreamIdleTimeoutMs.
   const idleTimeoutMs = resolveStreamIdleTimeoutMs(_pluginConfig);
+  const MAX_SSE_CAPTURE_BYTES = 256 * 1024;
+  const captureEnabled = _pluginConfig?.token_economy?.debug_dump_bodies === true && Boolean(correlationId);
+  let sseCaptureBuf = "";
+  let sseCaptureTruncated = false;
 
   /** @type {UsageStats} */
   const stats = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -9254,11 +9279,28 @@ function transformResponse(response, onUsage, onAccountError) {
         ) {
           onUsage(stats);
         }
+        if (captureEnabled) {
+          try {
+            await writeSseCapture(correlationId, sseCaptureBuf, sseCaptureTruncated);
+          } catch {
+            // Never let a debug write break the stream.
+          }
+        }
         controller.close();
         return;
       }
 
       const text = decoder.decode(value, { stream: true });
+
+      if (captureEnabled && !sseCaptureTruncated && text) {
+        const remaining = MAX_SSE_CAPTURE_BYTES - sseCaptureBuf.length;
+        if (remaining <= 0) {
+          sseCaptureTruncated = true;
+        } else {
+          sseCaptureBuf += text.length > remaining ? text.slice(0, remaining) : text;
+          if (sseCaptureBuf.length >= MAX_SSE_CAPTURE_BYTES) sseCaptureTruncated = true;
+        }
+      }
 
       if (onUsage || onAccountError) {
         // Normalize CRLF for parser only; preserve original bytes for passthrough.
