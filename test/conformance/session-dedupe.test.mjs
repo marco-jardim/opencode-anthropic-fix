@@ -17,7 +17,7 @@ import { AnthropicAuthPlugin } from "../../index.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const INDEX_PATH = resolve(__dirname, "../../index.mjs");
+const TRANSFORMS_PATH = resolve(__dirname, "../../lib/token-economy/transforms.mjs");
 
 const { applySessionToolResultDedupe } = AnthropicAuthPlugin.__testing__;
 
@@ -189,7 +189,7 @@ describe("applySessionToolResultDedupe", () => {
   });
 
   it("(8) source hygiene: no time / randomness sources in function body", () => {
-    const src = readFileSync(INDEX_PATH, "utf8");
+    const src = readFileSync(TRANSFORMS_PATH, "utf8");
     // Extract the function body (naive: slice between signature and first
     // top-level closing brace followed by a newline + another top-level decl).
     const startRe = /function applySessionToolResultDedupe\s*\(/;

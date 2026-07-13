@@ -177,9 +177,9 @@ describe("applyContextHintCompaction — determinism regression harness (phase C
   });
 
   it("source hygiene: function body contains no non-deterministic APIs", () => {
-    // Read index.mjs as text and extract the applyContextHintCompaction body.
-    const indexPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../index.mjs");
-    const source = readFileSync(indexPath, "utf8");
+    // Read the transforms module as text and extract the applyContextHintCompaction body.
+    const transformsPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../lib/token-economy/transforms.mjs");
+    const source = readFileSync(transformsPath, "utf8");
 
     const sigIdx = source.indexOf("function applyContextHintCompaction(");
     expect(sigIdx).toBeGreaterThan(-1);
