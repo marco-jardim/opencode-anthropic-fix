@@ -1,4 +1,5 @@
 node_modules/
+coverage/
 _analysis/
 _tmp_*/
 tmp/

@@ -23,6 +23,7 @@
     "check:invariants": "node scripts/check-invariants.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
     "lint": "eslint .",
     "lint:fix": "eslint --fix .",
     "format": "prettier --write .",
@@ -44,6 +45,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@opencode-ai/plugin": "^1.2.27",
+    "@vitest/coverage-v8": "^4.0.18",
     "esbuild": "^0.27.3",
     "eslint": "^10.0.0",
     "husky": "^9.1.7",

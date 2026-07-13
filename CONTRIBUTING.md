@@ -21,6 +21,17 @@ npm run test:watch     # Watch mode
 
 Tests use [vitest](https://vitest.dev/). All modules are tested in isolation with mocked dependencies.
 
+### Coverage
+
+Run `npm run coverage` to generate V8 text, JSON summary, and HTML reports. Coverage thresholds are scoped by area:
+
+- `lib/**`: at least 85% statements and 75% branches
+- `index.mjs`: at least 56% statements and 52% branches
+- `cli.mjs`: at least 69% statements and 60% branches
+
+The `lib/**` thresholds are the permanent minimum. The `index.mjs` and `cli.mjs` baselines ratchet upward in Wave 3 as
+their test coverage improves. See [the coverage baseline](docs/plans/qa/coverage-baseline.md) for current measurements.
+
 ### Linting and Formatting
 
 ```bash

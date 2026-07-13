@@ -15,6 +15,13 @@ This repository contains an `opencode` plugin and standalone CLI that let Claude
 - Changes to `rateLimitResetTimes` or `consecutiveFailures` in `anthropic-accounts.json` require a migration path.
 - The system-prompt sanitization `OpenCode → Claude Code` applies **only** to the system prompt sent to Anthropic—never to code, docs, or paths.
 
+## Coverage
+
+Run `npm run coverage` to enforce the V8 coverage thresholds: `lib/**` must maintain at least 85% statements and 75%
+branches; `index.mjs` must maintain 56% statements and 52% branches; and `cli.mjs` must maintain 69% statements and 60%
+branches. The entry-point thresholds ratchet upward in Wave 3. Keep
+[the coverage baseline](docs/plans/qa/coverage-baseline.md) current when thresholds change.
+
 ## Decision tables index
 
 - [Beta decision table](docs/mimicry/beta-decision-table.md)
