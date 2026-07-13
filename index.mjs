@@ -1185,7 +1185,7 @@ export async function AnthropicAuthPlugin({ client }) {
           config.toasts.quiet = enabled;
         },
         strategy: () => {
-          const valid = ["sticky", "round-robin", "hybrid"];
+          const valid = ["sticky", "round-robin", "hybrid", "single"];
           if (valid.includes(value)) {
             saveConfig({ account_selection_strategy: value });
             strategyState.manualOverride = true;

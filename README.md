@@ -365,11 +365,12 @@ Pending slash OAuth flows expire after 10 minutes. If completion fails with an e
 
 Control how the plugin picks which account to use for each request.
 
-| Strategy               | Behavior                                                                                  | Best For                                                                            |
-| ---------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| **`sticky`** (default) | Stay on one account until it fails or is rate-limited                                     | Single account, predictable behavior, full feature compatibility                    |
-| **`round-robin`**      | Rotate through accounts on every request                                                  | Spreading load evenly across accounts (see [limitations](#round-robin-limitations)) |
-| **`hybrid`**           | Score-based selection with stickiness bias. Considers health, token budget, and freshness | Multiple accounts with varying rate limits                                          |
+| Strategy               | Behavior                                                                                    | Best For                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **`sticky`** (default) | Stay on one account until it fails or is rate-limited                                       | Single account, predictable behavior, full feature compatibility                           |
+| **`round-robin`**      | Rotate through accounts on every request                                                    | Spreading load evenly across accounts (see [limitations](#round-robin-limitations))        |
+| **`hybrid`**           | Score-based selection with stickiness bias. Considers health, token budget, and freshness   | Multiple accounts with varying rate limits                                                 |
+| **`single`**           | Use one account only; stop and alert when it fails or is rate-limited (never auto-switches) | Simple multi-account setups (e.g. work vs personal) where requests must never mix accounts |
 
 ### Change Strategy
 
@@ -413,7 +414,7 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 
 ```jsonc
 {
-  // Account selection strategy: "sticky" | "round-robin" | "hybrid"
+  // Account selection strategy: "sticky" | "round-robin" | "hybrid" | "single"
   "account_selection_strategy": "sticky",
 
   // Seconds before consecutive failure count resets (60-7200)
