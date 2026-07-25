@@ -8,11 +8,13 @@ import { describe, expect, it } from "vitest";
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const ciPath = resolve(repositoryRoot, ".github/workflows/ci.yml");
 const publishPath = resolve(repositoryRoot, ".github/workflows/publish.yml");
+const gitignorePath = resolve(repositoryRoot, ".gitignore");
 const operationsDocumentationPath = resolve(repositoryRoot, "docs/ci.md");
 const ciExists = existsSync(ciPath);
 const ci = ciExists ? readFileSync(ciPath, "utf8") : "";
 const publishExists = existsSync(publishPath);
 const publish = publishExists ? readFileSync(publishPath, "utf8") : "";
+const gitignore = readFileSync(gitignorePath, "utf8");
 const operationsDocumentationExists = existsSync(operationsDocumentationPath);
 const operationsDocumentation = operationsDocumentationExists ? readFileSync(operationsDocumentationPath, "utf8") : "";
 const publishCondition =
@@ -35,6 +37,13 @@ describe("CI workflow policy", () => {
 
   it("runs for pull requests and pushes to master", () => {
     expect(ci).toMatch(/^on:\n {2}pull_request:\s*\n {2}push:\n {4}branches: \[master\]$/m);
+  });
+
+  it("cancels superseded runs only for pull requests", () => {
+    expect(ci).toMatch(
+      /^concurrency:\n {2}group: \$\{\{ github\.workflow \}\}-\$\{\{ github\.ref \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}$/m,
+    );
+    expect(ci).not.toMatch(/^ {2}cancel-in-progress: true$/m);
   });
 
   it("defines the quality job on the required Node versions", () => {
@@ -88,6 +97,11 @@ describe("CI workflow policy", () => {
 });
 
 describe("npm publish workflow policy", () => {
+  it("does not advertise an unused manual-dispatch bump input", () => {
+    expect(publish).not.toMatch(/^ {4}inputs:/m);
+    expect(publish).not.toMatch(/\bbump\b/i);
+  });
+
   it("runs the complete quality gate before publication", () => {
     const commands = ["npm ci", "npm run lint", "npm run check:invariants", "npm test", "npm run build"];
     const positions = commands.map((command) => publish.indexOf(command));
@@ -157,6 +171,12 @@ describe("npm publish workflow policy", () => {
 });
 
 describe("CI and prerelease documentation policy", () => {
+  it("qualifies trusted publishing as an authentication inference", () => {
+    expect(operationsDocumentation).not.toMatch(/uses npm trusted publishing with\s+provenance/i);
+    expect(operationsDocumentation).toMatch(/appears to rely on npm trusted publishing/i);
+    expect(operationsDocumentation).toMatch(/must be confirmed before the next\s+release/i);
+  });
+
   it("documents the quality gate and safe prerelease operations", () => {
     expect(operationsDocumentationExists).toBe(true);
 
@@ -176,5 +196,11 @@ describe("CI and prerelease documentation policy", () => {
     expect(operationsDocumentation).toMatch(/hyphenated version[^\n]*`beta`/i);
     expect(operationsDocumentation).toMatch(/prerelease[^\n]*must never[^\n]*`latest`/i);
     expect(operationsDocumentation).toMatch(/human[^\n]*approval/i);
+  });
+});
+
+describe("CI artifact policy", () => {
+  it("ignores the test-floor output artifact", () => {
+    expect(gitignore.split(/\r?\n/)).toContain("vitest-output.txt");
   });
 });

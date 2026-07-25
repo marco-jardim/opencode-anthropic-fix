@@ -2,11 +2,6 @@ name: Publish to npm
 
 on:
   workflow_dispatch:
-    inputs:
-      bump:
-        description: "Version bump type"
-        required: false
-        default: "patch"
   push:
     branches:
       - master

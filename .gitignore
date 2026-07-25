@@ -1,5 +1,6 @@
 node_modules/
 coverage/
+vitest-output.txt
 _analysis/
 _tmp_*/
 tmp/

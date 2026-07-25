@@ -27,8 +27,10 @@ gate only on Node.js 24; requiring all three `ci` checks is what prevents code t
 
 ## Publication and dist-tags
 
-The [`publish` workflow](../.github/workflows/publish.yml) uses npm trusted publishing with
-provenance. It runs on manual dispatch, and a push to `master` that changes
+The [`publish` workflow](../.github/workflows/publish.yml) enables npm provenance. Its configuration
+appears to rely on npm trusted publishing for authentication (`id-token: write` is granted and no
+`NODE_AUTH_TOKEN` is supplied), but the npm package settings must be confirmed before the next
+release. It runs on manual dispatch, and a push to `master` that changes
 [`package.json`](../package.json) also triggers the publication automation. **Merging any
 `package.json` change to `master` triggers this sensitive workflow**, so such changes require
 release-level review.
