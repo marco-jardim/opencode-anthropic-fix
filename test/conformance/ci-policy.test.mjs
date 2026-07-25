@@ -15,7 +15,7 @@ describe("CI workflow policy", () => {
     expect(ci).not.toContain("\t");
     expect(ci).toMatch(/^name:\s+ci$/m);
     expect(ci).toMatch(/^on:$/m);
-    expect(ci).toMatch(/^permissions:$/m);
+    expect(ci).toMatch(/^permissions:\n {2}contents: read$/m);
     expect(ci).toMatch(/^jobs:$/m);
 
     for (const line of ci.split("\n")) {
@@ -54,9 +54,14 @@ describe("CI workflow policy", () => {
 
   it("enforces the frozen passing-test floor", () => {
     expect(ci).toMatch(/name: Enforce passing-test floor/);
-    expect(ci).toContain("1414");
+    expect(ci).toMatch(/if \(\( passed < 1414 \)\); then/);
     expect(ci).toMatch(/passed/);
     expect(ci).toMatch(/exit 1/);
+  });
+
+  it("does not expose repository secrets to pull requests", () => {
+    // Pull-request workflows using repository secrets enable credential exfiltration from forks.
+    expect(ci).not.toContain("secrets.");
   });
 
   it("pins every action to an immutable commit", () => {
