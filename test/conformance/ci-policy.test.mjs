@@ -8,10 +8,13 @@ import { describe, expect, it } from "vitest";
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const ciPath = resolve(repositoryRoot, ".github/workflows/ci.yml");
 const publishPath = resolve(repositoryRoot, ".github/workflows/publish.yml");
+const operationsDocumentationPath = resolve(repositoryRoot, "docs/ci.md");
 const ciExists = existsSync(ciPath);
 const ci = ciExists ? readFileSync(ciPath, "utf8") : "";
 const publishExists = existsSync(publishPath);
 const publish = publishExists ? readFileSync(publishPath, "utf8") : "";
+const operationsDocumentationExists = existsSync(operationsDocumentationPath);
+const operationsDocumentation = operationsDocumentationExists ? readFileSync(operationsDocumentationPath, "utf8") : "";
 const publishCondition =
   "if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'";
 
@@ -150,5 +153,28 @@ describe("npm publish workflow policy", () => {
     for (const reference of actionReferences) {
       expect(reference).toMatch(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
     }
+  });
+});
+
+describe("CI and prerelease documentation policy", () => {
+  it("documents the quality gate and safe prerelease operations", () => {
+    expect(operationsDocumentationExists).toBe(true);
+
+    for (const command of [
+      "npm ci",
+      "npm run lint",
+      "npm run format:check",
+      "npm run check:invariants",
+      "npm test",
+      "npm run coverage",
+      "npm run build",
+    ]) {
+      expect(operationsDocumentation).toContain(command);
+    }
+
+    expect(operationsDocumentation).toMatch(/passing-test floor[^\n]*1414/i);
+    expect(operationsDocumentation).toMatch(/hyphenated version[^\n]*`beta`/i);
+    expect(operationsDocumentation).toMatch(/prerelease[^\n]*must never[^\n]*`latest`/i);
+    expect(operationsDocumentation).toMatch(/human[^\n]*approval/i);
   });
 });
