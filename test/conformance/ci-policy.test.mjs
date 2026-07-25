@@ -1,4 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -8,6 +10,10 @@ const ciPath = resolve(repositoryRoot, ".github/workflows/ci.yml");
 const publishPath = resolve(repositoryRoot, ".github/workflows/publish.yml");
 const ciExists = existsSync(ciPath);
 const ci = ciExists ? readFileSync(ciPath, "utf8") : "";
+const publishExists = existsSync(publishPath);
+const publish = publishExists ? readFileSync(publishPath, "utf8") : "";
+const publishCondition =
+  "if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'";
 
 describe("CI workflow policy", () => {
   it("is present and structurally well-formed YAML", () => {
@@ -74,6 +80,75 @@ describe("CI workflow policy", () => {
   });
 
   it("leaves the publish workflow present", () => {
-    expect(existsSync(publishPath)).toBe(true);
+    expect(publishExists).toBe(true);
+  });
+});
+
+describe("npm publish workflow policy", () => {
+  it("runs the complete quality gate before publication", () => {
+    const commands = ["npm ci", "npm run lint", "npm run check:invariants", "npm test", "npm run build"];
+    const positions = commands.map((command) => publish.indexOf(command));
+    const firstPublish = publish.indexOf("npm publish");
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+    expect(firstPublish).toBeGreaterThan(Math.max(...positions));
+
+    for (const position of [...positions, firstPublish]) {
+      const stepStart = publish.lastIndexOf("\n      - ", position);
+      const nextStep = publish.indexOf("\n      - ", position);
+      const step = publish.slice(stepStart, nextStep < 0 ? undefined : nextStep);
+
+      expect(step).toContain(publishCondition);
+    }
+  });
+
+  it("gates the only publish step and selects an exhaustive dist-tag", () => {
+    const publishCommands = [...publish.matchAll(/^\s*npm publish[^\n]+$/gm)].map((match) => match[0].trim());
+
+    expect(publishCommands).toEqual([
+      "npm publish --access public --tag beta",
+      "npm publish --access public --tag latest",
+    ]);
+    expect(publish).toMatch(
+      /- name: Publish package\n {8}if: steps\.version_check\.outputs\.changed == 'true' \|\| github\.event_name == 'workflow_dispatch'\n {8}shell: bash\n {8}run: \|\n {10}set -euo pipefail/,
+    );
+    expect(publish).toMatch(
+      /version=\$\(node -p "require\('\.\/package\.json'\)\.version"\)[\s\S]*if \[\[ -z "\$version" \|\| "\$version" == "undefined" \|\| "\$version" == "null" \]\]; then[\s\S]*exit 1[\s\S]*if \[\[ "\$version" == \*-\* \]\]; then\n {12}npm publish --access public --tag beta\n {10}else\n {12}npm publish --access public --tag latest\n {10}fi/,
+    );
+  });
+
+  it.each([
+    { version: "0.3.0-beta.0", expectedTag: "beta" },
+    { version: "0.2.1", expectedTag: "latest" },
+    { version: "1.0.0", expectedTag: "latest" },
+    { version: "1.0.0-rc.1", expectedTag: "beta" },
+  ])("classifies $version as $expectedTag", ({ version, expectedTag }) => {
+    const expression = publish.match(/version=\$\(node -p "([^"]+)"\)/)?.[1];
+    expect(expression).toBe("require('./package.json').version");
+
+    const fixtureDirectory = mkdtempSync(resolve(tmpdir(), "publish-policy-"));
+
+    try {
+      writeFileSync(resolve(fixtureDirectory, "package.json"), JSON.stringify({ version }));
+      const parsedVersion = execFileSync(process.execPath, ["-p", expression], {
+        cwd: fixtureDirectory,
+        encoding: "utf8",
+      }).trim();
+      const tag = parsedVersion.includes("-") ? "beta" : "latest";
+
+      expect(tag, version).toBe(expectedTag);
+    } finally {
+      rmSync(fixtureDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("pins every action to an immutable commit", () => {
+    const actionReferences = [...publish.matchAll(/^\s*- uses: (\S+)$/gm)].map((match) => match[1]);
+
+    expect(actionReferences.length).toBeGreaterThan(0);
+    for (const reference of actionReferences) {
+      expect(reference).toMatch(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
+    }
   });
 });
