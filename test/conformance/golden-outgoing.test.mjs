@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getStainlessArch, getStainlessOs } from "../../lib/mimicry/headers.mjs";
 
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
@@ -39,6 +40,9 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
     custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
     idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
     adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
+    // The golden encodes vanilla's default-off GrowthBook assignment; see
+    // docs/claude-code-2.1.195-analysis.md:214.
+    token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: false },
   });
 
   return {
@@ -58,9 +62,16 @@ const golden = JSON.parse(readFileSync(goldenPath, "utf8"));
 // - body.metadata.user_id embeds the generated account, device, and session IDs.
 // - headers.x-claude-code-session-id repeats the generated session ID.
 // - headers.x-client-request-id is a fresh UUID emitted for every request.
-// These are the only values normalized. Mimicry-critical headers and request
-// body fields remain literal in the golden so any drift fails this test.
-const NORMALIZED_PATHS = ["body.metadata.user_id", "headers.x-claude-code-session-id", "headers.x-client-request-id"];
+// Host-derived Stainless headers are normalized separately after their presence
+// and live-process values are asserted. Other mimicry-critical headers and
+// request body fields remain literal in the golden so any drift fails this test.
+const GENERATED_PATHS = ["body.metadata.user_id", "headers.x-claude-code-session-id", "headers.x-client-request-id"];
+const HOST_DERIVED_PATHS = [
+  "headers.x-stainless-arch",
+  "headers.x-stainless-os",
+  "headers.x-stainless-runtime-version",
+];
+const NORMALIZED_PATHS = [...GENERATED_PATHS, ...HOST_DERIVED_PATHS];
 
 function makeClient() {
   return {
@@ -158,6 +169,18 @@ function normalizeOutgoing(outgoing) {
   return normalized;
 }
 
+function expectHostDerivedHeaders(outgoing) {
+  const { headers } = outgoing;
+
+  expect(headers).toHaveProperty("x-stainless-arch");
+  expect(headers["x-stainless-arch"]).toBe(getStainlessArch(process.arch));
+  expect(headers).toHaveProperty("x-stainless-os");
+  expect(headers["x-stainless-os"]).toBe(getStainlessOs(process.platform));
+  expect(headers).toHaveProperty("x-stainless-runtime-version");
+  expect(headers["x-stainless-runtime-version"]).toBe(process.version);
+  expect(headers["x-stainless-runtime-version"]).toMatch(/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
+}
+
 describe("golden outgoing foreground request", () => {
   let mockFetch;
 
@@ -188,8 +211,11 @@ describe("golden outgoing foreground request", () => {
     const second = captureOutgoing(messageCalls[1]);
     const calibratedPaths = differingPaths(first, second);
 
-    expect(calibratedPaths).toEqual(NORMALIZED_PATHS);
-    expect(normalizeOutgoing(first)).toEqual(golden);
-    expect(normalizeOutgoing(second)).toEqual(golden);
+    expect(calibratedPaths).toEqual(GENERATED_PATHS);
+    expectHostDerivedHeaders(first);
+    expectHostDerivedHeaders(second);
+    const normalizedGolden = normalizeOutgoing(golden);
+    expect(normalizeOutgoing(first)).toEqual(normalizedGolden);
+    expect(normalizeOutgoing(second)).toEqual(normalizedGolden);
   });
 });

@@ -49,6 +49,7 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
     })),
     loadConfigFresh: vi.fn(() => ({
       ...original.DEFAULT_CONFIG,
@@ -60,6 +61,7 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
     })),
     saveConfig: vi.fn(),
   };
@@ -450,6 +452,7 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
       token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: true },
     });
     loadConfig.mockImplementation(cfgFactory);
@@ -603,6 +606,7 @@ describe("Role-scoped cache TTL (opt-in; CC v2.1.110+ MoY parity)", () => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
       token_economy: { ...original.DEFAULT_CONFIG.token_economy, role_scoped_cache_ttl: true },
     }));
     return setupFetchFn(client);
@@ -622,6 +626,7 @@ describe("Role-scoped cache TTL (opt-in; CC v2.1.110+ MoY parity)", () => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
       token_economy: { ...original.DEFAULT_CONFIG.token_economy, role_scoped_cache_ttl: false },
     }));
     return setupFetchFn(client);
@@ -790,6 +795,7 @@ describe("Lean system prompt for non-main requests (opt-in)", () => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
       token_economy: { ...original.DEFAULT_CONFIG.token_economy, lean_system_non_main: true },
     }));
     return setupFetchFn(client);

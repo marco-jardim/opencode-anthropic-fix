@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run check:invariants
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          npm test 2>&1 | tee vitest-output.txt
+      - name: Enforce passing-test floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary=$(sed -E $'s/\x1B\[[0-9;]*[mK]//g' vitest-output.txt \
+            | grep -Eo 'Tests[[:space:]]+[0-9]+[[:space:]]+passed([[:space:]]*\|[[:space:]]*[0-9]+[[:space:]]+(failed|skipped))*[[:space:]]*\([0-9]+\)' \
+            | tail -n 1 || true)
+          if [[ -z "$summary" ]]; then
+            echo "Could not parse the passing-test count from the Vitest summary" >&2
+            exit 1
+          fi
+          passed=$(printf '%s\n' "$summary" \
+            | sed -E 's/.*Tests[[:space:]]+([0-9]+)[[:space:]]+passed.*/\1/')
+          if ! [[ "$passed" =~ ^[0-9]+$ ]]; then
+            echo "Parsed an invalid passing-test count: $passed" >&2
+            exit 1
+          fi
+          if (( passed < 1414 )); then
+            echo "Passing-test count $passed is below the required floor of 1414" >&2
+            exit 1
+          fi
+          echo "Passing-test count $passed meets the required floor of 1414"
+      - run: npm run coverage
+      - run: npm run build

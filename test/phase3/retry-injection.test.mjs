@@ -38,6 +38,7 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
     custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
     idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
     adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
+    preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
   });
 
   return {
