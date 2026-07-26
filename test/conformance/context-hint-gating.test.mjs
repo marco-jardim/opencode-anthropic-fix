@@ -311,11 +311,11 @@ describe("context-hint explicit opt-in", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("context_hint=true → beta sent, body field present", async () => {
+  it("context_hint=true → beta sent even when the below-threshold body is suppressed", async () => {
     const { headers, body } = await sendRequest(fetchFn);
 
     expect(headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
-    expect(body.context_hint).toEqual({ enabled: true });
+    expect(body.context_hint).toBeUndefined();
   });
 });
 

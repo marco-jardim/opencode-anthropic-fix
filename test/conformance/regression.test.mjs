@@ -472,7 +472,7 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
     fetchFn = await setupWithCtxHint();
   });
 
-  it("sends context-hint beta + body field on first request", async () => {
+  it("sends context-hint beta without a below-threshold body on first request", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -483,7 +483,7 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     expect(init.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
-    expect(JSON.parse(init.body).context_hint).toEqual({ enabled: true });
+    expect(JSON.parse(init.body).context_hint).toBeUndefined();
   });
 
   it("skips context-hint for non-main-thread requests (title-gen shape)", async () => {
