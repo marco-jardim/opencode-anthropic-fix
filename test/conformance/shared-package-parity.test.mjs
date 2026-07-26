@@ -172,7 +172,7 @@ describe("shared package foreground parity", () => {
         os: process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux",
         arch: process.arch,
       },
-      systemCacheControl: { type: "ephemeral", ttl: "1h" },
+      cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
     });
 
     expect(normalizeUrl(adapter.url)).toBe(normalizeUrl(existing.url));
@@ -216,20 +216,42 @@ describe("shared package adapter input normalization", () => {
     expect(system.some((block) => block?.text === "Stay terse.")).toBe(true);
   });
 
-  it("does not add cache control to caller system blocks when omitted", async () => {
+  it("changes nothing when cacheControl is omitted", async () => {
     const built = await buildWireCompatibleRequest(
       bodyWith({ system: ["First caller block.", { type: "text", text: "Last caller block." }] }),
       transport,
     );
     const system = JSON.parse(built.body).system.filter((block) => block?.text?.includes("caller block."));
-    expect(system).toHaveLength(2);
-    expect(system.every((block) => !("cache_control" in block))).toBe(true);
+    expect(system).toHaveLength(1);
+    expect(system[0].text).toBe("First caller block.\nLast caller block.");
+    expect("cache_control" in system[0]).toBe(false);
   });
 
-  it("rejects a non-object system cache control value", async () => {
-    await expect(
-      buildWireCompatibleRequest(bodyWith({}), { ...transport, systemCacheControl: "ephemeral" }),
-    ).rejects.toThrow(new TypeError("Expected systemCacheControl to be a non-null plain object"));
+  it("maps thinking.budget_tokens to the package contract and built body", async () => {
+    const built = await buildWireCompatibleRequest(
+      bodyWith({ thinking: { type: "enabled", budget_tokens: 8192 } }),
+      transport,
+    );
+
+    expect(JSON.parse(built.body).thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+  });
+
+  it("passes a cacheControl decision through to package breakpoint placement", async () => {
+    const built = await buildWireCompatibleRequest(
+      bodyWith({ system: ["First caller block.", { type: "text", text: "Last caller block." }] }),
+      {
+        ...transport,
+        cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+      },
+    );
+    const system = JSON.parse(built.body).system.filter((block) => block?.text?.includes("caller block."));
+
+    expect(system).toHaveLength(1);
+    expect(system[0]).toEqual({
+      type: "text",
+      text: "First caller block.\nLast caller block.",
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    });
   });
 
   it("rejects a system prompt that is neither a string nor an array", async () => {
