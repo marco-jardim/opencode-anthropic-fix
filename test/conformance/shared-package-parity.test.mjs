@@ -150,6 +150,7 @@ describe("shared package foreground parity", () => {
     vi.stubEnv("CLAUDE_CODE_BACKGROUND", "");
     vi.stubEnv("CLAUDE_CODE_CONTAINER_ID", "");
     vi.stubEnv("CLAUDE_CODE_REMOTE_SESSION_ID", "");
+    vi.stubEnv("OPENCODE_ANTHROPIC_PROFILE_OVERRIDE", "");
   });
 
   afterEach(() => {
@@ -245,5 +246,50 @@ describe("shared package adapter input normalization", () => {
 
   it("rejects a missing or non-string request body", async () => {
     await expect(buildWireCompatibleRequest(undefined, transport)).rejects.toThrow(TypeError);
+  });
+
+  it("applies an emergency plugin-owned Claude Code profile override end to end", async () => {
+    vi.stubEnv(
+      "OPENCODE_ANTHROPIC_PROFILE_OVERRIDE",
+      JSON.stringify({
+        cliVersion: "2.1.197",
+        userAgent: "claude-cli/2.1.197 (external, cli)",
+      }),
+    );
+    const built = await buildWireCompatibleRequest(bodyWith({}), {
+      ...transport,
+      profileOverride: {
+        cliVersion: "2.1.196",
+        userAgent: "claude-cli/2.1.196 (external, cli)",
+      },
+    });
+    const body = JSON.parse(built.body);
+
+    expect(built.headers.get("user-agent")).toBe("claude-cli/2.1.196 (external, cli)");
+    expect(body.system[0].text).toContain("cc_version=2.1.196.");
+    expect(built.url).toBe("https://api.anthropic.com/v1/messages?beta=true");
+  });
+
+  it("uses an emergency profile override from the environment when plugin configuration is absent", async () => {
+    vi.stubEnv(
+      "OPENCODE_ANTHROPIC_PROFILE_OVERRIDE",
+      JSON.stringify({
+        cliVersion: "2.1.196",
+        userAgent: "claude-cli/2.1.196 (external, cli)",
+      }),
+    );
+
+    const built = await buildWireCompatibleRequest(bodyWith({}), transport);
+    const body = JSON.parse(built.body);
+
+    expect(built.headers.get("user-agent")).toBe("claude-cli/2.1.196 (external, cli)");
+    expect(body.system[0].text).toContain("cc_version=2.1.196.");
+    expect(built.url).toBe("https://api.anthropic.com/v1/messages?beta=true");
+  });
+
+  it("fails loudly when the environment profile override is malformed JSON", async () => {
+    vi.stubEnv("OPENCODE_ANTHROPIC_PROFILE_OVERRIDE", '{"cliVersion":');
+
+    await expect(buildWireCompatibleRequest(bodyWith({}), transport)).rejects.toThrow(SyntaxError);
   });
 });
