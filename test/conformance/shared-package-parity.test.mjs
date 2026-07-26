@@ -29,7 +29,7 @@ vi.mock("../../lib/refresh-lock.mjs", () => ({
 }));
 
 // Anti-verbosity injection is plugin-retained POLICY. The shared package has no
-// `systemPromptFeatures` surface in rc.6, so it never emits the
+// `systemPromptFeatures` surface in rc.9, so it never emits the
 // `# Text output (does not apply to tool calls)` block. Vectors that assert
 // PROTOCOL parity on Opus 4.6/4.7 therefore disable it; the deferred-policy
 // suite below asserts the divergence explicitly so the deferral stays visible.
@@ -189,11 +189,6 @@ const DIFFERENTIAL_VECTORS = [
     hostBody: { ...HOST_BODY, model: "claude-fable-5", thinking: { type: "adaptive" }, effort: "high" },
     cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
   },
-  {
-    name: "model-mythos-5-adaptive",
-    hostBody: { ...HOST_BODY, model: "claude-mythos-5", thinking: { type: "adaptive" }, effort: "high" },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
 ];
 
 beforeEach(() => {
@@ -261,6 +256,11 @@ function makeProvider() {
       },
       "claude-3-5-haiku-latest": {
         id: "claude-3-5-haiku-latest",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-3-5-haiku": {
+        id: "claude-3-5-haiku",
         cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
         limit: { context: 200_000, output: 32_000 },
       },
@@ -522,7 +522,7 @@ describe("shared package adapter input normalization", () => {
 });
 
 // These tests do NOT assert parity. They pin the exact places where the plugin
-// still applies behaviour the shared package rc.6 does not implement, so the
+// still applies behaviour the shared package rc.9 does not implement, so the
 // boundary is visible and any future package release that closes a gap fails
 // here loudly instead of silently changing the wire.
 describe("shared package boundary - deferred plugin policy", () => {
@@ -594,20 +594,50 @@ describe("shared package boundary - deferred plugin policy", () => {
   });
 
   // The plugin recognizes models with unanchored regexes and forwards any id
-  // verbatim; the shared package pins an exhaustive allowlist of the first-party
-  // `api.anthropic.com` surface and fails closed on everything else. Claude 3 is
-  // reachable only through gateway and cloud providers, each of which prefixes
-  // the identifier differently, so the package deliberately refuses it. A host
-  // that routes Claude 3 through this plugin must not be migrated to the adapter
-  // without first deciding what that request should become.
-  it("forwards a Claude 3 model in the plugin while the adapter refuses it", async () => {
-    const hostBody = { ...HOST_BODY, model: "claude-3-5-haiku-latest" };
+  // verbatim, while the shared package pins the genuine client catalogue and
+  // fails closed. `claude-3-5-haiku-latest` is a `provider_ids.first_party`
+  // dated form rather than a catalogue id. `claude-mythos-5` has no catalogue
+  // entry in this client version even though its display code recognizes the
+  // string.
+  it.each([["claude-3-5-haiku-latest"], ["claude-mythos-5"]])(
+    "forwards %s in the plugin while the adapter refuses the model",
+    async (model) => {
+      const hostBody = { ...HOST_BODY, model };
+      const existing = await captureExistingRequest(
+        vi.fn(() => Promise.resolve(makeSuccessResponse())),
+        hostBody,
+      );
+
+      expect(JSON.parse(existing.body).model).toBe(model);
+      await expect(buildAdapterRequest(hostBody)).rejects.toThrow("UNSUPPORTED_MODEL");
+    },
+  );
+
+  // KNOWN, DELIBERATELY DEFERRED gap: upstream suppresses these four betas for
+  // `claude-3-*` models, while the package currently includes them in its
+  // always-enabled set. Closing this requires widening the package capability
+  // contract, which is out of scope for this wave.
+  it("pins the measured Claude 3 beta divergence", async () => {
+    const hostBody = { ...HOST_BODY, model: "claude-3-5-haiku" };
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
       hostBody,
     );
+    const adapter = await buildAdapterRequest(hostBody);
 
-    expect(JSON.parse(existing.body).model).toBe("claude-3-5-haiku-latest");
-    await expect(buildAdapterRequest(hostBody)).rejects.toThrow("UNSUPPORTED_MODEL");
+    const pluginBeta = new Headers(existing.headers).get("anthropic-beta") ?? "";
+    const adapterBeta = adapter.headers.get("anthropic-beta") ?? "";
+    const pluginBetas = pluginBeta.split(",").map((value) => value.trim());
+    const adapterBetas = adapterBeta.split(",").map((value) => value.trim());
+    const adapterOnly = adapterBetas.filter((value) => !pluginBetas.includes(value)).sort();
+    const pluginOnly = pluginBetas.filter((value) => !adapterBetas.includes(value)).sort();
+
+    expect(adapterOnly).toEqual([
+      "advisor-tool-2026-03-01",
+      "context-management-2025-06-27",
+      "redact-thinking-2026-02-12",
+      "thinking-token-count-2026-05-13",
+    ]);
+    expect(pluginOnly).toEqual([]);
   });
 });
