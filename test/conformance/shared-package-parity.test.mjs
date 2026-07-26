@@ -28,6 +28,13 @@ vi.mock("../../lib/refresh-lock.mjs", () => ({
   releaseRefreshLock: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Anti-verbosity injection is plugin-retained POLICY. The shared package has no
+// `systemPromptFeatures` surface in rc.6, so it never emits the
+// `# Text output (does not apply to tool calls)` block. Vectors that assert
+// PROTOCOL parity on Opus 4.6/4.7 therefore disable it; the deferred-policy
+// suite below asserts the divergence explicitly so the deferral stays visible.
+const testPolicy = vi.hoisted(() => ({ antiVerbosity: true }));
+
 vi.mock("../../lib/config.mjs", async (importOriginal) => {
   const original = await importOriginal();
   const makeConfig = () => ({
@@ -41,6 +48,7 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
     idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
     adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
     token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: false },
+    anti_verbosity: { ...original.DEFAULT_CONFIG.anti_verbosity, enabled: testPolicy.antiVerbosity },
   });
 
   return {
@@ -66,6 +74,122 @@ const HOST_BODY = {
   messages: golden.body.messages,
 };
 
+const DIFFERENTIAL_VECTORS = [
+  {
+    name: "golden foreground",
+    hostBody: HOST_BODY,
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+  {
+    name: "short-user",
+    hostBody: {
+      ...HOST_BODY,
+      messages: [{ role: "user", content: "hi" }],
+    },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+  {
+    name: "tools",
+    hostBody: {
+      ...HOST_BODY,
+      tools: [
+        {
+          name: "lookup_weather",
+          description: "Look up the weather for a city",
+          input_schema: {
+            type: "object",
+            required: ["city"],
+            properties: { city: { type: "string" } },
+          },
+        },
+        {
+          name: "lookup_time",
+          description: "Look up the time for a timezone",
+          input_schema: {
+            type: "object",
+            required: ["timezone"],
+            properties: { timezone: { type: "string" } },
+          },
+        },
+      ],
+    },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true, toolBreakpoint: true },
+  },
+  {
+    name: "tool-use-result",
+    hostBody: {
+      ...HOST_BODY,
+      messages: [
+        { role: "user", content: "What is 2+2?" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "tu_1", name: "calc", input: { expr: "2+2" } }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "tu_1", content: "4" }],
+        },
+      ],
+    },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true, messageBreakpoint: true },
+  },
+  {
+    name: "thinking",
+    hostBody: {
+      ...HOST_BODY,
+      thinking: { type: "enabled", budget_tokens: 10000 },
+    },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+  {
+    name: "multi-block-system",
+    hostBody: {
+      ...HOST_BODY,
+      system: [
+        { type: "text", text: "You are a helpful assistant." },
+        { type: "text", text: "Keep answers concise." },
+      ],
+    },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+  {
+    name: "model-haiku-4-5",
+    hostBody: { ...HOST_BODY, model: "claude-haiku-4-5" },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+  {
+    name: "model-sonnet-4-6-adaptive",
+    hostBody: { ...HOST_BODY, model: "claude-sonnet-4-6", thinking: { type: "adaptive" }, effort: "high" },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+  {
+    name: "model-opus-4-6-adaptive",
+    hostBody: { ...HOST_BODY, model: "claude-opus-4-6", thinking: { type: "adaptive" }, effort: "high" },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+    antiVerbosity: false,
+  },
+  {
+    name: "model-opus-4-7-adaptive",
+    hostBody: { ...HOST_BODY, model: "claude-opus-4-7", thinking: { type: "adaptive" }, effort: "high" },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+    antiVerbosity: false,
+  },
+  {
+    name: "model-opus-4-8-adaptive",
+    hostBody: { ...HOST_BODY, model: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "high" },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+  {
+    name: "effort-medium-adaptive",
+    hostBody: { ...HOST_BODY, model: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "medium" },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+];
+
+beforeEach(() => {
+  testPolicy.antiVerbosity = true;
+});
+
 const NORMALIZED_HEADER_NAMES = new Set([
   "x-claude-code-session-id",
   "x-client-request-id",
@@ -87,6 +211,46 @@ function makeProvider() {
     models: {
       "claude-sonnet-4-5": {
         id: "claude-sonnet-4-5",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-sonnet-4-6": {
+        id: "claude-sonnet-4-6",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-opus-4-6": {
+        id: "claude-opus-4-6",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-opus-4-7": {
+        id: "claude-opus-4-7",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-opus-4-8": {
+        id: "claude-opus-4-8",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-haiku-4-5": {
+        id: "claude-haiku-4-5",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-fable-5": {
+        id: "claude-fable-5",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-mythos-5": {
+        id: "claude-mythos-5",
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        limit: { context: 200_000, output: 32_000 },
+      },
+      "claude-3-5-haiku-latest": {
+        id: "claude-3-5-haiku-latest",
         cost: { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
         limit: { context: 200_000, output: 32_000 },
       },
@@ -119,7 +283,7 @@ function normalizeBody(body) {
   return JSON.stringify(parsed);
 }
 
-async function captureExistingRequest(mockFetch) {
+async function captureExistingRequest(mockFetch, hostBody) {
   vi.stubGlobal("fetch", mockFetch);
   const plugin = await AnthropicAuthPlugin({ client: makeClient() });
   const getAuth = vi.fn().mockResolvedValue({
@@ -132,7 +296,7 @@ async function captureExistingRequest(mockFetch) {
   const response = await fetchFn("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(HOST_BODY),
+    body: JSON.stringify(hostBody),
   });
   await response.text();
 
@@ -140,17 +304,38 @@ async function captureExistingRequest(mockFetch) {
   return { url, method: init.method, headers: init.headers, body: init.body };
 }
 
+function buildAdapterRequest(hostBody, cacheControl = { enabled: true, ttl: "1h", systemBreakpoint: true }) {
+  return buildWireCompatibleRequest(JSON.stringify(hostBody), {
+    accessToken: "test-access",
+    clientRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    runtime: {
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      deviceId: "2".repeat(64),
+      accountUuid: "33333333-3333-4333-8333-333333333333",
+      runtime: "node",
+      runtimeVersion: process.version,
+      os: process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux",
+      arch: process.arch,
+    },
+    cacheControl,
+  });
+}
+
+function stubCleanEnvironment() {
+  vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+  vi.stubEnv("ANTHROPIC_CUSTOM_HEADERS", "");
+  vi.stubEnv("CLAUDE_AGENT_SDK_CLIENT_APP", "");
+  vi.stubEnv("CLAUDE_CODE_ADDITIONAL_PROTECTION", "");
+  vi.stubEnv("CLAUDE_CODE_BACKGROUND", "");
+  vi.stubEnv("CLAUDE_CODE_CONTAINER_ID", "");
+  vi.stubEnv("CLAUDE_CODE_REMOTE_SESSION_ID", "");
+  vi.stubEnv("OPENCODE_ANTHROPIC_PROFILE_OVERRIDE", "");
+}
+
 describe("shared package foreground parity", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
-    vi.stubEnv("ANTHROPIC_CUSTOM_HEADERS", "");
-    vi.stubEnv("CLAUDE_AGENT_SDK_CLIENT_APP", "");
-    vi.stubEnv("CLAUDE_CODE_ADDITIONAL_PROTECTION", "");
-    vi.stubEnv("CLAUDE_CODE_BACKGROUND", "");
-    vi.stubEnv("CLAUDE_CODE_CONTAINER_ID", "");
-    vi.stubEnv("CLAUDE_CODE_REMOTE_SESSION_ID", "");
-    vi.stubEnv("OPENCODE_ANTHROPIC_PROFILE_OVERRIDE", "");
+    stubCleanEnvironment();
   });
 
   afterEach(() => {
@@ -158,27 +343,37 @@ describe("shared package foreground parity", () => {
     vi.unstubAllEnvs();
   });
 
-  it("matches the golden foreground request byte-for-byte after golden normalization", async () => {
-    const existing = await captureExistingRequest(vi.fn(() => Promise.resolve(makeSuccessResponse())));
-    const adapter = await buildWireCompatibleRequest(JSON.stringify(HOST_BODY), {
-      accessToken: "test-access",
-      clientRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      runtime: {
-        sessionId: "11111111-1111-4111-8111-111111111111",
-        deviceId: "2".repeat(64),
-        accountUuid: "33333333-3333-4333-8333-333333333333",
-        runtime: "node",
-        runtimeVersion: process.version,
-        os: process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux",
-        arch: process.arch,
-      },
-      cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-    });
+  it.each(DIFFERENTIAL_VECTORS)(
+    "matches the $name request byte-for-byte after golden normalization",
+    async ({ hostBody, cacheControl, antiVerbosity }) => {
+      testPolicy.antiVerbosity = antiVerbosity !== false;
+      const existing = await captureExistingRequest(
+        vi.fn(() => Promise.resolve(makeSuccessResponse())),
+        hostBody,
+      );
+      const adapter = await buildAdapterRequest(hostBody, cacheControl);
 
-    expect(normalizeUrl(adapter.url)).toBe(normalizeUrl(existing.url));
-    expect(adapter.method).toBe(existing.method);
-    expect(normalizeHeaders(adapter.headers)).toEqual(normalizeHeaders(existing.headers));
-    expect(normalizeBody(adapter.body)).toBe(normalizeBody(existing.body));
+      expect(normalizeUrl(adapter.url)).toBe(normalizeUrl(existing.url));
+      expect(adapter.method).toBe(existing.method);
+      expect(normalizeHeaders(adapter.headers)).toEqual(normalizeHeaders(existing.headers));
+      expect(normalizeBody(adapter.body)).toBe(normalizeBody(existing.body));
+    },
+  );
+
+  it("omits the context hint beta and body field on both construction paths", async () => {
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      HOST_BODY,
+    );
+    const adapter = await buildAdapterRequest(HOST_BODY);
+
+    const existingBeta = new Headers(existing.headers).get("anthropic-beta") ?? "";
+    const adapterBeta = adapter.headers.get("anthropic-beta") ?? "";
+
+    expect(existingBeta).not.toContain("context-hint-2026-04-09");
+    expect(adapterBeta).not.toContain("context-hint-2026-04-09");
+    expect(JSON.parse(existing.body).context_hint).toBeUndefined();
+    expect(JSON.parse(adapter.body).context_hint).toBeUndefined();
   });
 });
 
@@ -314,4 +509,91 @@ describe("shared package adapter input normalization", () => {
 
     await expect(buildWireCompatibleRequest(bodyWith({}), transport)).rejects.toThrow(SyntaxError);
   });
+});
+
+// These tests do NOT assert parity. They pin the exact places where the plugin
+// still applies behaviour the shared package rc.6 does not implement, so the
+// boundary is visible and any future package release that closes a gap fails
+// here loudly instead of silently changing the wire.
+describe("shared package boundary - deferred plugin policy", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stubCleanEnvironment();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("drops a bare-string system prompt in the plugin while the adapter preserves it", async () => {
+    const hostBody = { ...HOST_BODY, system: "You are a helpful assistant." };
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      hostBody,
+    );
+    const adapter = await buildAdapterRequest(hostBody);
+
+    expect(existing.body).not.toContain("You are a helpful assistant.");
+    expect(adapter.body).toContain("You are a helpful assistant.");
+    expect(JSON.parse(existing.body).system.every((block) => block.text !== "You are a helpful assistant.")).toBe(true);
+    expect(JSON.parse(adapter.body).system.some((block) => block.text === "You are a helpful assistant.")).toBe(true);
+  });
+
+  it("appends the anti-verbosity block on Opus 4.6 in the plugin only", async () => {
+    const hostBody = { ...HOST_BODY, model: "claude-opus-4-6", thinking: { type: "adaptive" }, effort: "high" };
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      hostBody,
+    );
+    const adapter = await buildAdapterRequest(hostBody);
+
+    expect(existing.body).toContain("# Text output (does not apply to tool calls)");
+    expect(adapter.body).not.toContain("# Text output (does not apply to tool calls)");
+  });
+
+  it("derives adaptive thinking and the default effort in the plugin only", async () => {
+    const hostBody = { ...HOST_BODY, model: "claude-opus-4-8" };
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      hostBody,
+    );
+    const adapter = await buildAdapterRequest(hostBody);
+
+    const existingBody = JSON.parse(existing.body);
+    const adapterBody = JSON.parse(adapter.body);
+
+    expect(existingBody.thinking).toEqual({ type: "adaptive" });
+    expect(existingBody.output_config).toEqual({ effort: "high" });
+    expect(existingBody.temperature).toBeUndefined();
+
+    expect(adapterBody.thinking).toBeUndefined();
+    expect(adapterBody.output_config).toBeUndefined();
+    expect(adapterBody.temperature).toBe(1);
+  });
+
+  it("strips effort for a model without the effort capability while the adapter rejects it", async () => {
+    const hostBody = { ...HOST_BODY, effort: "medium" };
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      hostBody,
+    );
+
+    expect(JSON.parse(existing.body).effort).toBeUndefined();
+    await expect(buildAdapterRequest(hostBody)).rejects.toThrow("INVALID_EFFORT");
+  });
+
+  it.each(["claude-fable-5", "claude-mythos-5", "claude-3-5-haiku-latest"])(
+    "builds a request for %s in the plugin while the adapter rejects the model",
+    async (model) => {
+      const hostBody = { ...HOST_BODY, model };
+      const existing = await captureExistingRequest(
+        vi.fn(() => Promise.resolve(makeSuccessResponse())),
+        hostBody,
+      );
+
+      expect(JSON.parse(existing.body).model).toBe(model);
+      await expect(buildAdapterRequest(hostBody)).rejects.toThrow("UNSUPPORTED_MODEL");
+    },
+  );
 });
