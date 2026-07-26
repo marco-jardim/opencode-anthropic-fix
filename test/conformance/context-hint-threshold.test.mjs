@@ -94,4 +94,24 @@ describe("genuine context-hint body threshold", () => {
 
     expect(collectClearableToolUseIds(messages)).toEqual(["tool-1", "tool-2"]);
   });
+
+  it("does not collect tool_use ids for non-allowlisted tool names", () => {
+    const messages = Array.from({ length: 6 }, (_, index) => ({
+      role: "assistant",
+      content: [{ type: "tool_use", id: `tool-${index + 1}`, name: "TodoWrite" }],
+    }));
+
+    expect(collectClearableToolUseIds(messages)).toEqual([]);
+    expect(computeContextHintTokensSaved([...messages, transcriptWithFirstResult("x".repeat(80_000))[6]])).toBe(0);
+  });
+
+  it("collects tool_use ids for every allowlisted tool name", () => {
+    const names = ["Read", "Bash", "PowerShell", "Grep", "Glob", "WebSearch", "WebFetch", "Edit", "Write"];
+    const messages = names.map((name, index) => ({
+      role: "assistant",
+      content: [{ type: "tool_use", id: `tool-${index + 1}`, name }],
+    }));
+
+    expect(collectClearableToolUseIds(messages)).toEqual(names.map((_, index) => `tool-${index + 1}`));
+  });
 });
