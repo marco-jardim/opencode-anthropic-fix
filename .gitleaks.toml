@@ -1,0 +1,20 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Individually justified false positives and generated dependencies/output"
+regexTarget = "match"
+paths = [
+  '''(?:^|/)coverage(?:/|$)''',
+  '''(?:^|/)node_modules(?:/|$)''',
+]
+regexes = [
+  # Public Anthropic `anthropic-beta` OAuth protocol flag, not a credential.
+  '''oauth-2025-04-20''',
+  # Public Anthropic `anthropic-beta` Files API protocol flag, not a credential.
+  '''files-api-2025-04-14''',
+  # Deliberately synthetic OAuth token used only to verify diagnostic redaction.
+  '''oat01DiagnoseSecret123''',
+  # Deliberately synthetic OAuth token used only to verify log redaction.
+  '''oat01ABCDEFGH12345''',
+]
