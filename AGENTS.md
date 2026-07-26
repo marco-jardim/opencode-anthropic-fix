@@ -12,7 +12,7 @@ architecture, `README.md` for user-facing features, and
 OpenCode plugin + standalone CLI (`index.mjs` + `cli.mjs`, both ESM `.mjs`) that
 lets Claude Pro/Max subscribers use OpenCode over OAuth, with multi-account
 rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
-(typing is via JSDoc). Two production deps: `@openauthjs/openauth` and `xxhash-wasm`.
+(typing is via JSDoc). Two production deps: `@tormentalabs/claude-code-wire-compat` and `xxhash-wasm`.
 
 ## Layout (what matters)
 

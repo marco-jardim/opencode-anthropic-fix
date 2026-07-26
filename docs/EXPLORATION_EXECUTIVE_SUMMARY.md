@@ -237,7 +237,8 @@ Each test validates:
 
 ## 📦 Dependencies
 
-- `@openauthjs/openauth@^0.4.3` — OAuth protocol implementation
+- `@tormentalabs/claude-code-wire-compat` — Claude Code wire compatibility
+- `xxhash-wasm@^1.1.0` — Fast request hashing
 - `@opencode-ai/plugin@^1.2.27` — OpenCode plugin API
 
 Dev dependencies:

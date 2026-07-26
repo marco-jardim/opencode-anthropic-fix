@@ -35,8 +35,7 @@ both fully before your first action.
    are wrong. The real on-disk path is **`D:\git\opencode-anthropic-fix`** (tooling may display the
    alias — use relative paths, they work). Fixing this leak is literally your first task (W0·P0.1).
 
-3. **Two production dependencies**, not one: `@openauthjs/openauth`, `xxhash-wasm`. (`AGENTS.md` says
-   one — also wrong; P0.1 fixes it.)
+3. **Two production dependencies**: `@tormentalabs/claude-code-wire-compat`, `xxhash-wasm`.
 
 4. **The monolith.** `index.mjs` is ~9.6k LOC — a single `AnthropicAuthPlugin` closure. Never read it
    end-to-end; always `grep`. It is a **global write-lock** (only one task may own it at a time). Wave 3

@@ -54,7 +54,6 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@openauthjs/openauth": "^0.4.3",
     "@tormentalabs/claude-code-wire-compat": "https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.9/tormentalabs-claude-code-wire-compat-0.1.0-rc.9.tgz",
     "xxhash-wasm": "^1.1.0"
   }
