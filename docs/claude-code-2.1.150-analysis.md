@@ -60,7 +60,7 @@ emission. Note: `redact-thinking` is **default ON** (matching CC 2.1.150 behavio
 | 3   | interleaved_thinking    | interleaved-thinking-2025-05-14    | Yes (thinking models)     |
 | 4   | long_context            | context-1m-2025-08-07              | Yes (long-ctx models)     |
 | 5   | context_management      | context-management-2025-06-27      | No (hardcoded false)      |
-| 6   | structured_outputs      | structured-outputs-2025-12-15      | No (tengu_tool_pear flag) |
+| 6   | structured_outputs      | structured-outputs-2025-12-15      | No (caller output format) |
 | 7   | web_search              | web-search-2025-03-05              | No (vertex/foundry only)  |
 | 8   | tool_search_adv         | advanced-tool-use-2025-11-20       | No                        |
 | 9   | tool_search             | tool-search-tool-2025-10-19        | No (legacy Z6q filter)    |
@@ -100,7 +100,7 @@ Feature-flagged (not default):
 
 - `thinking-token-count-2026-05-13` — behind `tengu_chert_bezel`
 - `context-management-2025-06-27` — hardcoded `&& false`
-- `structured-outputs-2025-12-15` — behind `tengu_tool_pear`
+- `structured-outputs-2025-12-15` — enabled when the caller supplies an output format; `tengu_tool_pear` gates `tool.strict = true` on the tool-schema path
 - `mid-conversation-system-2026-04-07` — model check + flag
 
 ---

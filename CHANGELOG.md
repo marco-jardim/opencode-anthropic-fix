@@ -72,11 +72,11 @@ Full analysis: `docs/claude-code-2.1.143-analysis.md`. Verified via `strings` ex
 - Registered `user-profiles-2026-03-24` for forward-compat (SDK admin endpoint beta, not chat completions).
 - Version pins in `index.test.mjs`, `lib/request-headers.test.mjs`, and `test/conformance/regression.test.mjs` bumped to `2.1.143`.
 
-**New: simple-system-prompt mode** (real CC `tengu_vellum_lantern` equivalent):
+**New: simple-system-prompt mode** (real CC `tengu_velvet_cascade` equivalent):
 
 - New config flag `token_economy.simple_system_prompt: false` (default off).
 - New helper `isSimpleSystemPromptEligible(model)` matching real CC's `sR9`: `claude-opus-4-7` and any `-eap` (early access) variant.
-- When flag is on AND model is eligible AND request is main-role, `buildSystemPromptBlocks` skips the anti-verbosity boilerplate injection (`ANTI_VERBOSITY_SYSTEM_PROMPT` + `NUMERIC_LENGTH_ANCHORS_PROMPT`). Identity preamble, billing block, user instructions, `<system-reminder>` blocks all preserved — CC fingerprint match unaffected.
+- When flag is on AND model is eligible AND request is main-role, `buildSystemPromptBlocks` skips the anti-verbosity boilerplate injection. Identity preamble, billing block, user instructions, `<system-reminder>` blocks all preserved — CC fingerprint match unaffected.
 - Savings: ~600–1500 tokens per request on eligible models. Conservative scope: gates only the plugin-owned anti-verbosity blocks; nothing the server uses to identify CC requests is touched.
 
 **New: `cc_workload` billing tag**:

@@ -836,7 +836,7 @@ export async function AnthropicAuthPlugin({ client }) {
         `telemetry-emulation: ${fresh.telemetry?.emulate_minimal ? "on (silent observer)" : "off"}`,
         `usage-toast: ${fresh.usage_toast ? "on" : "off"}`,
         `adaptive-context: ${fresh.adaptive_context?.enabled ? `on (↑${Math.round((fresh.adaptive_context.escalation_threshold || 150000) / 1000)}K ↓${Math.round((fresh.adaptive_context.deescalation_threshold || 100000) / 1000)}K)${adaptiveContextState.active ? " [ACTIVE]" : ""}` : "off"}`,
-        `anti-verbosity: ${fresh.anti_verbosity?.enabled !== false ? "on" : "off"} (length-anchors: ${fresh.anti_verbosity?.length_anchors !== false ? "on" : "off"})`,
+        `anti-verbosity: ${fresh.anti_verbosity?.enabled !== false ? "on" : "off"}`,
       ];
       await sendCommandMessage(input.sessionID, lines.join("\n"));
       return;
@@ -5369,7 +5369,6 @@ function writeCacheStatsFile(usage, model, hitRate) {
         cache_ttl: _pluginConfig?.cache_policy?.ttl ?? "1h",
         boundary_marker: _pluginConfig?.cache_policy?.boundary_marker ?? false,
         anti_verbosity: _pluginConfig?.anti_verbosity?.enabled !== false,
-        length_anchors: _pluginConfig?.anti_verbosity?.length_anchors !== false,
       },
       timestamp: new Date().toISOString(),
     };

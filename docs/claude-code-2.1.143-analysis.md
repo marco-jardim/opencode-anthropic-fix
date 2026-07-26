@@ -322,7 +322,7 @@ Gating logic (top of `Wz`):
 1. CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=1   -> force-on
 2. CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=0   -> force-off
 3. else require sR9(model) === true
-4. else require GrowthBook tengu_vellum_lantern === true
+4. else require GrowthBook tengu_velvet_cascade === true
 ```
 
 When on, the system prompt is leaner (less identity boilerplate, less tool
@@ -450,7 +450,7 @@ opt-in mimicry/economy work.
    model is `claude-opus-4-7` (or anything matching real CC's `sR9`), emit the
    leaner system prompt. Expected savings: 200-600 input tokens per request on
    short prompts. Real CC ships this gated behind GrowthBook
-   `tengu_vellum_lantern`, so opt-in default is correct.
+   `tengu_velvet_cascade`, so opt-in default is correct.
 
 2. **`cc_workload` billing tag passthrough**
    Add `signature_emulation.workload` (string, optional). When set, append
@@ -544,9 +544,8 @@ Test suite: **1141/1141 pass** after these changes.
 
 I picked the most conservative useful interpretation: when the flag is on AND
 the model is eligible (Opus 4.7 or `-eap` variants), SKIP the plugin's
-anti-verbosity boilerplate injection (`ANTI_VERBOSITY_SYSTEM_PROMPT` +
-`NUMERIC_LENGTH_ANCHORS_PROMPT`). Those two blocks are plugin-owned, not
-required by the CC fingerprint check, and together they account for the
+anti-verbosity boilerplate injection (`ANTI_VERBOSITY_SYSTEM_PROMPT`). That
+block is plugin-owned, not required by the CC fingerprint check, and it accounts for the
 biggest chunk of plugin-injected system text. Savings: ~600-1500 tokens per
 request on eligible models.
 

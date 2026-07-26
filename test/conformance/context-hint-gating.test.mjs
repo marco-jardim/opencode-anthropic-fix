@@ -1,10 +1,10 @@
 /**
- * Phase C Task C2 — Conformance tests for context-hint default flip.
+ * Conformance tests for the Claude Code 2.1.195 context-hint gate.
  *
- * With C1 proving applyContextHintCompaction is byte-deterministic, the
- * default for `token_economy.context_hint` flips from false to true.
+ * The genuine `tengu_hazel_osprey` GrowthBook gate defaults to false, so
+ * `token_economy.context_hint` requires explicit opt-in.
  * These tests pin:
- *   1. Default resolves to true
+ *   1. Default resolves to false
  *   2. Explicit opt-out (false) honored
  *   3. Explicit opt-in (true) honored
  *   4. Gating: claude-3 models excluded
@@ -196,25 +196,30 @@ beforeEach(() => {
 });
 
 // =============================================================================
-// Default value tests (Phase C2 flip)
+// Default value tests
 // =============================================================================
 
-describe("Phase C2: context_hint default flipped to true", () => {
-  it("DEFAULT_CONFIG.token_economy.context_hint === true", () => {
-    expect(DEFAULT_CONFIG.token_economy.context_hint).toBe(true);
+describe("Claude Code 2.1.195 context_hint default", () => {
+  it("DEFAULT_CONFIG.token_economy.context_hint === false", () => {
+    expect(DEFAULT_CONFIG.token_economy.context_hint).toBe(false);
   });
 
-  it("loadConfig() returns context_hint === true when no user override", () => {
+  it("loadConfig() returns context_hint === false when no user override", () => {
     const cfg = loadConfig();
-    expect(cfg.token_economy.context_hint).toBe(true);
+    expect(cfg.token_economy.context_hint).toBe(false);
+  });
+
+  it("requires context_hint to be explicitly opted in", () => {
+    const cfg = loadConfig({ token_economy: {} });
+    expect(cfg.token_economy.context_hint).toBe(false);
   });
 });
 
 // =============================================================================
-// Per-request gating with default-on config
+// Per-request gating with default-off config
 // =============================================================================
 
-describe("Phase C2: context-hint beta emitted by default on first-party main-thread", () => {
+describe("context-hint beta is absent by default on first-party main-thread", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -236,25 +241,25 @@ describe("Phase C2: context-hint beta emitted by default on first-party main-thr
     fetchFn = await setupFetchFn(client);
   });
 
-  it("default config + claude-4 + main-thread → beta sent + body context_hint present", async () => {
+  it("default config + claude-4 + main-thread → beta and body context_hint absent", async () => {
     const { headers, body } = await sendRequest(fetchFn);
 
-    expect(headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
-    expect(body.context_hint).toEqual({ enabled: true });
+    expect(headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
+    expect(body.context_hint).toBeUndefined();
   });
 
-  it("latch keeps beta sticky-on across subsequent main-thread requests", async () => {
+  it("default-off remains sticky across subsequent main-thread requests", async () => {
     // First request
     const first = await sendRequest(fetchFn);
-    expect(first.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
+    expect(first.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
 
-    // Second request — latch is sticky-ON so beta stays in header.
+    // Second request — the false default keeps the beta absent.
     const second = await sendRequest(fetchFn);
-    expect(second.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
+    expect(second.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
   });
 });
 
-describe("Phase C2: explicit opt-out respected", () => {
+describe("context-hint explicit opt-out", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -284,7 +289,7 @@ describe("Phase C2: explicit opt-out respected", () => {
   });
 });
 
-describe("Phase C2: explicit opt-in honored (matches new default behavior)", () => {
+describe("context-hint explicit opt-in", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -318,7 +323,7 @@ describe("Phase C2: explicit opt-in honored (matches new default behavior)", () 
 // Gating: excluded scenarios
 // =============================================================================
 
-describe("Phase C2: gating — claude-3 models excluded", () => {
+describe("context-hint gating — claude-3 models excluded", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -335,11 +340,12 @@ describe("Phase C2: gating — claude-3 models excluded", () => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: true },
     }));
     fetchFn = await setupFetchFn(client);
   });
 
-  it("claude-3-5-sonnet → beta NOT sent even with default-on + main-thread", async () => {
+  it("claude-3-5-sonnet → beta NOT sent even with explicit opt-in + main-thread", async () => {
     const { headers, body } = await sendRequest(fetchFn, { model: "claude-3-5-sonnet-20241022" });
 
     expect(headers.get("anthropic-beta") || "").not.toContain("context-hint-2026-04-09");
@@ -347,7 +353,7 @@ describe("Phase C2: gating — claude-3 models excluded", () => {
   });
 });
 
-describe("Phase C2: gating — non-first-party provider excluded", () => {
+describe("context-hint gating — non-first-party provider excluded", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -364,6 +370,7 @@ describe("Phase C2: gating — non-first-party provider excluded", () => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: true },
     }));
     fetchFn = await setupFetchFn(client);
   });
@@ -385,7 +392,7 @@ describe("Phase C2: gating — non-first-party provider excluded", () => {
   });
 });
 
-describe("Phase C2: gating — non-main-thread excluded", () => {
+describe("context-hint gating — non-main-thread excluded", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -402,6 +409,7 @@ describe("Phase C2: gating — non-main-thread excluded", () => {
       override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+      token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: true },
     }));
     fetchFn = await setupFetchFn(client);
   });

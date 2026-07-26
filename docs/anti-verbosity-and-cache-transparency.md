@@ -13,7 +13,7 @@ Two features added to reduce token consumption and improve cost visibility:
 
 ### What it does
 
-Injects two system prompt sections when the model is **Opus 4.6**:
+Injects one system prompt section when the model is **Opus 4.6**:
 
 1. **`anti_verbosity`** — Communication style instructions that tell the model to be concise:
    - One sentence before first tool call
@@ -21,10 +21,6 @@ Injects two system prompt sections when the model is **Opus 4.6**:
    - End-of-turn: 1-2 sentences max
    - No comments in code by default
    - No planning/analysis documents unless asked
-
-2. **`numeric_length_anchors`** — Hard word-count limits:
-   - Between tool calls: 25 words max
-   - Final responses: 100 words max (unless task requires more)
 
 ### How it works
 
@@ -39,8 +35,7 @@ Injects two system prompt sections when the model is **Opus 4.6**:
 ```json
 {
   "anti_verbosity": {
-    "enabled": true,
-    "length_anchors": true
+    "enabled": true
   }
 }
 ```
@@ -48,12 +43,11 @@ Injects two system prompt sections when the model is **Opus 4.6**:
 Environment variables:
 
 - `OPENCODE_ANTHROPIC_ANTI_VERBOSITY=0|1` — Master switch
-- `OPENCODE_ANTHROPIC_LENGTH_ANCHORS=0|1` — Length anchors only
 
 ### Files changed
 
 - `lib/config.mjs` — Added `anti_verbosity` config section, typedef, validation, env overrides
-- `index.mjs` — Added `ANTI_VERBOSITY_SYSTEM_PROMPT` and `NUMERIC_LENGTH_ANCHORS_PROMPT` constants; injection logic in `buildSystemPromptBlocks()`; status display in `/anthropic status`
+- `index.mjs` — Added `ANTI_VERBOSITY_SYSTEM_PROMPT`; injection logic in `buildSystemPromptBlocks()`; status display in `/anthropic status`
 
 ### Expected impact
 
@@ -102,8 +96,7 @@ Exposes cache performance metrics through two channels:
   "config": {
     "cache_ttl": "1h",
     "boundary_marker": false,
-    "anti_verbosity": true,
-    "length_anchors": true
+    "anti_verbosity": true
   },
   "timestamp": "2026-04-10T08:30:00.000Z"
 }
