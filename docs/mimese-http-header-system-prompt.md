@@ -228,7 +228,7 @@ last **user**-message block. This guard is model-agnostic but is what makes Opus
   (`advanced-tool-use-2025-11-20`, `tool-search-tool-2025-10-19`, `fast-mode-2026-02-01`, `effort-2025-11-24`).
 - `redact-thinking-2026-02-12` is default ON for first-party, non-SDK requests (matching CC 2.1.150). Opt out via `/anthropic set redact-thinking off`.
 - `context-management-2025-06-27` is hardcoded `&& false` in CC D5q (effectively disabled).
-- `structured-outputs-2025-12-15` remains behind `tengu_tool_pear` feature flag (not always-on).
+- `structured-outputs-2025-12-15` depends on the caller supplying an output format; `tengu_tool_pear` instead gates `tool.strict = true` on the tool-schema path.
 - Billing header format, `anthropic-version`, OAuth constants: byte-identical to 2.1.143.
 - See `claude-code-2.1.150-analysis.md` for full 26-entry beta registry and D5q assembly logic.
 
@@ -516,7 +516,7 @@ When `signatureEnabled=true`, current implementation may add dynamically:
 - `context-1m-2025-08-07` (if model indicates 1M context)
 - `redact-thinking-2026-02-12` (**default ON** — matches CC 2.1.150; opt out via `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`)
 - `context-management-2025-06-27` (opt-in via `token_economy.context_management`; hardcoded `&& false` in CC 2.1.150 D5q)
-- `structured-outputs-2025-12-15` (opt-in via `token_economy.structured_outputs`; behind `tengu_tool_pear` flag in CC)
+- `structured-outputs-2025-12-15` (opt-in via `token_economy.structured_outputs`; enabled by a caller-supplied output format in CC)
 - `web-search-2025-03-05` (provider `vertex`/`foundry` + supported model)
 - `prompt-caching-scope-2026-01-05` (non-interactive mode; **skipped in round-robin** — cache is per-workspace)
 - `extended-cache-ttl-2025-04-11` (default ON; extended prompt cache TTL — plugin addition for better cache rates)
@@ -558,7 +558,7 @@ Automatically enabled by Claude Code 2.1.150 (D5q builder, first-party OAuth, no
 Feature-flagged in CC 2.1.150 (NOT default; opt-in or flag-gated):
 
 - `context-management-2025-06-27` (hardcoded `&& false` in D5q — effectively disabled)
-- `structured-outputs-2025-12-15` (behind `tengu_tool_pear` flag)
+- `structured-outputs-2025-12-15` (enabled when the caller supplies an output format; `tengu_tool_pear` gates tool-schema strictness)
 - `thinking-token-count-2026-05-13` (behind `tengu_chert_bezel` flag)
 - `extended-cache-ttl-2025-04-11` (not default in CC, but default ON as plugin addition)
 - `environments-2025-11-01` (feature-flagged)

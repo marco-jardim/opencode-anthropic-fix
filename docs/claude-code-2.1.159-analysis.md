@@ -118,7 +118,8 @@ let z=â€¦USE_API_CONTEXT_MANAGEMENT&&!1,A=mH5(H);  // context_management (&&!1 â
 
 Everything else in the builder (claude-code, context-1m, prompt-caching-scope,
 interleaved-thinking, redact-thinking, thinking-token-count gating, context-management
-hardcoded-off, structured-outputs behind `tengu_tool_pear`, web-search vertex/foundry)
+hardcoded-off, structured-outputs from caller output format, `tool.strict` behind
+`tengu_tool_pear`, web-search vertex/foundry)
 is structurally identical.
 
 ---

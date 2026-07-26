@@ -252,7 +252,7 @@ _Last updated: 2026-05-16 (added items 8-10 from v2.1.143 drift review — see `
 Real CC 2.1.133+ embeds a model-eligibility check (`sR9` in 2.1.143 bundle) that
 matches `claude-opus-4-7`, any `-eap` suffix models, and a GrowthBook-listed set
 (`tengu_velvet_cascade.models`). When eligible AND the GrowthBook flag
-`tengu_vellum_lantern` is on (or `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=1`), CC emits
+`tengu_velvet_cascade` is on (or `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=1`), CC emits
 a leaner system prompt — less identity boilerplate, less tool self-description.
 
 ### Plugin proposal
