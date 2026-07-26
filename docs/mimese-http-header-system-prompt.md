@@ -105,6 +105,21 @@ disable-guard.
 
 ## Version history (mimicry-relevant changes)
 
+### Context-hint body threshold (2.1.195)
+
+The `context-hint-2026-04-09` beta and the `context_hint` request-body field have
+independent emission gates. Once the beta's controller gates pass, the beta is
+sent even when the body field is absent. The body is emitted only when clearing
+eligible old tool results would save at least `gao = 20000` estimated tokens.
+
+The recovered calculation keeps the newest `Pac = 5` tool-result groups, ignores
+results already replaced by `aNn = "[Old tool result content cleared]"` or an
+`Ecp = "<persisted-output>"` prefix, estimates text as `Math.round(length / 4)`,
+and charges `Acp = 2000` tokens for each image or document block. The genuine
+binary additionally filters tool names through `Hcp`; that allowlist remains
+unresolved, so the plugin documents the approximation and accepts all tool names
+rather than inventing a list.
+
 | CC version | SDK bundled | Beta additions                                                                                                                                                                                                                                                                                                                                                                                       | Beta removals                                                                 | OAuth change                                                                                                                                                                                  |
 | ---------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 2.1.195    | 0.94.0      | Registry 24→28: `+ server-side-fallback-2026-06-01`, `+ fallback-credit-2026-06-01` (both opt-in/gated, not default). CONFIRMED default-on for modern first-party models: `context-management-2025-06-27` (`n0d(model)`) + `effort-2025-11-24` (`Kw(model)`) — plugin under-sends both. CC re-adds `x-client-request-id:<uuid>` + conditional `x-cc-atis`. New optional `, workload/<n>` UA segment. | none                                                                          | **Token-call client axios→SDK fetch**: UA `anthropic-sdk-typescript/0.94.0 userOAuthProvider` + `anthropic-beta: oauth-2025-04-20` on token POST. Login flow/scopes/client_id byte-identical. |
