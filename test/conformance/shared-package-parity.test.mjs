@@ -184,6 +184,16 @@ const DIFFERENTIAL_VECTORS = [
     hostBody: { ...HOST_BODY, model: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "medium" },
     cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
   },
+  {
+    name: "model-fable-5-adaptive",
+    hostBody: { ...HOST_BODY, model: "claude-fable-5", thinking: { type: "adaptive" }, effort: "high" },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
+  {
+    name: "model-mythos-5-adaptive",
+    hostBody: { ...HOST_BODY, model: "claude-mythos-5", thinking: { type: "adaptive" }, effort: "high" },
+    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+  },
 ];
 
 beforeEach(() => {
@@ -583,17 +593,21 @@ describe("shared package boundary - deferred plugin policy", () => {
     await expect(buildAdapterRequest(hostBody)).rejects.toThrow("INVALID_EFFORT");
   });
 
-  it.each(["claude-fable-5", "claude-mythos-5", "claude-3-5-haiku-latest"])(
-    "builds a request for %s in the plugin while the adapter rejects the model",
-    async (model) => {
-      const hostBody = { ...HOST_BODY, model };
-      const existing = await captureExistingRequest(
-        vi.fn(() => Promise.resolve(makeSuccessResponse())),
-        hostBody,
-      );
+  // The plugin recognizes models with unanchored regexes and forwards any id
+  // verbatim; the shared package pins an exhaustive allowlist of the first-party
+  // `api.anthropic.com` surface and fails closed on everything else. Claude 3 is
+  // reachable only through gateway and cloud providers, each of which prefixes
+  // the identifier differently, so the package deliberately refuses it. A host
+  // that routes Claude 3 through this plugin must not be migrated to the adapter
+  // without first deciding what that request should become.
+  it("forwards a Claude 3 model in the plugin while the adapter refuses it", async () => {
+    const hostBody = { ...HOST_BODY, model: "claude-3-5-haiku-latest" };
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      hostBody,
+    );
 
-      expect(JSON.parse(existing.body).model).toBe(model);
-      await expect(buildAdapterRequest(hostBody)).rejects.toThrow("UNSUPPORTED_MODEL");
-    },
-  );
+    expect(JSON.parse(existing.body).model).toBe("claude-3-5-haiku-latest");
+    await expect(buildAdapterRequest(hostBody)).rejects.toThrow("UNSUPPORTED_MODEL");
+  });
 });
