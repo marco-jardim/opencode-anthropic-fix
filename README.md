@@ -716,6 +716,14 @@ export PATH="$HOME/.local/bin:$PATH"
 
 - [AnomalyCo](https://github.com/anomalyco/opencode-anthropic-auth) — Original OpenCode Anthropic auth plugin
 
+## Third-Party Dependencies
+
+The outgoing Anthropic Messages request is built by
+[`@tormentalabs/claude-code-wire-compat`](https://github.com/marco-jardim/claude-code-wire-compat),
+licensed under GPL-3.0-or-later. Attribution for every redistributed dependency is in
+[NOTICE](NOTICE); the pinned artifact, its integrity hash, and the rollback procedure are in
+[docs/shared-package-provenance.md](docs/shared-package-provenance.md).
+
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE) (GPLv3).
