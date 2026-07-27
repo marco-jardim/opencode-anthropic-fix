@@ -154,6 +154,18 @@ describe("shared wire package rollback documentation", () => {
     expect(provenance).toMatch(/never remove[^\n]*GPL/i);
   });
 
+  it("pins real commit identifiers instead of placeholders", () => {
+    // A runbook that says `<sha-of-something>` is useless at the moment it is
+    // needed, which is the exact improvisation this document argues against.
+    expect(provenance).not.toMatch(/<\s*sha/i);
+    expect(provenance).not.toMatch(/<[^>\n]*commit[^>\n]*>/i);
+    expect(provenance).not.toMatch(/<[^>\n]*sha[^>\n]*>/i);
+
+    const commitIdentifiers = new Set([...provenance.matchAll(/\b[0-9a-f]{7,40}\b/g)].map((match) => match[0]));
+    expect(commitIdentifiers.size).toBeGreaterThanOrEqual(2);
+    expect(provenance).toMatch(/git revert --no-edit [0-9a-f]{7,40}/);
+  });
+
   it("states that no runtime kill-switch exists", () => {
     expect(provenance).toMatch(/no runtime kill-switch/i);
     expect(provenance).toContain("OPENCODE_ANTHROPIC_PROFILE_OVERRIDE");

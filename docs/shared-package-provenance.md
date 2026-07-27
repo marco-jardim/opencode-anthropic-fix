@@ -67,28 +67,60 @@ This is an operational limitation, not an oversight to work around at 3 a.m.:
 If a runtime disable switch is ever wanted, it is a design change with its own tests, not something
 to improvise during an incident.
 
+## Migration commit chain
+
+Every commit that introduced or moved the shared package, newest first. Reverting in this order is
+the rollback; there are no placeholders to resolve during an incident.
+
+| SHA       | Message                                                                             | What reverting it undoes                                                    |
+| --------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `8f1d954` | `deps: upgrade the shared wire package to rc.11 and record the divergences`         | pin to `rc.11`, the divergences document, and its parity cases              |
+| `19847f1` | `deps: upgrade the shared wire package to the client-derived protocol`              | pin to the client-derived protocol build and the adapter line it required   |
+| `6d64945` | `chore(deps): upgrade the shared wire package to the catalogue-derived model table` | pin to the catalogue-derived model table                                    |
+| `fc7cf2e` | `chore(deps): upgrade the shared wire package and align parity expectations`        | pin bump plus the parity expectations aligned with it                       |
+| `cca5b56` | `test(conformance): expand shared package parity matrix`                            | parity coverage only; no runtime effect                                     |
+| `9c4967f` | `refactor(mimicry): consume wire compatibility rc.5`                                | adapter simplification against the `rc.5` API and its pin                   |
+| `f5bd6fd` | `feat: add emergency protocol profile override`                                     | the profile override seam in the adapter and its documentation              |
+| `e42621d` | `test: freeze published model helper exports`                                       | the public API contract test only; no runtime effect                        |
+| `6375cee` | `refactor: add shared wire package adapter`                                         | the adapter itself and the dependency in `package.json`/`package-lock.json` |
+
+`205241e` (secret scanner configuration) and `d8d4c54` (removal of an unrelated production
+dependency) are interleaved in the branch history but are not part of this migration; do not revert
+them as part of a shared-package rollback.
+
 ## Rollback
 
-Roll back by reverting commits, newest first, and re-running the full gate after each step.
+Scope the rollback to the smallest commit that reproduces the incident, then work newest-first
+through the table above, re-running the full gate after each step.
 
-1. Revert the construction swap (the commit that made the plugin consume the shared builder,
-   `refactor: consume shared wire request builder`):
+1. Reverting only a version bump downgrades the pin without removing the adapter. This is the usual
+   fix when a specific release candidate regressed the wire bytes:
 
    ```bash
-   git revert --no-edit <sha-of-construction-swap>
+   git revert --no-edit 8f1d954
+   npm ci
+   npm test -- --run test/conformance/shared-package-parity.test.mjs
    ```
 
-2. If the adapter commit (`refactor: add shared wire package adapter`) has not been merged, revert it
-   too, which also removes the dependency from `package.json` and `package-lock.json`:
+   Chain further reverts (`19847f1`, then `6d64945`, then `fc7cf2e`) to step further back.
+
+2. Reverting the whole chain removes the shared package entirely. The last commit to revert is the
+   adapter commit, which also drops the dependency from `package.json` and `package-lock.json`:
 
    ```bash
-   git revert --no-edit <sha-of-adapter-commit>
+   git revert --no-edit 6375cee
    npm ci
    ```
 
-   If it has been merged and shipped, keep the dependency installed and unused rather than editing
-   `package.json` on a hotfix branch: any `package.json` change merged to `master` triggers the
-   publication workflow described in [`ci.md`](./ci.md).
+   As of this document, `refactor/extract-wire-compat` is **not merged** into `master`, so the full
+   revert is safe on the branch. Once it is merged and released, prefer leaving the dependency
+   installed over editing `package.json` on a hotfix branch: any `package.json` change merged to
+   `master` triggers the publication workflow described in [`ci.md`](./ci.md).
+
+   There is no separate "construction swap" commit to revert today. Nothing outside
+   [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs) imports `buildWireCompatibleRequest` yet: the
+   adapter is built and parity-tested, but the plugin's live request path still uses its own
+   construction. When that swap lands, add its SHA to the top of the table and revert it first.
 
 3. Re-run the complete gate and confirm the parity and golden suites still pass:
 
