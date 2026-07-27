@@ -29,10 +29,10 @@ vi.mock("../../lib/refresh-lock.mjs", () => ({
 }));
 
 // Anti-verbosity injection is plugin-retained POLICY. The shared package has no
-// `systemPromptFeatures` surface in rc.9, so it never emits the
+// `systemPromptFeatures` surface as of rc.10, so it never emits the
 // `# Text output (does not apply to tool calls)` block. Vectors that assert
-// PROTOCOL parity on Opus 4.6/4.7 therefore disable it; the deferred-policy
-// suite below asserts the divergence explicitly so the deferral stays visible.
+// PROTOCOL parity on Opus 4.6/4.7 therefore disable it; the boundary suite
+// below asserts the divergence explicitly so the deferral stays visible.
 const testPolicy = vi.hoisted(() => ({ antiVerbosity: true }));
 
 vi.mock("../../lib/config.mjs", async (importOriginal) => {
@@ -140,6 +140,7 @@ const DIFFERENTIAL_VECTORS = [
       thinking: { type: "enabled", budget_tokens: 10000 },
     },
     cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
+    normalizeThinking: true,
   },
   {
     name: "multi-block-system",
@@ -201,7 +202,100 @@ const NORMALIZED_HEADER_NAMES = new Set([
   "x-stainless-arch",
   "x-stainless-os",
   "x-stainless-runtime-version",
+  // NOT a per-run nondeterminism normalization like the rest of this set: as of
+  // rc.10 the shared package is the REFERENCE implementation for
+  // `anthropic-beta` and the plugin's own header builder is the stale side, so
+  // the two legitimately differ on every vector. Excluding the value here keeps
+  // the byte-for-byte assertion enforcing every OTHER header, while
+  // `BETA_HEADER_DIVERGENCE` below pins the exact measured value on both sides
+  // for each model so nothing is lost.
+  "anthropic-beta",
 ]);
+
+// The measured per-model `anthropic-beta` divergence. The left column is what
+// the plugin's own wire path emits today; the right column is what the shared
+// package emits, which is what the genuine client emits. Where they differ the
+// PACKAGE is correct:
+//
+//   * `claude-code-20250219` is omitted for haiku models — upstream `$9r` does
+//     `if (!isHaiku) push(CLAUDE_CODE)`. The plugin pushes it unconditionally.
+//   * `web-search-2025-03-05` is never emitted — upstream pushes it only under
+//     the `vertex` and `foundry` providers, never first-party.
+//   * `advisor-tool-2026-03-01` is never emitted — no upstream push site for it
+//     exists at all.
+//   * `mid-conversation-system-2026-04-07` IS emitted for opus-4-8 and fable-5,
+//     which the plugin misses entirely.
+//   * The ORDER is upstream's emergent push order, not a sorted or curated
+//     list, so both sides are pinned as exact strings rather than as sets.
+//
+// Realigning the plugin onto the package is a product decision reserved for a
+// separate change. Until then this table is the contract: any drift on EITHER
+// side fails here.
+const BETA_HEADER_DIVERGENCE = [
+  {
+    name: "golden foreground model",
+    hostBody: HOST_BODY,
+    plugin:
+      "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    package:
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11",
+  },
+  {
+    name: "claude-3-5-haiku",
+    hostBody: { ...HOST_BODY, model: "claude-3-5-haiku" },
+    plugin:
+      "oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,web-search-2025-03-05",
+    package: "oauth-2025-04-20,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11",
+  },
+  {
+    name: "claude-haiku-4-5",
+    hostBody: { ...HOST_BODY, model: "claude-haiku-4-5" },
+    plugin:
+      "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    package:
+      "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11",
+  },
+  {
+    name: "claude-sonnet-4-6",
+    hostBody: { ...HOST_BODY, model: "claude-sonnet-4-6", thinking: { type: "adaptive" }, effort: "high" },
+    plugin:
+      "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,effort-2025-11-24,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    package:
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+  },
+  {
+    name: "claude-opus-4-6",
+    hostBody: { ...HOST_BODY, model: "claude-opus-4-6", thinking: { type: "adaptive" }, effort: "high" },
+    plugin:
+      "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,effort-2025-11-24,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    package:
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+  },
+  {
+    name: "claude-opus-4-7",
+    hostBody: { ...HOST_BODY, model: "claude-opus-4-7", thinking: { type: "adaptive" }, effort: "high" },
+    plugin:
+      "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,effort-2025-11-24,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    package:
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+  },
+  {
+    name: "claude-opus-4-8",
+    hostBody: { ...HOST_BODY, model: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "high" },
+    plugin:
+      "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,effort-2025-11-24,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    package:
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+  },
+  {
+    name: "claude-fable-5",
+    hostBody: { ...HOST_BODY, model: "claude-fable-5", thinking: { type: "adaptive" }, effort: "high" },
+    plugin:
+      "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,effort-2025-11-24,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    package:
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+  },
+];
 
 function makeClient() {
   return {
@@ -286,12 +380,39 @@ function normalizeHeaders(headers) {
   ]);
 }
 
-function normalizeBody(body) {
+function normalizeBody(body, { normalizeThinking = false } = {}) {
   const parsed = JSON.parse(body);
   if (!parsed.metadata?.user_id) throw new Error("Missing normalized path: body.metadata.user_id");
   parsed.metadata.user_id = "<normalized>";
+  // Opt-in, and only for the enabled-thinking vector. Unlike `user_id` this is
+  // not per-run nondeterminism: as of rc.10 the package emits the enabled
+  // branch the way upstream does and the plugin does not (see
+  // `ENABLED_THINKING_DIVERGENCE` below). Excluding the field keeps the rest of
+  // that vector's body under byte-for-byte comparison. Vectors that send
+  // `type: "adaptive"` do NOT set this flag — both paths still agree there and
+  // must keep agreeing.
+  if (normalizeThinking) {
+    if (parsed.thinking === undefined) throw new Error("Missing normalized path: body.thinking");
+    parsed.thinking = "<normalized>";
+  }
   return JSON.stringify(parsed);
 }
+
+// The measured enabled-thinking divergence, for a host request carrying
+// `thinking: {type: "enabled", budget_tokens: 10000}` against `max_tokens:
+// 8000`. The package is correct on both counts:
+//
+//   * it clamps with upstream's `Tr = Math.min(Fi - 1, Tr)`, so 10000 becomes
+//     7999; the plugin forwards the caller's over-limit value untouched.
+//   * it emits `budget_tokens` FIRST, which is upstream's insertion order for
+//     the enabled branch; the plugin emits `type` first.
+//
+// Key order is load-bearing because these bodies are compared as serialised
+// bytes, so this is pinned as an exact string rather than with `toEqual`.
+const ENABLED_THINKING_DIVERGENCE = {
+  plugin: '{"type":"enabled","budget_tokens":10000}',
+  package: '{"budget_tokens":7999,"type":"enabled"}',
+};
 
 async function captureExistingRequest(mockFetch, hostBody) {
   vi.stubGlobal("fetch", mockFetch);
@@ -355,18 +476,54 @@ describe("shared package foreground parity", () => {
 
   it.each(DIFFERENTIAL_VECTORS)(
     "matches the $name request byte-for-byte after golden normalization",
-    async ({ hostBody, cacheControl, antiVerbosity }) => {
+    async ({ hostBody, cacheControl, antiVerbosity, normalizeThinking }) => {
       testPolicy.antiVerbosity = antiVerbosity !== false;
       const existing = await captureExistingRequest(
         vi.fn(() => Promise.resolve(makeSuccessResponse())),
         hostBody,
       );
       const adapter = await buildAdapterRequest(hostBody, cacheControl);
+      const bodyOptions = { normalizeThinking: normalizeThinking === true };
 
       expect(normalizeUrl(adapter.url)).toBe(normalizeUrl(existing.url));
       expect(adapter.method).toBe(existing.method);
       expect(normalizeHeaders(adapter.headers)).toEqual(normalizeHeaders(existing.headers));
-      expect(normalizeBody(adapter.body)).toBe(normalizeBody(existing.body));
+      expect(normalizeBody(adapter.body, bodyOptions)).toBe(normalizeBody(existing.body, bodyOptions));
+    },
+  );
+
+  // `normalizeBody` excludes `thinking` from the byte-for-byte comparison for
+  // the enabled-thinking vector. This test is what keeps that exclusion honest,
+  // pinning the exact serialised object each path produces.
+  it("pins the enabled-thinking body divergence with the package as the reference", async () => {
+    const hostBody = { ...HOST_BODY, thinking: { type: "enabled", budget_tokens: 10000 } };
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      hostBody,
+    );
+    const adapter = await buildAdapterRequest(hostBody);
+
+    expect(JSON.stringify(JSON.parse(existing.body).thinking)).toBe(ENABLED_THINKING_DIVERGENCE.plugin);
+    expect(JSON.stringify(JSON.parse(adapter.body).thinking)).toBe(ENABLED_THINKING_DIVERGENCE.package);
+    expect(JSON.parse(existing.body).max_tokens).toBe(8000);
+    expect(JSON.parse(adapter.body).max_tokens).toBe(8000);
+  });
+
+  // `normalizeHeaders` excludes `anthropic-beta` from the byte-for-byte
+  // comparison above because the plugin and the package no longer agree on it.
+  // This test is what keeps that exclusion honest: both sides stay pinned to an
+  // exact measured string, so neither can drift unnoticed.
+  it.each(BETA_HEADER_DIVERGENCE)(
+    "pins the $name anthropic-beta divergence with the package as the reference",
+    async ({ hostBody, plugin, package: packageBeta }) => {
+      const existing = await captureExistingRequest(
+        vi.fn(() => Promise.resolve(makeSuccessResponse())),
+        hostBody,
+      );
+      const adapter = await buildAdapterRequest(hostBody);
+
+      expect(new Headers(existing.headers).get("anthropic-beta")).toBe(plugin);
+      expect(adapter.headers.get("anthropic-beta")).toBe(packageBeta);
     },
   );
 
@@ -434,11 +591,39 @@ describe("shared package adapter input normalization", () => {
 
   it("maps thinking.budget_tokens to the package contract and built body", async () => {
     const built = await buildWireCompatibleRequest(
+      bodyWith({ thinking: { type: "enabled", budget_tokens: 4096 } }),
+      transport,
+    );
+
+    expect(JSON.parse(built.body).thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
+  });
+
+  // rc.10 added upstream's budget clamp: `Tr = Math.min(Fi - 1, Tr)` where `Fi`
+  // is the emitted `max_tokens`. `HOST_BODY.max_tokens` is 8000, so a requested
+  // 8192 reaches the wire as 7999 rather than being forwarded verbatim. This is
+  // the package reproducing the genuine client, not losing the caller's value —
+  // the under-the-limit case above still passes through untouched.
+  it("clamps a thinking budget that exceeds max_tokens the way upstream does", async () => {
+    const built = await buildWireCompatibleRequest(
       bodyWith({ thinking: { type: "enabled", budget_tokens: 8192 } }),
       transport,
     );
 
-    expect(JSON.parse(built.body).thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+    expect(JSON.parse(built.body).max_tokens).toBe(8000);
+    expect(JSON.parse(built.body).thinking).toEqual({ type: "enabled", budget_tokens: 7999 });
+  });
+
+  it("forwards thinking.display to the package instead of dropping it", async () => {
+    const built = await buildWireCompatibleRequest(
+      bodyWith({ thinking: { type: "enabled", budget_tokens: 4096, display: "omitted" } }),
+      transport,
+    );
+
+    expect(JSON.parse(built.body).thinking).toEqual({
+      type: "enabled",
+      budget_tokens: 4096,
+      display: "omitted",
+    });
   });
 
   it("passes a cacheControl decision through to package breakpoint placement", async () => {
@@ -521,10 +706,23 @@ describe("shared package adapter input normalization", () => {
   });
 });
 
-// These tests do NOT assert parity. They pin the exact places where the plugin
-// still applies behaviour the shared package rc.9 does not implement, so the
-// boundary is visible and any future package release that closes a gap fails
-// here loudly instead of silently changing the wire.
+// These tests do NOT assert parity. They pin the exact places where the two
+// construction paths still disagree, so the boundary stays visible and any
+// future package release that moves it fails here loudly instead of silently
+// changing the wire.
+//
+// The direction of that disagreement inverted at rc.10. When this suite was
+// written the package lagged the plugin, and every entry here was a package gap
+// awaiting an upstream port. Several of those gaps are now closed, and the
+// remaining differences split into two kinds:
+//
+//   * plugin-retained POLICY the package deliberately has no surface for
+//     (anti-verbosity injection, adaptive-thinking derivation, default effort);
+//   * places where the PLUGIN is now the stale side and the package matches
+//     upstream (the `anthropic-beta` set above, `temperature` suppression).
+//
+// Where the two differ on PROTOCOL rather than policy, the package is correct.
+// Realigning the plugin is out of scope here; recording the inversion is not.
 describe("shared package boundary - deferred plugin policy", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -562,6 +760,14 @@ describe("shared package boundary - deferred plugin policy", () => {
     expect(adapter.body).not.toContain("# Text output (does not apply to tool calls)");
   });
 
+  // Thinking derivation and the default effort remain plugin-only POLICY: the
+  // host sent neither, and the package will not invent them.
+  //
+  // `temperature` is no longer part of that divergence. rc.9 emitted a bare
+  // `temperature: 1` here; rc.10 gates the field on upstream's allowlist
+  // predicate, which EXCLUDES `claude-opus-4-8`, so the field must be absent.
+  // Both paths now agree on omitting it and the assertion below pins that
+  // agreement rather than the old divergence.
   it("derives adaptive thinking and the default effort in the plugin only", async () => {
     const hostBody = { ...HOST_BODY, model: "claude-opus-4-8" };
     const existing = await captureExistingRequest(
@@ -579,7 +785,7 @@ describe("shared package boundary - deferred plugin policy", () => {
 
     expect(adapterBody.thinking).toBeUndefined();
     expect(adapterBody.output_config).toBeUndefined();
-    expect(adapterBody.temperature).toBe(1);
+    expect(adapterBody.temperature).toBeUndefined();
   });
 
   it("strips effort for a model without the effort capability while the adapter rejects it", async () => {
@@ -593,31 +799,40 @@ describe("shared package boundary - deferred plugin policy", () => {
     await expect(buildAdapterRequest(hostBody)).rejects.toThrow("INVALID_EFFORT");
   });
 
-  // The plugin recognizes models with unanchored regexes and forwards any id
-  // verbatim, while the shared package pins the genuine client catalogue and
-  // fails closed. `claude-3-5-haiku-latest` is a `provider_ids.first_party`
-  // dated form rather than a catalogue id. `claude-mythos-5` has no catalogue
-  // entry in this client version even though its display code recognizes the
-  // string.
+  // CLOSED divergence. The plugin recognizes models with unanchored regexes and
+  // forwards any id verbatim. rc.9 instead pinned the genuine client catalogue
+  // and failed closed with `UNSUPPORTED_MODEL`; rc.10 removed that error code
+  // from the package entirely, because the genuine client does not refuse an id
+  // it fails to recognize either — it sends it and lets the API answer.
+  //
+  // `claude-3-5-haiku-latest` is a `provider_ids.first_party` dated form rather
+  // than a catalogue id, and `claude-mythos-5` has no catalogue entry in this
+  // client version even though its display code recognizes the string. Both now
+  // reach the wire unchanged on both paths.
   it.each([["claude-3-5-haiku-latest"], ["claude-mythos-5"]])(
-    "forwards %s in the plugin while the adapter refuses the model",
+    "forwards %s verbatim on both paths now that the package no longer fails closed",
     async (model) => {
       const hostBody = { ...HOST_BODY, model };
       const existing = await captureExistingRequest(
         vi.fn(() => Promise.resolve(makeSuccessResponse())),
         hostBody,
       );
+      const adapter = await buildAdapterRequest(hostBody);
 
       expect(JSON.parse(existing.body).model).toBe(model);
-      await expect(buildAdapterRequest(hostBody)).rejects.toThrow("UNSUPPORTED_MODEL");
+      expect(JSON.parse(adapter.body).model).toBe(model);
     },
   );
 
-  // KNOWN, DELIBERATELY DEFERRED gap: upstream suppresses these four betas for
-  // `claude-3-*` models, while the package currently includes them in its
-  // always-enabled set. Closing this requires widening the package capability
-  // contract, which is out of scope for this wave.
-  it("pins the measured Claude 3 beta divergence", async () => {
+  // INVERTED divergence. rc.9 over-emitted four betas that upstream suppresses
+  // for `claude-3-*` models; rc.10 widened the package capability contract and
+  // closed that gap, so `adapterOnly` is now empty.
+  //
+  // What survives is the PLUGIN over-emitting: `claude-code-20250219`, which
+  // upstream `$9r` suppresses for haiku models, and `web-search-2025-03-05`,
+  // which upstream pushes only under the `vertex` and `foundry` providers. The
+  // package is the correct side of both.
+  it("pins the inverted Claude 3 beta divergence, with the plugin now over-emitting", async () => {
     const hostBody = { ...HOST_BODY, model: "claude-3-5-haiku" };
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
@@ -632,12 +847,7 @@ describe("shared package boundary - deferred plugin policy", () => {
     const adapterOnly = adapterBetas.filter((value) => !pluginBetas.includes(value)).sort();
     const pluginOnly = pluginBetas.filter((value) => !adapterBetas.includes(value)).sort();
 
-    expect(adapterOnly).toEqual([
-      "advisor-tool-2026-03-01",
-      "context-management-2025-06-27",
-      "redact-thinking-2026-02-12",
-      "thinking-token-count-2026-05-13",
-    ]);
-    expect(pluginOnly).toEqual([]);
+    expect(adapterOnly).toEqual([]);
+    expect(pluginOnly).toEqual(["claude-code-20250219", "web-search-2025-03-05"]);
   });
 });
