@@ -527,6 +527,46 @@ describe("shared package foreground parity", () => {
     },
   );
 
+  // New in rc.11 (D16). The package now caps `max_tokens` at the model's own
+  // default output limit before it reaches the wire, matching upstream's
+  // `Fi = Math.min(callerValue, qct(model))`; the plugin does not. The plugin's
+  // `resolveMaxTokens` is a *policy* cap for context-window economy, and its
+  // first rule is that a caller-supplied value wins outright
+  // (`lib/mimicry/request-helpers.mjs`), so nothing there consults the model.
+  //
+  // This divergence is invisible to the byte-for-byte vectors above because
+  // `HOST_BODY.max_tokens` is 8000 and every model those vectors exercise has a
+  // default output limit at or above 8192. It only appears once a caller asks
+  // for more than the model will give. Pinned here so that stays deliberate.
+  //
+  // The plugin's behaviour is intentionally left as-is: changing what goes on
+  // the wire in production is a product decision, not a dependency upgrade.
+  it("pins the max_tokens clamp divergence with the package as the reference", async () => {
+    // claude-sonnet-4-5 has a default output limit of 32000.
+    const hostBody = { ...HOST_BODY, max_tokens: 40000 };
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      hostBody,
+    );
+    const adapter = await buildAdapterRequest(hostBody);
+
+    expect(JSON.parse(existing.body).max_tokens).toBe(40000);
+    expect(JSON.parse(adapter.body).max_tokens).toBe(32000);
+  });
+
+  it("leaves max_tokens untouched on both paths when it is under the model limit", async () => {
+    // The control for the test above: at 8000 the cap cannot bite, which is why
+    // the byte-for-byte vectors still agree on this field.
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      HOST_BODY,
+    );
+    const adapter = await buildAdapterRequest(HOST_BODY);
+
+    expect(JSON.parse(existing.body).max_tokens).toBe(8000);
+    expect(JSON.parse(adapter.body).max_tokens).toBe(8000);
+  });
+
   it("omits the context hint beta and body field on both construction paths", async () => {
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
