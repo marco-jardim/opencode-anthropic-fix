@@ -11,7 +11,7 @@ This repository contains an `opencode` plugin and standalone CLI that let Claude
 - **Docs are the contract:** any wire change to headers, betas, system prompt, or body shape requires matching updates to [the HTTP mimicry contract](docs/mimese-http-header-system-prompt.md) **and** [the conformance regression suite](test/conformance/regression.test.mjs).
 - **OAuth first:** under OAuth, `oauth-2025-04-20` is always present in `anthropic-beta`.
 - **No TypeScript:** use `.mjs` and JSDoc only.
-- Do not add another heavy production dependency. The two production dependencies are `@openauthjs/openauth` and `xxhash-wasm`.
+- Do not add another heavy production dependency. The two production dependencies are `@tormentalabs/claude-code-wire-compat` and `xxhash-wasm`.
 - Changes to `rateLimitResetTimes` or `consecutiveFailures` in `anthropic-accounts.json` require a migration path.
 - The system-prompt sanitization `OpenCode → Claude Code` applies **only** to the system prompt sent to Anthropic—never to code, docs, or paths.
 

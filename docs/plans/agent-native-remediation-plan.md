@@ -188,7 +188,7 @@ Addresses audit **C6** naming hazard.
   - T2 `[medium]` — rewrite the affected `AGENTS.md` lines so they state the truth: package is
     `opencode-anthropic-fix`; host is **opencode**; mimicry target is **Claude Code**; the
     system-prompt sanitization rule is `OpenCode → Claude Code` (and must NOT be applied to agent docs).
-    Correct the prod-dependency count to **two** (`@openauthjs/openauth`, `xxhash-wasm`).
+    Keep the prod-dependency count at **two** (`@tormentalabs/claude-code-wire-compat`, `xxhash-wasm`).
 - **New tests:** none (doc-only) — but add a guard in P0.4 that greps for the broken literal.
 - **Acceptance:** `AGENTS.md` contains no `"Claude Code" → "Claude Code"` string; dependency count
   correct; a fresh reader cannot confuse host vs target.

@@ -54,7 +54,7 @@ opencode-anthropic-auth/
   index.test.mjs         Plugin integration tests (lifecycle, fetch, transforms, slash commands)
   cli.mjs                Standalone CLI (17 subcommands, auth flows, live usage quotas)
   cli.test.mjs           CLI command tests (auth + account management + IO capture)
-  package.json           Dependencies: @openauthjs/openauth (prod), esbuild + vitest + eslint + prettier (dev)
+  package.json           Dependencies: wire compatibility + xxhash (prod), esbuild + vitest + eslint + prettier (dev)
   eslint.config.mjs      ESLint flat config
   .prettierrc            Prettier config
   .prettierignore        Prettier ignore patterns
@@ -550,16 +550,17 @@ npx vitest run --reporter=verbose  # Verbose output
 
 ## Dependencies
 
-| Package                | Type       | Purpose                                                   |
-| ---------------------- | ---------- | --------------------------------------------------------- |
-| `@openauthjs/openauth` | Production | PKCE code generation for OAuth flow                       |
-| `@opencode-ai/plugin`  | Dev        | Plugin API type definitions (used via JSDoc)              |
-| `esbuild`              | Dev        | Bundles plugin + CLI into single files                    |
-| `vitest`               | Dev        | Test runner                                               |
-| `eslint`               | Dev        | Linter (flat config)                                      |
-| `@eslint/js`           | Dev        | ESLint recommended rules                                  |
-| `prettier`             | Dev        | Code formatter                                            |
-| `husky`                | Dev        | Git hooks (pre-commit: lint-staged, pre-push: test + fmt) |
-| `lint-staged`          | Dev        | Runs prettier + eslint on staged files                    |
+| Package                                 | Type       | Purpose                                                   |
+| --------------------------------------- | ---------- | --------------------------------------------------------- |
+| `@tormentalabs/claude-code-wire-compat` | Production | Claude Code wire compatibility                            |
+| `xxhash-wasm`                           | Production | Fast request hashing                                      |
+| `@opencode-ai/plugin`                   | Dev        | Plugin API type definitions (used via JSDoc)              |
+| `esbuild`                               | Dev        | Bundles plugin + CLI into single files                    |
+| `vitest`                                | Dev        | Test runner                                               |
+| `eslint`                                | Dev        | Linter (flat config)                                      |
+| `@eslint/js`                            | Dev        | ESLint recommended rules                                  |
+| `prettier`                              | Dev        | Code formatter                                            |
+| `husky`                                 | Dev        | Git hooks (pre-commit: lint-staged, pre-push: test + fmt) |
+| `lint-staged`                           | Dev        | Runs prettier + eslint on staged files                    |
 
-The plugin has **one production dependency** (`@openauthjs/openauth`), which is bundled into the dist output by esbuild. The bundled files have zero external dependencies beyond Node.js built-ins.
+PKCE code generation for the OAuth flow is implemented locally in `lib/oauth.mjs`. The plugin's two production dependencies are bundled into the dist output by esbuild, so the bundled files have zero external dependencies beyond Node.js built-ins.
