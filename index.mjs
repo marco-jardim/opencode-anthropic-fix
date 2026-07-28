@@ -18,7 +18,6 @@ import {
   resolveBetaShortcut,
 } from "./lib/request-headers.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, getConfigDir } from "./lib/config.mjs";
-import { loadContextHintDisabledFlag, saveContextHintDisabledFlag } from "./lib/context-hint-persist.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import {
@@ -320,34 +319,6 @@ export async function AnthropicAuthPlugin({ client }) {
   const SESSION_REJECTED_BETA_TTL_MS = 5 * 60 * 1000; // 5 minutes
   /** @type {Map<string, number>} canonical-beta to rejected-at epoch ms */
   const sessionRejectedBetas = new Map();
-
-  // Context-hint controller (CC v2.1.110+). Mirrors real CC's `createContextHintController`:
-  // sticky on across requests until the server responds with a specific error family.
-  //   - 422/424 → apply hint compaction (clear thinking + microcompact) and retry
-  //   - 400 "Unexpected value" + "anthropic-beta" → disable for session (beta unsupported)
-  //   - 409      → disable for session (conflict)
-  //   - 529 / overloaded → disable for session (temporary overload)
-  // When disabled, we strip context-hint from betas + body on subsequent requests so
-  // we don't keep triggering the same rejection and churning the cache.
-  // Persisted disable: if a prior session saw a 400 rejecting the context-hint
-  // beta (account lacks access), skip the beta from turn 1 of every subsequent
-  // session. Delete ~/.config/opencode/context-hint-disabled.flag (or the
-  // %APPDATA%\opencode equivalent on Windows) to re-enable once access is
-  // granted. See lib/context-hint-persist.mjs.
-  const _persistedCtxHint = loadContextHintDisabledFlag();
-  const contextHintState = {
-    /** Permanently disabled for this session after a server rejection. */
-    disabled: _persistedCtxHint.disabled === true,
-    /** Number of 422/424 compactions applied this session (for telemetry). */
-    compactionsApplied: 0,
-  };
-  if (contextHintState.disabled) {
-    debugLog(
-      "context-hint: loaded persisted disable flag",
-      _persistedCtxHint.status ? `status=${_persistedCtxHint.status}` : "",
-      _persistedCtxHint.timestamp ? `ts=${new Date(_persistedCtxHint.timestamp).toISOString()}` : "",
-    );
-  }
 
   // Token economy — session state for layered compaction strategies.
   const tokenEconomySession = {
@@ -2911,12 +2882,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 const _adaptiveOverride = _adaptiveOverrideForRequest;
 
                 // Token economy config (resolved once, passed to beta builder).
-                // If the server has rejected context-hint this session, reflect it here
-                // so buildAnthropicBetaHeader (called again inside buildRequestHeaders)
-                // drops the beta on subsequent requests.
-                // Also classify the request role (CC's querySource analog) and
-                // suppress context-hint for non-main-thread requests so we don't
-                // opt subagent/title/tool one-shots into a server retry loop.
+                // Also classify the request role (CC's querySource analog).
                 const _requestRole = classifyRequestRole(_parsedBodyOnce);
                 // opencode tags subagent requests with the x-parent-session-id header
                 // (set in its request builder only when a parent session exists).
@@ -2925,10 +2891,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 // only to pick the cheaper 5m cache tier for one-shot subagents.
                 const _isSubagent = getIncomingHeader(input, requestInit, "x-parent-session-id") != null;
                 const _baseTE = config.token_economy || {};
-                const _disableCtxHint = contextHintState.disabled || _requestRole !== "main";
-                const _tokenEconomy = _disableCtxHint
-                  ? { ..._baseTE, context_hint: false, __requestRole: _requestRole }
-                  : { ..._baseTE, __requestRole: _requestRole };
+                const _tokenEconomy = { ..._baseTE, __requestRole: _requestRole };
 
                 // Microcompact: inject clear betas at high context utilization
                 let _microcompactBetas = null;
@@ -2998,12 +2961,6 @@ export async function AnthropicAuthPlugin({ client }) {
                   // Merge latched betas that aren't in the current set
                   const merged = new Set(currentBetas);
                   for (const b of betaLatchState.sent) merged.add(b);
-                  // Context-hint kill switch: once server rejected it this session,
-                  // stop sending the beta (body field is gated on header, so it drops too).
-                  if (contextHintState.disabled) {
-                    merged.delete("context-hint-2026-04-09");
-                    betaLatchState.sent.delete("context-hint-2026-04-09");
-                  }
                   // Custom-beta strip kill switch: when the server rejected our custom
                   // betas (customBetasStripped latch fired), evict them from the latch so
                   // they do not re-appear on the retry attempt.
@@ -3617,76 +3574,35 @@ export async function AnthropicAuthPlugin({ client }) {
                     // Ignore read errors in debug logging path.
                   }
 
-                  // Context-hint protocol (CC v2.1.110+): detect server rejections and
-                  // apply the same disable/compact semantics as real Claude Code.
-                  //   - 400 w/ "Unexpected value" + "anthropic-beta" → beta unsupported, disable
-                  //   - 409 / 529 / overloaded                      → temporary, disable
-                  //   - 422 / 424                                    → compact messages (strip
-                  //     thinking blocks + old tool_result content) and retry ONCE.
-                  // Disable is permanent for the session; the beta latch strips it from future
-                  // requests so we don't keep triggering the same rejection.
-                  if (!contextHintState.disabled) {
-                    if (
-                      response.status === 400 &&
-                      errorBody &&
-                      errorBody.includes("Unexpected value") &&
-                      errorBody.includes("anthropic-beta") &&
-                      errorBody.includes("context-hint")
-                    ) {
-                      contextHintState.disabled = true;
-                      betaLatchState.dirty = true;
-                      // Persist across sessions: a 400 "Unexpected value" on the
-                      // context-hint beta means the account lacks access to the
-                      // beta entirely. Re-attempting next session would burn
-                      // another turn to the same rejection.
-                      saveContextHintDisabledFlag({
-                        reason: "beta_unsupported_400",
-                        status: 400,
-                      });
-                      debugLog("context-hint: beta rejected by server (400), disabling + persisting");
-                      // Retry without the beta. The latch above drops the header
-                      // and the body field on the rebuilt request.
-                      attempt--;
-                      continue;
-                    } else if (response.status === 409) {
-                      contextHintState.disabled = true;
-                      betaLatchState.dirty = true;
-                      debugLog("context-hint: 409 conflict, disabling for session");
-                      attempt--;
-                      continue;
-                    } else if (response.status === 529 && errorBody && errorBody.includes("context_hint")) {
-                      contextHintState.disabled = true;
-                      betaLatchState.dirty = true;
-                      debugLog("context-hint: 529 overloaded referencing hint, disabling for session");
-                      attempt--;
-                      continue;
-                    } else if (
-                      (response.status === 422 || response.status === 424) &&
-                      !requestInit._contextHintCompactAttempted
-                    ) {
-                      try {
-                        const hintBody = JSON.parse(requestInit.body);
-                        if (Array.isArray(hintBody.messages)) {
-                          const compacted = applyContextHintCompaction(hintBody.messages);
-                          if (compacted.changed) {
-                            hintBody.messages = compacted.messages;
-                            requestInit.body = JSON.stringify(hintBody);
-                            _parsedBodyOnce = null;
-                            requestInit._contextHintCompactAttempted = true;
-                            contextHintState.compactionsApplied += 1;
-                            attempt--;
-                            toast(
-                              `⚙ Context hint compaction (${response.status}) — cleared ${compacted.stats.thinkingCleared} thinking / ${compacted.stats.toolResultsCleared} tool results`,
-                              "info",
-                              { debounceKey: "context-hint-compact" },
-                            ).catch(() => {});
-                            debugLog("context-hint: applied compaction on status", response.status, compacted.stats);
-                            continue;
-                          }
+                  // Compact-and-retry on 422/424: strip thinking blocks + old tool_result
+                  // content and retry ONCE. This reacts to the response status alone, so it
+                  // stays live even though the plugin no longer announces the
+                  // context-hint-2026-04-09 beta nor the paired body field.
+                  if (
+                    (response.status === 422 || response.status === 424) &&
+                    !requestInit._contextHintCompactAttempted
+                  ) {
+                    try {
+                      const hintBody = JSON.parse(requestInit.body);
+                      if (Array.isArray(hintBody.messages)) {
+                        const compacted = applyContextHintCompaction(hintBody.messages);
+                        if (compacted.changed) {
+                          hintBody.messages = compacted.messages;
+                          requestInit.body = JSON.stringify(hintBody);
+                          _parsedBodyOnce = null;
+                          requestInit._contextHintCompactAttempted = true;
+                          attempt--;
+                          toast(
+                            `⚙ Context hint compaction (${response.status}) — cleared ${compacted.stats.thinkingCleared} thinking / ${compacted.stats.toolResultsCleared} tool results`,
+                            "info",
+                            { debounceKey: "context-hint-compact" },
+                          ).catch(() => {});
+                          debugLog("context-hint: applied compaction on status", response.status, compacted.stats);
+                          continue;
                         }
-                      } catch {
-                        // fall through to normal error handling
                       }
+                    } catch {
+                      // fall through to normal error handling
                     }
                   }
 
