@@ -14,10 +14,10 @@ document is enforced by
 | Field              | Value                                                                                                                                         |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Package            | `@tormentalabs/claude-code-wire-compat`                                                                                                       |
-| Version            | `0.1.0-rc.13`                                                                                                                                 |
-| Release tag        | `v0.1.0-rc.13`                                                                                                                                |
-| Artifact           | `https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.13/tormentalabs-claude-code-wire-compat-0.1.0-rc.13.tgz` |
-| Lockfile integrity | `sha512-PRbe7tJ389TE5rs7krRF5xl8CScXUlKPkCHJkq1zZgdMD5JFGsTjCAVo4nVBrHVaudkZoJAuYcJVpBbqhxa01Q==`                                             |
+| Version            | `0.1.0-rc.14`                                                                                                                                 |
+| Release tag        | `v0.1.0-rc.14`                                                                                                                                |
+| Artifact           | `https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.14/tormentalabs-claude-code-wire-compat-0.1.0-rc.14.tgz` |
+| Lockfile integrity | `sha512-yi0ivAkVpq4b/QhChRVtnhOqtr0EnP+0rK1CADDD98n4iKTBufa+11YjyQrBEKFoj6lz7hjkTIjedGZtgE+Xsg==`                                             |
 | License            | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                                                                                       |
 
 The specifier lives in [`package.json`](../package.json) and the resolved artifact plus its integrity
@@ -74,6 +74,7 @@ the rollback; there are no placeholders to resolve during an incident.
 
 | SHA       | Message                                                                             | What reverting it undoes                                                    |
 | --------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| _pending_ | `COM-466 deps: migrate the shared wire package pin to rc.14`                        | pin to `rc.14` and the `extraHeaderPolicy` seam; falls back to `rc.13`      |
 | `f57b06b` | `COM-466 deps: migrate the shared wire package pin to rc.13`                        | pin to `rc.13` and its four seams; falls back to `rc.11`                    |
 | `8f1d954` | `deps: upgrade the shared wire package to rc.11 and record the divergences`         | pin to `rc.11`, the divergences document, and its parity cases              |
 | `19847f1` | `deps: upgrade the shared wire package to the client-derived protocol`              | pin to the client-derived protocol build and the adapter line it required   |
