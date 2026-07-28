@@ -4,7 +4,7 @@
 **File:** D:\git\opencode-anthropic-fix\index.mjs  
 **Scope:** All functions related to HTTP header composition, system prompt building, metadata construction, and signature emulation for Claude Code mimicry.
 
-> **v2.1.107 UPDATE:** The `cch` field in the billing header is no longer a static `"00000"` placeholder. Starting with v2.1.107, the compiled Bun binary computes `cch` dynamically via `xxHash64(serializedBody, 0x6E52736AC806831E) & 0xFFFFF` → 5-hex-char hash, replacing `"cch=00000"` in the serialized body bytes. The plugin now replicates this via `xxhash-wasm`. See `computeAndReplaceCCH()` below and §16 Enforcement Changelog for full details.
+> **v2.1.107 NOTE (corrected):** In the **compiled Bun binary** distribution, `cch` was observed to be computed dynamically via `xxHash64(serializedBody, 0x6E52736AC806831E) & 0xFFFFF` → 5-hex-char hash, overwriting `"cch=00000"` in the serialized body bytes. **The plugin does NOT replicate this.** The plugin emits `cch=00000` as a static literal, and the xxHash machinery (`xxhash-wasm`, `computeAndReplaceCCH()`) has been removed from this repository — no such function exists in `index.mjs` or `lib/`. The dynamic computation lives in the compiled Bun binary, which is a _different distribution path_ from the JS bundle this plugin mimics; the JS bundle emits the static placeholder (see `lib/mimicry/system-prompt.mjs:118,140`). The section below is retained as reverse-engineering history, not as a description of plugin behavior.
 >
 > **v2.1.107 UPDATE:** Anthropic now blocklists specific tool names in the request body. The name `todowrite` (opencode's all-lowercase version of CC's `TodoWrite`) triggers immediate 400 rejection. The plugin now renames blocklisted tool names to their CC equivalents.
 
@@ -198,7 +198,11 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
   // Fix #4: cch is a static "00000" placeholder for Bun's native client attestation.
   // Real CC v92: cch is included for all providers EXCEPT bedrock/anthropicAws.
   // The real Bun binary overwrites these zeros in the serialized body bytes.
-  // For non-Bun runtimes, the server sees "00000" and skips attestation verification.
+  // ASSUMPTION (UNVERIFIED): for non-Bun runtimes, the server sees "00000" and skips
+  // attestation verification. No wire capture in this repo demonstrates this; it is
+  // inferred from the fact that the plugin ships cch=00000 and requests are accepted.
+  // Evidence that would confirm it: a wire capture of a non-Bun client sending
+  // cch=00000 and receiving a 200 with no attestation challenge.
   const isBedrock = provider === "bedrock" || provider === "anthropicAws";
   const cchPart = isBedrock ? "" : " cch=00000;";
   let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}`;
@@ -220,12 +224,18 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
 - **Bedrock:** `x-anthropic-billing-header: cc_version={version}.{fingerprint}; cc_entrypoint={entrypoint};` (no cch)
 - **With workload:** Appends ` cc_workload={workload};`
 
-> **v2.1.107 NOTE:** The `cch=00000` placeholder is now replaced post-serialization by `computeAndReplaceCCH()`. See below.
+> **v2.1.107 NOTE (corrected):** The plugin emits `cch=00000` as a **static literal** and never rewrites it post-serialization. `computeAndReplaceCCH()` does not exist in this repository. Re-hashing would mutate `system[0]` on every turn and invalidate the prompt cache (see the comment in `index.mjs` near the body-serialization path); the static placeholder is deliberate and pinned by `index.test.mjs` (`toContain("cch=00000")`). The section below documents the _compiled Bun binary's_ observed behavior and is kept for reverse-engineering value only.
 
-#### computeAndReplaceCCH() — CCH Attestation (v2.1.107+)
+#### HISTORICAL — CCH attestation as observed in the compiled Bun binary (v2.1.107 era)
+
+> **This is NOT what the plugin does, and this is NOT code from this repository.** The snippet
+> below is a reconstruction of the behavior observed in the compiled Bun binary during
+> reverse engineering of the v2.1.107 era. It was never shipped in the plugin in this form
+> and the corresponding dependency (`xxhash-wasm`) has been removed as dead code.
 
 ```javascript
-const CCH_SEED = 0x6e52736ac806831en; // Attestation.zig seed (unchanged since v2.1.96)
+// RECONSTRUCTION of compiled-Bun-binary behavior — not present in this repo.
+const CCH_SEED = 0x6e52736ac806831en; // see seed validity range below
 let _xxh64Raw = null;
 const _xxhashReady = xxhashInit().then((h) => {
   _xxh64Raw = h.h64Raw;
@@ -242,13 +252,26 @@ async function computeAndReplaceCCH(body) {
 }
 ```
 
-**Purpose:** Replaces the static `cch=00000` placeholder in the serialized JSON body with a 5-hex-char attestation hash. Called after `JSON.stringify()` but before sending the request.
+**Purpose (historical, binary only):** In the compiled Bun binary, the static `cch=00000` placeholder in the serialized JSON body was replaced with a 5-hex-char attestation hash after `JSON.stringify()` but before sending the request. The plugin performs no such step.
 
 **Algorithm:** `xxHash64(bodyBytes, seed) & 0xFFFFF` → 5-char lowercase hex.
 
-**Key details:**
+**Seed — value, validity range, and extraction method:**
 
-- The seed `0x6E52736AC806831E` is extracted from the compiled Bun binary's `Attestation.zig` module
+| Field             | Value                                                                                                                                     |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Value             | `0x6E52736AC806831E`                                                                                                                      |
+| Verified range    | v2.1.96 → v2.1.107 (compiled Bun binary)                                                                                                  |
+| Above that range  | **NOT VERIFIED.** The profile this plugin currently pins is **2.1.195**, ~100 versions later; the seed has never been checked against it. |
+| Extraction method | Read from the `Attestation.zig` module of the compiled Bun binary.                                                                        |
+
+The **method is the durable asset; the value is a snapshot that decays with every release.**
+Anyone reusing this must **re-extract the seed from the target binary version** rather than
+copying the literal above.
+
+**Key details (historical):**
+
+- The seed was extracted from the compiled Bun binary's `Attestation.zig` module (range above)
 - The hash is computed over the full serialized body (including the `cch=00000` placeholder)
 - After hashing, `cch=00000` is replaced with the computed value via string replacement
 - This means the hash is computed with the placeholder still present — the server knows to expect this
