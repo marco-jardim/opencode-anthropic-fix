@@ -62,7 +62,6 @@ import {
   buildRequestHeaders,
   buildAnthropicBetaHeader,
   parseRequestBodyMetadata,
-  detectProvider,
   extractFileIds,
 } from "./lib/mimicry/headers.mjs";
 import {
@@ -78,6 +77,8 @@ import {
   CLAUDE_CODE_IDENTITY_STRING,
   SUBAGENT_CC_ANCHOR,
 } from "./lib/mimicry/system-prompt.mjs";
+import { buildAdapterTransport, resolveAdapterEnv } from "./lib/mimicry/adapter-input.mjs";
+import { buildWireCompatibleRequest } from "./lib/mimicry/wire-compat.mjs";
 import {
   hasOneMillionContext,
   isEligibleFor1MContext,
@@ -2875,7 +2876,6 @@ export async function AnthropicAuthPlugin({ client }) {
                   requestInit.body,
                   _parsedBodyOnce,
                 );
-                const _reqProvider = detectProvider(requestUrl);
 
                 // --- Adaptive 1M context decision (once per logical request, not per retry) ---
                 if (!_adaptiveDecisionMade) {
@@ -2969,7 +2969,6 @@ export async function AnthropicAuthPlugin({ client }) {
                   "",
                   getSignatureEmulationEnabled(),
                   _reqModel,
-                  _reqProvider,
                   _sessionFilteredCustomBetas,
                   getEffectiveStrategy(),
                   requestUrl?.pathname,
@@ -3046,13 +3045,38 @@ export async function AnthropicAuthPlugin({ client }) {
                 const effectiveCachePolicy = latchedCachePolicy ||
                   config.cache_policy || { ttl: "1h", ttl_supported: true };
 
+                // Single decision point for the whole request: does this turn go
+                // through the shared wire package, or through the legacy
+                // buildRequestHeaders path?
+                //
+                // Two conditions remain now that multi-provider support is gone:
+                //  1. signature emulation on — with it off the plugin emits only
+                //     3 headers and a minimal beta set, while the package always
+                //     emits the full Claude Code set;
+                //  2. the /v1/messages endpoint — the package pins
+                //     `https://api.anthropic.com/v1/messages?beta=true`, so a
+                //     /v1/messages/count_tokens turn sent through it would be
+                //     silently rewritten to the wrong endpoint.
+                //
+                // The former first-party check is now structural: the plugin only
+                // speaks to first-party Anthropic, so it is always satisfied.
+                //  3. a JSON body is actually present — the package requires
+                //     `model` and `max_tokens`, so a bodiless request must keep
+                //     using the legacy path rather than throwing INVALID_INPUT.
+                const _adapterPathname = requestUrl?.pathname;
+                const _useAdapter =
+                  getSignatureEmulationEnabled() &&
+                  (_adapterPathname === "/v1/messages" || _adapterPathname === "/messages") &&
+                  typeof requestInit.body === "string" &&
+                  requestInit.body.length > 0;
+
                 const body = transformRequestBody(
                   requestInit.body,
                   {
                     enabled: getSignatureEmulationEnabled(),
                     claudeCliVersion,
                     promptCompactionMode: getPromptCompactionMode(),
-                    provider: _reqProvider,
+                    useAdapter: _useAdapter,
                     cachePolicy: effectiveCachePolicy,
                     fastMode: config.fast_mode || false,
                     // When the account's fast pool is cooling down, suppress
@@ -3121,29 +3145,83 @@ export async function AnthropicAuthPlugin({ client }) {
                   }
                 }
 
-                // Build headers with the selected account's token
-                const requestHeaders = buildRequestHeaders(
-                  input,
-                  requestInit,
-                  accessToken,
-                  body,
-                  requestUrl,
-                  {
-                    enabled: getSignatureEmulationEnabled(),
-                    claudeCliVersion,
-                    customBetas: _sessionFilteredCustomBetas,
-                    strategy: getEffectiveStrategy(),
-                    sessionId: signatureSessionId,
-                  },
-                  _adaptiveOverride,
-                  _tokenEconomy,
-                );
+                // Build headers with the selected account's token.
+                //
+                // Adapter path: the shared package composes the headers AND
+                // rebuilds the body (canonical system prefix, metadata, beta
+                // header). Legacy path: unchanged, byte for byte.
+                //
+                // The URL deliberately stays whatever transformRequestUrl already
+                // produced. `built.url` is the package's pinned
+                // `https://api.anthropic.com/v1/messages?beta=true`, which would
+                // override a custom ANTHROPIC_BASE_URL or proxy endpoint.
+                const _adapterSignature = {
+                  enabled: getSignatureEmulationEnabled(),
+                  claudeCliVersion,
+                  customBetas: _sessionFilteredCustomBetas,
+                  strategy: getEffectiveStrategy(),
+                  sessionId: signatureSessionId,
+                };
+
+                let requestHeaders;
+                let adapterBody;
+                if (_useAdapter) {
+                  const _adapterResult = buildAdapterTransport({
+                    input,
+                    requestInit,
+                    accessToken,
+                    requestUrl,
+                    provider: "anthropic",
+                    clientRequestId: randomUUID(),
+                    signature: _adapterSignature,
+                    identity: {
+                      persistentUserId: signatureUserId,
+                      accountId: getAccountIdentifier(account),
+                    },
+                    adaptiveOverride: _adaptiveOverride,
+                    tokenEconomy: _tokenEconomy,
+                    // Role inputs for the identity-block cache ttl: the adapter
+                    // re-runs the same resolveCacheTtl the body transform used,
+                    // so system[1] cannot carry a ttl the rest of the request
+                    // does not.
+                    cachePolicy: effectiveCachePolicy,
+                    requestRole: _requestRole,
+                    isSubagent: _isSubagent,
+                    body,
+                    env: resolveAdapterEnv(process.env),
+                    platform: process.platform,
+                    arch: process.arch,
+                    nodeVersion: process.version,
+                  });
+                  if (_adapterResult.applicable) {
+                    const built = await buildWireCompatibleRequest(body, _adapterResult.transport);
+                    requestHeaders = built.headers;
+                    adapterBody = built.body;
+                  } else {
+                    debugLog(`adapter not applicable (${_adapterResult.reason}); using the legacy request path`);
+                  }
+                }
+
+                if (!requestHeaders) {
+                  // Legacy path, and the fallback whenever the adapter declined:
+                  // a bodiless request, or a transport the translation refused.
+                  requestHeaders = buildRequestHeaders(
+                    input,
+                    requestInit,
+                    accessToken,
+                    body,
+                    requestUrl,
+                    _adapterSignature,
+                    _adaptiveOverride,
+                    _tokenEconomy,
+                  );
+                }
                 // cch stays as the static "00000" placeholder — cc-107 and cc-108
                 // JS bundles both emit `cch=00000;` unconditionally in the billing
                 // header. The Bun-binary Attestation.zig xxHash64 mechanism lives in
                 // a SEPARATE header path, not in this body field. Re-hashing here
                 // mutates system[0] each turn, invalidating the prompt cache.
-                const finalBody = body;
+                const finalBody = adapterBody ?? body;
 
                 const correlationId = createDebugCorrelationId();
 

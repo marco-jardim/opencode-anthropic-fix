@@ -14,10 +14,10 @@ document is enforced by
 | Field              | Value                                                                                                                                         |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Package            | `@tormentalabs/claude-code-wire-compat`                                                                                                       |
-| Version            | `0.1.0-rc.15`                                                                                                                                 |
-| Release tag        | `v0.1.0-rc.15`                                                                                                                                |
-| Artifact           | `https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.15/tormentalabs-claude-code-wire-compat-0.1.0-rc.15.tgz` |
-| Lockfile integrity | `sha512-U5ShTpaFFXCydvbjnSjicNDTL9EwNK7xDjkwT2xdocatHSaYROtqd5MzF7QQnE4hhdHhzY9TZ2hhAisxCDn2ew==`                                             |
+| Version            | `0.1.0-rc.16`                                                                                                                                 |
+| Release tag        | `v0.1.0-rc.16`                                                                                                                                |
+| Artifact           | `https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.16/tormentalabs-claude-code-wire-compat-0.1.0-rc.16.tgz` |
+| Lockfile integrity | `sha512-M+irkLzRt7D7x0gcJYqsvGG/bJ5iWHRypLpv14Y9g5srBy/LMbJj9qrj7tdxGAbJBvnKam5MNobDH4gQNsQ+aQ==`                                             |
 | License            | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                                                                                       |
 
 The specifier lives in [`package.json`](../package.json) and the resolved artifact plus its integrity

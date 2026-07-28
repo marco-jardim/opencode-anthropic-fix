@@ -819,7 +819,7 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -845,7 +845,7 @@ describe("fetch interceptor", () => {
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const [input] = mockFetch.mock.calls[0];
@@ -873,6 +873,8 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         system: [{ type: "text", text: "You are OpenCode, an opencode assistant." }],
         messages: [],
       }),
@@ -890,6 +892,8 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         system: [{ type: "text", text: "Working dir: /Users/rmk/projects/opencode-auth" }],
         messages: [],
       }),
@@ -908,6 +912,8 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [],
         system: [
           {
@@ -935,6 +941,8 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [{ role: "user", content: "hello" }],
         system: [
           {
@@ -959,6 +967,8 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [{ role: "user", content: "test" }],
         system: [
           {
@@ -1008,6 +1018,8 @@ describe("fetch interceptor", () => {
     await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [],
         system: [{ type: "text", text: "Header\n<example>keep me</example>\nRule A\nRule A" }],
       }),
@@ -1024,6 +1036,8 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         tools: [{ name: "read_file", description: "Read a file" }],
         messages: [
           {
@@ -1047,6 +1061,8 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         tools: [
           { name: "todowrite", description: "Manage todos" },
           { name: "bash", description: "Run commands" },
@@ -1075,6 +1091,8 @@ describe("fetch interceptor", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         tools: [
           { name: "mcp_server", description: "An MCP server tool" },
           { name: "chrome-devtools_click", description: "Click" },
@@ -1102,7 +1120,7 @@ describe("fetch interceptor", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const text = await response.text();
@@ -1123,7 +1141,7 @@ describe("fetch interceptor", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const text = await response.text();
@@ -1149,7 +1167,7 @@ describe("fetch interceptor", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const text = await response.text();
@@ -1189,7 +1207,7 @@ describe("fetch interceptor", () => {
 
     const response = await captureFetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
     await response.text();
     vi.doUnmock("node:fs");
@@ -1232,7 +1250,7 @@ describe("fetch interceptor", () => {
 
     const response = await noCaptureFetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
     await response.text();
     vi.doUnmock("node:fs");
@@ -1273,7 +1291,7 @@ describe("fetch interceptor", () => {
       );
       const response = await configuredFetchFn("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [] }),
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
       });
       return new Uint8Array(await response.arrayBuffer());
     };
@@ -1299,7 +1317,7 @@ describe("fetch interceptor", () => {
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(client.tui.showToast).toHaveBeenCalledWith({
@@ -1315,14 +1333,14 @@ describe("fetch interceptor", () => {
     // First request — should toast
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
     expect(client.tui.showToast).toHaveBeenCalledTimes(1);
 
     // Second request, same account — no new toast
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
     expect(client.tui.showToast).toHaveBeenCalledTimes(1);
   });
@@ -1347,7 +1365,7 @@ describe("fetch interceptor", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -1430,6 +1448,8 @@ describe("file-id account pinning", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [
           {
             role: "user",
@@ -1501,7 +1521,11 @@ describe("file-id account pinning", () => {
     // Request WITHOUT file_ids — should use default (sticky → account 1)
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Hello" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Hello" }],
+      }),
     });
 
     const apiCall = mockFetch.mock.calls[0];
@@ -1579,6 +1603,8 @@ describe("file-id account pinning", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [
           {
             role: "user",
@@ -1675,7 +1701,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -1722,7 +1748,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -1774,11 +1800,11 @@ describe("fetch interceptor — token refresh", () => {
 
     const p1 = result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
     const p2 = result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     // Wait until refresh is definitely in-flight, then resolve it.
@@ -1853,7 +1879,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -1899,7 +1925,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
     expect(response.status).toBe(200);
 
@@ -1953,7 +1979,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
     expect(response.status).toBe(200);
 
@@ -2029,7 +2055,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2111,7 +2137,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
     expect(response.status).toBe(200);
 
@@ -2160,7 +2186,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2196,7 +2222,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2231,7 +2257,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2268,7 +2294,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2326,7 +2352,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2380,7 +2406,7 @@ describe("fetch interceptor — token refresh", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2443,7 +2469,7 @@ describe("fetch interceptor — token refresh", () => {
     await expect(
       result.fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [] }),
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
       }),
     ).rejects.toThrow();
 
@@ -2484,7 +2510,7 @@ describe("fetch interceptor — edge conditions", () => {
     await expect(
       result.fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [] }),
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
       }),
     ).rejects.toThrow("No enabled Anthropic accounts available");
 
@@ -2530,7 +2556,7 @@ describe("fetch interceptor — account exhaustion", () => {
     await expect(
       result.fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [] }),
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
       }),
     ).rejects.toThrow(/Token refresh failed|No available Anthropic account|All accounts exhausted/);
   });
@@ -2549,7 +2575,7 @@ describe("fetch interceptor — account exhaustion", () => {
     await expect(
       fetchFn("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [] }),
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
       }),
     ).rejects.toThrow(/All accounts exhausted|No available Anthropic account/);
 
@@ -2576,7 +2602,7 @@ describe("fetch interceptor — account exhaustion", () => {
     await expect(
       fetchFn("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [] }),
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
       }),
     ).rejects.toThrow(/Token refresh failed|No available Anthropic account|All accounts exhausted/);
 
@@ -2586,7 +2612,7 @@ describe("fetch interceptor — account exhaustion", () => {
     await expect(
       fetchFn("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [] }),
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
       }),
     ).rejects.toThrow(/No available Anthropic account|All accounts exhausted/);
 
@@ -2607,7 +2633,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(503);
@@ -2635,7 +2661,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(529);
@@ -2655,7 +2681,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(500);
@@ -2684,7 +2710,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2704,7 +2730,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     // Should return the 400 directly — not switch accounts
@@ -2726,7 +2752,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2768,7 +2794,7 @@ describe("fetch interceptor — account exhaustion", () => {
       await expect(
         result.fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
-          body: JSON.stringify({ messages: [] }),
+          body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
         }),
       ).rejects.toThrow(/All accounts exhausted|No available Anthropic account/);
 
@@ -2781,7 +2807,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
       const response = await result.fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [] }),
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
       });
 
       expect(response.status).toBe(200);
@@ -2817,7 +2843,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2860,7 +2886,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -2903,7 +2929,7 @@ describe("fetch interceptor — account exhaustion", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -3155,7 +3181,7 @@ describe("header handling", () => {
         "content-type": "application/json",
         "anthropic-beta": "custom-beta-2025-01-01,another-beta-2025-02-01",
       },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -3440,6 +3466,10 @@ describe("header handling", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
+        // Above the 8000 budget: the thinking budget is clamped to
+        // `max_tokens - 1`, so a smaller/default max_tokens would make the
+        // clamp, not the pass-through behaviour under test, drive the result.
+        max_tokens: 16000,
         messages: [],
         thinking: { type: "enabled", budget_tokens: 8000 },
       }),
@@ -3696,6 +3726,8 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [
           {
             role: "assistant",
@@ -3719,6 +3751,7 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
         // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip billing/identity
         max_tokens: 8192,
         messages: [
@@ -3753,6 +3786,7 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
         // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip billing/identity
         max_tokens: 8192,
         messages: [
@@ -3789,6 +3823,8 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [{ role: "user", content: "hello" }],
         system: [
           {
@@ -3814,6 +3850,8 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [{ role: "user", content: "hello" }],
         system: [{ type: "text", text: "Plain user instructions without env context." }],
       }),
@@ -3833,6 +3871,7 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
         // force main-shaped (max_tokens>2048 + 3 messages) so lean_system_non_main does not strip identity injection
         max_tokens: 8192,
         messages: [
@@ -3916,7 +3955,12 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: "hello" }], system: [] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+        system: [],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -3935,7 +3979,7 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [], betas: ["foo-beta"] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [], betas: ["foo-beta"] }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -3954,7 +3998,7 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -3970,7 +4014,7 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -3989,7 +4033,7 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -4010,6 +4054,8 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [{ role: "user", content: "hello" }],
         system: [{ type: "text", text: "Use OpenCode defaults" }],
       }),
@@ -4031,6 +4077,8 @@ describe("header handling", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
         messages: [{ role: "user", content: "test" }],
         system: [
           {
@@ -4048,7 +4096,11 @@ describe("header handling", () => {
     consoleSpy.mockRestore();
   });
 
-  it("filters unsupported betas on bedrock endpoints", async () => {
+  it("no longer filters betas on bedrock endpoints: bedrock support was removed (COM-466)", async () => {
+    // Owner decision (COM-466): multi-provider support is out of scope for this
+    // plugin, which is first-party OAuth only. Bedrock endpoints no longer get a
+    // provider-specific beta filter. This guard asserts the removal holds so the
+    // bedrock branch cannot silently regrow in the request path.
     process.env.TENGU_SCARF_COFFEE = "1";
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
@@ -4060,14 +4112,17 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    expect(betaHeader).not.toContain("context-1m-2025-08-07");
-    expect(betaHeader).not.toContain("tool-examples-2025-10-29");
-    expect(betaHeader).not.toContain("code-execution-2025-08-25");
-    expect(betaHeader).not.toContain("files-api-2025-04-14");
+    // The bedrock-unsupported beta list is gone: 1m context is emitted for the
+    // 1m model regardless of host, exactly as on api.anthropic.com.
+    expect(betaHeader).toContain("context-1m-2025-08-07");
     expect(betaHeader).toContain("claude-code-20250219");
   });
 
-  it("uses mantle provider beta/header behavior when CLAUDE_CODE_USE_MANTLE=1", async () => {
+  it("ignores CLAUDE_CODE_USE_MANTLE: the mantle provider branch was removed (COM-466)", async () => {
+    // Owner decision (COM-466): multi-provider support is out of scope; the plugin
+    // is first-party OAuth only. CLAUDE_CODE_USE_MANTLE is now an inert env var —
+    // it no longer suppresses the cch billing segment or rewrites betas. This guard
+    // asserts the removal holds so the mantle branch cannot silently regrow.
     process.env.CLAUDE_CODE_USE_MANTLE = "1";
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
@@ -4089,13 +4144,18 @@ describe("header handling", () => {
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
     const parsed = JSON.parse(init.body);
-    expect(betaHeader).not.toContain("tool-search-tool-2025-10-19");
-    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
+    // Unchanged first-party behavior despite the env var: the billing header is
+    // injected with its cch segment intact, exactly as with no provider env set.
+    expect(betaHeader).toBeTruthy();
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
-    expect(parsed.system[0].text).not.toContain("cch=00000");
+    expect(parsed.system[0].text).toContain("cch=00000");
   });
 
-  it("omits cch for anthropicAws provider when CLAUDE_CODE_USE_ANTHROPIC_AWS=1", async () => {
+  it("ignores CLAUDE_CODE_USE_ANTHROPIC_AWS: the anthropicAws provider branch was removed (COM-466)", async () => {
+    // Owner decision (COM-466): multi-provider support is out of scope; the plugin
+    // is first-party OAuth only. CLAUDE_CODE_USE_ANTHROPIC_AWS is now an inert env
+    // var — it no longer omits the cch billing segment. This guard asserts the
+    // removal holds so the anthropicAws branch cannot silently regrow.
     process.env.CLAUDE_CODE_USE_ANTHROPIC_AWS = "1";
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
@@ -4117,10 +4177,11 @@ describe("header handling", () => {
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
     const parsed = JSON.parse(init.body);
-    expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
-    expect(betaHeader).not.toContain("tool-search-tool-2025-10-19");
+    // Unchanged first-party behavior despite the env var: the billing header is
+    // injected with its cch segment intact, exactly as with no provider env set.
+    expect(betaHeader).toBeTruthy();
     expect(parsed.system[0].text).toContain("x-anthropic-billing-header:");
-    expect(parsed.system[0].text).not.toContain("cch=00000");
+    expect(parsed.system[0].text).toContain("cch=00000");
   });
 
   it("extracts headers from Request object input", async () => {
@@ -4132,7 +4193,7 @@ describe("header handling", () => {
         "content-type": "application/json",
         "x-custom-header": "custom-value",
       },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     await fetchFn(request, {});
@@ -4204,7 +4265,11 @@ describe("OPENCODE_ANTHROPIC_INITIAL_ACCOUNT", () => {
     mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
     await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "hello" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -4246,7 +4311,11 @@ describe("OPENCODE_ANTHROPIC_INITIAL_ACCOUNT", () => {
     mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
     await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "hello" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -4339,7 +4408,11 @@ describe("OPENCODE_ANTHROPIC_INITIAL_ACCOUNT", () => {
     mockFetch.mockResolvedValueOnce(new Response('{"content":[]}', { status: 200 }));
     await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "hello" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "hello" }],
+      }),
     });
 
     // Should use account 1 (only account — pinning skipped because count <= 1)
@@ -4375,7 +4448,7 @@ describe("markSuccess wiring", () => {
 
     const response = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -4421,7 +4494,11 @@ describe("markSuccess wiring", () => {
 
       const response = await fetchFn("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "Hi" }],
+        }),
       });
 
       expect(response.status).toBe(200);
@@ -4483,13 +4560,21 @@ describe("markSuccess wiring", () => {
 
     const first = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Hi" }],
+      }),
     });
     await first.text();
 
     const second = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Again" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Again" }],
+      }),
     });
 
     expect(second.status).toBe(200);
@@ -4540,13 +4625,21 @@ describe("markSuccess wiring", () => {
 
     const first = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Hi" }],
+      }),
     });
     await first.text();
 
     const second = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Again" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Again" }],
+      }),
     });
 
     expect(second.status).toBe(200);
@@ -4592,13 +4685,21 @@ describe("markSuccess wiring", () => {
 
     const first = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Hi" }],
+      }),
     });
     await first.text();
 
     const second = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Again" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Again" }],
+      }),
     });
 
     expect(second.status).toBe(200);
@@ -4644,13 +4745,21 @@ describe("markSuccess wiring", () => {
 
     const first = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Hi" }],
+      }),
     });
     await first.text();
 
     const second = await result.fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      body: JSON.stringify({ messages: [{ role: "user", content: "Again" }] }),
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Again" }],
+      }),
     });
 
     expect(second.status).toBe(200);
@@ -4696,7 +4805,11 @@ describe("markSuccess wiring", () => {
 
       const first = await result.fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "Hi" }],
+        }),
       });
       await first.text();
 
@@ -4709,7 +4822,11 @@ describe("markSuccess wiring", () => {
 
       const second = await result.fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [{ role: "user", content: "Again" }] }),
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "Again" }],
+        }),
       });
 
       expect(second.status).toBe(200);
@@ -4757,7 +4874,11 @@ describe("markSuccess wiring", () => {
 
       const first = await result.fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        body: JSON.stringify({ messages: [{ role: "user", content: "Hi" }] }),
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "Hi" }],
+        }),
       });
       await first.text();
 
@@ -4767,7 +4888,11 @@ describe("markSuccess wiring", () => {
       await expect(
         result.fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
-          body: JSON.stringify({ messages: [{ role: "user", content: "Again" }] }),
+          body: JSON.stringify({
+            model: "claude-sonnet-4-5",
+            max_tokens: 1024,
+            messages: [{ role: "user", content: "Again" }],
+          }),
         }),
       ).rejects.toThrow(/No available Anthropic account|All accounts exhausted/);
 

@@ -56,6 +56,10 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
 import { AnthropicAuthPlugin } from "../../index.mjs";
 
 const goldenPath = fileURLToPath(new URL("../fixtures/golden/outgoing-foreground.json", import.meta.url));
+// COM-466: the golden's anthropic-beta list order is the shared wire-compat package's order
+// (derived from the real Claude Code 2.1.195 binary), not the plugin's historical hand-rolled
+// order. Same betas, different sequence; recalibrated on the package migration because the
+// package order is what the real client sends, so matching it raises mimicry fidelity.
 const golden = JSON.parse(readFileSync(goldenPath, "utf8"));
 
 // Calibrated by comparing two fresh plugin/interceptor runs of the same input:
