@@ -230,27 +230,25 @@ Recorded so nobody re-opens them as "missing" behaviour. All three were live bef
 
 Recorded here rather than fixed, because each was out of scope for the dispatch that created it.
 
-1. **No guard test on `toClaudeCodeRequestInput`.** That function
-   (`lib/mimicry/wire-compat.mjs:158`) builds the package input from an **explicit field list**. It has now forgotten
-   to forward a field **three separate times** during this migration, and the symptom is identical and vicious every
-   time: the seam looks configured at the call site, nothing warns, and it simply has no effect. That is precisely how
-   the lean-system-prompt feature became a no-op. Nothing compares the keys of `ClaudeCodeRequestInput` against what
-   the translator forwards. **Highest-return follow-up in this document.** A test that reflects over the package's
-   exported input type — or over a fixture enumerating its keys — and fails on any field the translator drops would
-   close a whole class of silent regressions.
-
-2. **The context-hint latch and its persistence module are dead code.** `contextHintState` (`index.mjs:338`), the
-   `merged.delete("context-hint-2026-04-09")` / `betaLatchState.sent.delete(...)` pair (`index.mjs:3003-3005`) and the
-   400/409/529 response handlers that react to an error body mentioning `context-hint` (`index.mjs:3628-3683`) all
-   still run, together with `lib/context-hint-persist.mjs` (`loadContextHintDisabledFlag` /
-   `saveContextHintDisabledFlag`, imported at `index.mjs:21`). The server cannot reject a hint the plugin no longer
-   announces, so none of it can fire in production. It was left intact deliberately, outside the scope of the removal
-   dispatch. Deleting it is a mechanical follow-up: drop the module, the import, the state object, the latch delete
-   and the three status handlers. Note that `_disableCtxHint` (`index.mjs:2928`) still writes `context_hint: false`
-   into the per-request token-economy object, which nothing reads any more.
-
-3. **The `normalizeThinking` exclusion is vestigial.** See row 5. It costs one of the two exclusion slots the scaling
+1. **The `normalizeThinking` exclusion is vestigial.** See row 5. It costs one of the two exclusion slots the scaling
    warning is rationing, and it no longer excludes a real difference.
+
+### Closed
+
+- **No guard test on `toClaudeCodeRequestInput`** — closed by
+  `test/conformance/wire-compat-input-coverage.test.mjs`. The translator builds the package input from an explicit
+  field list and had forgotten to forward a field three separate times during this migration, with an identical
+  symptom each time: the seam looks configured at the call site, nothing warns, and it has no effect. That is exactly
+  how the lean-system-prompt feature became a no-op. The test parses `ClaudeCodeRequestInput` out of the installed
+  package's `dist/contracts.d.ts` and compares it against the keys the translator actually produces, in both
+  directions. Omissions are allowed but must be declared with a reason, and an entry naming a field the package no
+  longer declares fails too, so the allowlist cannot rot. If a package bump adds a field, this test names it.
+
+- **The context-hint latch and its persistence module were dead code** — removed. `lib/context-hint-persist.mjs`,
+  `contextHintState`, `_disableCtxHint`, the beta kill-switch pair and the 400/409/529 handlers that matched an error
+  body mentioning the hint are all gone. The server cannot reject a hint the client no longer advertises. The 422/424
+  compaction branch stayed: it reacts to the response status, not to an error body naming the hint, so it fires
+  regardless of what the client advertises.
 
 ## Syncing a new package version
 
