@@ -72,20 +72,22 @@ to improvise during an incident.
 Every commit that introduced or moved the shared package, newest first. Reverting in this order is
 the rollback; there are no placeholders to resolve during an incident.
 
-| SHA       | Message                                                                             | What reverting it undoes                                                    |
-| --------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `0508b55` | `COM-466 deps: migrate the shared wire package pin to rc.15`                        | pin to `rc.15`; falls back to `rc.14` and its two defects                   |
-| `df639f3` | `COM-466 deps: migrate the shared wire package pin to rc.14`                        | pin to `rc.14` and the `extraHeaderPolicy` seam; falls back to `rc.13`      |
-| `f57b06b` | `COM-466 deps: migrate the shared wire package pin to rc.13`                        | pin to `rc.13` and its four seams; falls back to `rc.11`                    |
-| `8f1d954` | `deps: upgrade the shared wire package to rc.11 and record the divergences`         | pin to `rc.11`, the divergences document, and its parity cases              |
-| `19847f1` | `deps: upgrade the shared wire package to the client-derived protocol`              | pin to the client-derived protocol build and the adapter line it required   |
-| `6d64945` | `chore(deps): upgrade the shared wire package to the catalogue-derived model table` | pin to the catalogue-derived model table                                    |
-| `fc7cf2e` | `chore(deps): upgrade the shared wire package and align parity expectations`        | pin bump plus the parity expectations aligned with it                       |
-| `cca5b56` | `test(conformance): expand shared package parity matrix`                            | parity coverage only; no runtime effect                                     |
-| `9c4967f` | `refactor(mimicry): consume wire compatibility rc.5`                                | adapter simplification against the `rc.5` API and its pin                   |
-| `f5bd6fd` | `feat: add emergency protocol profile override`                                     | the profile override seam in the adapter and its documentation              |
-| `e42621d` | `test: freeze published model helper exports`                                       | the public API contract test only; no runtime effect                        |
-| `6375cee` | `refactor: add shared wire package adapter`                                         | the adapter itself and the dependency in `package.json`/`package-lock.json` |
+| SHA       | Message                                                                              | What reverting it undoes                                                                                        |
+| --------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `93779c7` | `COM-466 feat(mimicry): migrate the pin to rc.17 and close the wave 6.2 divergences` | pin to `rc.17`; falls back to `rc.16`                                                                           |
+| `99f4844` | `COM-466 WIP: adapter swap, capability fixes and rc.16 migration`                    | **the construction swap**: the live request path stops calling the package and returns to `buildRequestHeaders` |
+| `0508b55` | `COM-466 deps: migrate the shared wire package pin to rc.15`                         | pin to `rc.15`; falls back to `rc.14` and its two defects                                                       |
+| `df639f3` | `COM-466 deps: migrate the shared wire package pin to rc.14`                         | pin to `rc.14` and the `extraHeaderPolicy` seam; falls back to `rc.13`                                          |
+| `f57b06b` | `COM-466 deps: migrate the shared wire package pin to rc.13`                         | pin to `rc.13` and its four seams; falls back to `rc.11`                                                        |
+| `8f1d954` | `deps: upgrade the shared wire package to rc.11 and record the divergences`          | pin to `rc.11`, the divergences document, and its parity cases                                                  |
+| `19847f1` | `deps: upgrade the shared wire package to the client-derived protocol`               | pin to the client-derived protocol build and the adapter line it required                                       |
+| `6d64945` | `chore(deps): upgrade the shared wire package to the catalogue-derived model table`  | pin to the catalogue-derived model table                                                                        |
+| `fc7cf2e` | `chore(deps): upgrade the shared wire package and align parity expectations`         | pin bump plus the parity expectations aligned with it                                                           |
+| `cca5b56` | `test(conformance): expand shared package parity matrix`                             | parity coverage only; no runtime effect                                                                         |
+| `9c4967f` | `refactor(mimicry): consume wire compatibility rc.5`                                 | adapter simplification against the `rc.5` API and its pin                                                       |
+| `f5bd6fd` | `feat: add emergency protocol profile override`                                      | the profile override seam in the adapter and its documentation                                                  |
+| `e42621d` | `test: freeze published model helper exports`                                        | the public API contract test only; no runtime effect                                                            |
+| `6375cee` | `refactor: add shared wire package adapter`                                          | the adapter itself and the dependency in `package.json`/`package-lock.json`                                     |
 
 `205241e` (secret scanner configuration) and `d8d4c54` (removal of an unrelated production
 dependency) are interleaved in the branch history but are not part of this migration; do not revert
@@ -121,10 +123,22 @@ through the table above, re-running the full gate after each step.
    installed over editing `package.json` on a hotfix branch: any `package.json` change merged to
    `master` triggers the publication workflow described in [`ci.md`](./ci.md).
 
-   There is no separate "construction swap" commit to revert today. Nothing outside
-   [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs) imports `buildWireCompatibleRequest` yet: the
-   adapter is built and parity-tested, but the plugin's live request path still uses its own
-   construction. When that swap lands, add its SHA to the top of the table and revert it first.
+   The construction swap has landed, so it is a distinct rollback step and it is the FIRST one to
+   consider. [`index.mjs`](../index.mjs) imports `buildWireCompatibleRequest` and calls it on the
+   live request path for every first-party `/v1/messages` turn with signature emulation on; the
+   legacy `buildRequestHeaders` construction survives beside it only as the fallback for the
+   requests the adapter declines (a non-`/v1/messages` endpoint such as `count_tokens`, a bodiless
+   request, or signature emulation off). Reverting `99f4844` therefore sends every turn back down
+   the legacy path without removing the package:
+
+   ```bash
+   git revert --no-edit 99f4844
+   npm test -- --run test/conformance/shared-package-usage.test.mjs
+   ```
+
+   That suite is the one that fails if the swap is undone by accident rather than on purpose: it
+   observes the adapter boundary during a real request instead of comparing the two constructions,
+   which is what the parity suite does and why parity alone stays green on a silent fallback.
 
 3. Re-run the complete gate and confirm the parity and golden suites still pass:
 
