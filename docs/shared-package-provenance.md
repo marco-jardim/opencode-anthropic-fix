@@ -11,28 +11,30 @@ document is enforced by
 
 ## Current pin
 
-| Field              | Value                                                                                                                                         |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Package            | `@tormentalabs/claude-code-wire-compat`                                                                                                       |
-| Version            | `0.1.0-rc.17`                                                                                                                                 |
-| Release tag        | `v0.1.0-rc.17`                                                                                                                                |
-| Artifact           | `https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.17/tormentalabs-claude-code-wire-compat-0.1.0-rc.17.tgz` |
-| Lockfile integrity | `sha512-YQNS02MyM2YWcCT4d/o8FP6605Hv2jXedMGtNgO27sGA0bY8qR3rfMEBdg5GYPQnz+vt+3J0RlLEacnhsrq5sg==`                                             |
-| License            | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                                                                                       |
+| Field              | Value                                                                                                  |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| Package            | `@tormentalabs/claude-code-wire-compat`                                                                |
+| Version            | `0.1.0`                                                                                                |
+| Origin             | npm registry (`npm install --save-exact @tormentalabs/claude-code-wire-compat@0.1.0`)                  |
+| Artifact           | `https://registry.npmjs.org/@tormentalabs/claude-code-wire-compat/-/claude-code-wire-compat-0.1.0.tgz` |
+| Lockfile integrity | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==`      |
+| License            | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                                                |
 
-The specifier lives in [`package.json`](../package.json) and the resolved artifact plus its integrity
-hash live in `package-lock.json`. Both must agree; the conformance test fails if they drift.
+The specifier lives in [`package.json`](../package.json) as the bare exact version `0.1.0`, and the
+resolved registry artifact plus its integrity hash live in `package-lock.json`. Both must agree; the
+conformance test fails if they drift.
 
-## Why the pin is a tarball today
+## Why the pin is an exact registry version
 
-The shared package has not been published to the npm registry yet. Until it is, the only immutable
-public artifact is the GitHub release tarball for a specific release-candidate tag, so the plugin
-depends on that exact tarball with `--save-exact` semantics and a recorded lockfile integrity hash.
+Phase 9 of the extraction plan published `0.1.0` to the npm registry, so the plugin no longer depends
+on a GitHub release tarball. The pin is the exact registry version — no `^`, no `~`, no URL — which
+is immutable for a published npm version and is verified by the lockfile integrity hash above.
 
-The pin is temporary. Phase 9 of the extraction plan replaces it with the exact registry version
-`0.1.0` from npm, in the same reviewed change that prepares the plugin's own beta release. Once that
-happens, this document's pin table must be updated to the registry version and the policy test's
-`registry` branch takes over from the `tarball` branch automatically.
+Before publication the only immutable public artifact was the GitHub release tarball for a specific
+release-candidate tag (`v0.1.0-rc.17` was the last such pin, integrity
+`sha512-YQNS02MyM2YWcCT4d/o8FP6605Hv2jXedMGtNgO27sGA0bY8qR3rfMEBdg5GYPQnz+vt+3J0RlLEacnhsrq5sg==`).
+That shape is still accepted by the policy test for rollback purposes, but the `registry` branch of
+the test now governs the live pin.
 
 The following specifier shapes are forbidden and fail the policy test: `file:` and `link:` paths,
 `git`/`github:` references, branch archives, any URL without a recorded release-candidate tag, and

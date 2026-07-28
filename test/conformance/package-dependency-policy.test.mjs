@@ -102,13 +102,27 @@ describe("shared wire package dependency specifier policy", () => {
   });
 
   it("records a lockfile integrity hash for the pinned artifact", () => {
+    const specifier = manifest.dependencies?.[packageName];
     const entry = lockfile.packages?.[`node_modules/${packageName}`];
 
     expect(entry).toBeDefined();
     expect(entry.version).toMatch(exactVersion);
     expect(entry.integrity).toMatch(/^sha512-[A-Za-z0-9+/]+={0,2}$/);
-    expect(entry.resolved).toBe(manifest.dependencies?.[packageName]);
     expect(entry.license).toBe(packageLicense);
+
+    // A tarball specifier IS the resolved artifact, so the two must be byte-identical.
+    // A registry specifier is the bare version, and npm resolves it to the registry
+    // tarball URL for that exact version; asserting that URL keeps the lockfile from
+    // silently pointing at a different version or a non-registry mirror.
+    if (classifyDependencySpecifier(specifier).kind === "registry") {
+      expect(entry.version).toBe(specifier);
+      expect(entry.resolved).toBe(
+        `https://registry.npmjs.org/${packageName}/-/claude-code-wire-compat-${specifier}.tgz`,
+      );
+      return;
+    }
+
+    expect(entry.resolved).toBe(specifier);
   });
 
   it("documents the exact pinned tag and integrity hash while the pin is a tarball", () => {

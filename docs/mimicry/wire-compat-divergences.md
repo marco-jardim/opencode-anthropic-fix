@@ -23,8 +23,9 @@ itself a defect: then the fix belongs in the consumer. `stainlessHelper` markers
 
 ## Package version state (read this before running `npm install`)
 
-- Pinned in `package.json:57` and installed in `node_modules`: **`0.1.0-rc.17`**, from the published
-  `v0.1.0-rc.17` release tarball. S8 and S9 exist only in `rc.17`.
+- Pinned in `package.json` and installed in `node_modules`: **`0.1.0`**, the exact version published to
+  the npm registry (a bare `0.1.0` specifier, not a URL). S8 and S9 shipped in `0.1.0-rc.17` and are
+  therefore present in `0.1.0`.
 
 The pin, the lockfile integrity hash and `docs/shared-package-provenance.md` must agree.
 `test/conformance/package-dependency-policy.test.mjs` fails if they drift, which is what caught this
@@ -263,7 +264,8 @@ the code.
 
 ## Syncing a new package version
 
-1. Update the pin in `package.json` to the new release tarball URL and run `npm install`. Then copy the version, tag,
+1. Bump the pin with `npm install --save-exact @tormentalabs/claude-code-wire-compat@<version>`, which writes the bare
+   exact version to `package.json` and the registry artifact URL plus integrity to `package-lock.json`. Then copy the version,
    artifact URL and the lockfile's new `integrity` hash into the pin table of
    `docs/shared-package-provenance.md` — `test/conformance/package-dependency-policy.test.mjs` compares the three
    sources and fails on drift.

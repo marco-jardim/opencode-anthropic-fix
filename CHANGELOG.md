@@ -2,6 +2,36 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.3.0-beta.0] — 2026-07-28
+
+### Changed
+
+- **Shared wire package repinned to the npm registry.** `@tormentalabs/claude-code-wire-compat` is now pinned to the
+  exact registry version `0.1.0` (`sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==`)
+  instead of the `v0.1.0-rc.17` GitHub release tarball URL. Same code, immutable published artifact, no `^`/`~` range.
+  `docs/shared-package-provenance.md` and `docs/mimicry/wire-compat-divergences.md` were updated to match, and
+  `test/conformance/package-dependency-policy.test.mjs` now asserts the registry-shaped lockfile resolution
+  (`entry.version === specifier` plus the canonical registry URL) instead of the tarball-only
+  `entry.resolved === specifier` identity, which only ever held for a URL pin.
+- **`files` narrowed to exclude tests from the published tarball.** `lib/**/*.mjs` was matching every co-located
+  `*.test.mjs`; a `!lib/**/*.test.mjs` negation was added. The tarball drops from 66 to 36 files and 261.9 kB to
+  214.6 kB, with no production module removed.
+
+### Removed
+
+- **`xxhash-wasm` production dependency, and the dead code that justified it.** The plugin now has exactly one
+  production dependency. `index.mjs` imported `xxhash-wasm` and initialised `_xxh64Raw`/`_xxhashReady`, but neither
+  identifier had a single read site anywhere in product code, tests, fixtures or scripts, and the
+  `computeAndReplaceCCH()` function described in the documentation never existed in the source. The `cch` field of
+  `x-anthropic-billing-header` is — and remains — the static literal `00000`, deliberately: re-hashing the body would
+  mutate `system[0]` every turn and invalidate the prompt cache. This removes machinery that never computed anything,
+  not behaviour. No wire bytes change; `index.test.mjs`'s `toContain("cch=00000")` assertion is untouched and green.
+
+### Documentation
+
+- The `cch` documentation that described dynamic xxHash64 attestation as live behaviour was corrected by parallel work
+  in the same release window.
+
 ## [0.2.1] — 2026-07-13
 
 ### Added

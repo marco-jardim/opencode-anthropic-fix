@@ -3,7 +3,6 @@ import { stdin, stdout } from "node:process";
 import { randomBytes, randomUUID, createHash as createHashCrypto } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import xxhashInit from "xxhash-wasm";
 import { AccountManager, RATE_LIMIT_KEY_FAST } from "./lib/accounts.mjs";
 import {
   authorize as oauthAuthorize,
@@ -5583,17 +5582,6 @@ process.once("beforeExit", _beforeExitHandler);
 // ---------------------------------------------------------------------------
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
-
-// cch attestation: RE-ENABLED with xxHash64 (matching Bun binary's Attestation.zig).
-// The compiled Bun binary computes cch dynamically: xxHash64(body, seed) & 0xFFFFF.
-// Captured real CC v2.1.107 request shows cch=6d00f (5-hex-char, 20-bit masked hash).
-// Seed extracted from binary: 0x6E52736AC806831E (unchanged since v2.1.96).
-
-/** @type {null | ((buf: Uint8Array, seed: bigint) => bigint)} */
-let _xxh64Raw = null;
-const _xxhashReady = xxhashInit().then((h) => {
-  _xxh64Raw = h.h64Raw;
-});
 
 /**
  * Extract the text content of the first user message for billing hash computation.
