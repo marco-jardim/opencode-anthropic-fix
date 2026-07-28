@@ -36,16 +36,25 @@ clean `npm install` would have silently downgraded and taken both seams out with
 Two fields are excluded from the byte-for-byte comparison, and each exclusion is backstopped by a dedicated test that
 pins the exact value both sides produce, so neither can drift unnoticed:
 
-| Field            | Excluded in                                                 | Pinned by                                           | Still load-bearing?                    |
-| ---------------- | ----------------------------------------------------------- | --------------------------------------------------- | -------------------------------------- |
-| `anthropic-beta` | `normalizeHeaders`                                          | `BETA_HEADER_GOLDEN`, 8 model rows as exact strings | Yes — the two columns genuinely differ |
-| `thinking`       | `normalizeBody`, opt-in via `normalizeThinking`, one vector | `ENABLED_THINKING_GOLDEN`, exact serialised object  | No — both sides now emit the golden    |
+| Field                   | Excluded in        | Pinned by                                           | Why                                    |
+| ----------------------- | ------------------ | --------------------------------------------------- | -------------------------------------- |
+| `anthropic-beta`        | `normalizeHeaders` | `BETA_HEADER_GOLDEN`, 8 model rows as exact strings | Real, permanent divergence (see row 1) |
+| `body.metadata.user_id` | `normalizeBody`    | —                                                   | Per-run nondeterminism                 |
 
-`max_tokens` needs no exclusion: the difference is invisible at the fixture's values (see row 6).
+`thinking` used to be a third exclusion. It was removed once both paths started emitting the same value: it had
+stopped excluding any difference and would only have hidden a future real one. `max_tokens` never needed one — the
+difference is invisible at the fixture's values (see row 6).
+
+The pinning test for `thinking` (`ENABLED_THINKING_GOLDEN`) stays, and not out of caution: the differential vector
+catches the two paths diverging **from each other**, but it cannot catch them drifting **together**, which is exactly
+what a package bump does.
 
 > **This mechanism does not scale.** Two exclusions is the practical ceiling. If a third field diverges, the honest
 > move is to invert the suite's default — compare against the package as the reference and enumerate the plugin's
 > known-stale fields — rather than keep carving exceptions out of a comparison that is supposed to be exhaustive.
+>
+> The reverse question is worth asking on every bump: an exclusion whose two sides have converged is not free, it is
+> a blind spot with a comment on it. `thinking` was one for several release candidates.
 
 ## Outbound divergences
 
@@ -92,13 +101,11 @@ the way upstream does (`Tr = Math.min(Fi - 1, Tr)`, so 10000 against `max_tokens
 `budget_tokens` before `type`, which is upstream's insertion order for the enabled branch. Key order is load-bearing
 because the parity suite compares serialised bytes, so this is pinned as an exact string rather than with `toEqual`.
 
-Vectors that send `type: "adaptive"` do **not** set the `normalizeThinking` flag. Both paths still agree on the
-adaptive branch and must keep agreeing.
-
-The `normalizeThinking` exclusion in `normalizeBody` is now **vestigial**: it was there because the two sides
-disagreed, and the pinning test proves they no longer do. Removing the flag and letting `thinking` back into the
-byte-for-byte comparison is a safe cleanup, and it would buy back one of the two exclusion slots the scaling warning
-above is rationing.
+`thinking` is no longer excluded from the byte-for-byte comparison. The exclusion existed because the two sides
+disagreed on the enabled branch; the first-party turn now routes through the package, so both emit the same object
+and the exclusion was excluding nothing. It was removed and the differential vector passes with the field compared as
+bytes — which is the evidence that closes it. The pinning test on its own would not have been enough: a captured
+single-value golden proves the two sides agree on that golden, not on every vector.
 
 ### Row 6, in detail
 
@@ -228,12 +235,16 @@ Recorded so nobody re-opens them as "missing" behaviour. All three were live bef
 
 ## Technical debt this migration created
 
-Recorded here rather than fixed, because each was out of scope for the dispatch that created it.
-
-1. **The `normalizeThinking` exclusion is vestigial.** See row 5. It costs one of the two exclusion slots the scaling
-   warning is rationing, and it no longer excludes a real difference.
+None open. The three items this migration created are closed and kept below, because the failure mode each one
+describes is the reason the corresponding test or carve-out exists, and that reasoning is not reconstructable from
+the code.
 
 ### Closed
+
+- **The `thinking` exclusion had gone vestigial** — removed, and the differential vector now compares the field as
+  bytes. It cost one of the two exclusion slots the scaling warning above is rationing while excluding no real
+  difference. General lesson, worth re-reading on every package bump: an exclusion whose two sides have converged is
+  not free, it is a blind spot with a comment on it.
 
 - **No guard test on `toClaudeCodeRequestInput`** — closed by
   `test/conformance/wire-compat-input-coverage.test.mjs`. The translator builds the package input from an explicit

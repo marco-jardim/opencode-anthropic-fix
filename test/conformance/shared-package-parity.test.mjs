@@ -27,6 +27,15 @@
 //     `NORMALIZED_HEADER_NAMES`. That is a real property, and it is the one that
 //     breaks first when someone adds body-mutating policy.
 //
+//     Every field held out of that comparison costs coverage, so the held-out
+//     set is kept minimal and each member has to earn its slot. It is currently
+//     TWO: `anthropic-beta` (a real, permanent divergence — the plugin merges
+//     `custom_betas` on top of the package's list — re-pinned on both sides by
+//     `BETA_HEADER_GOLDEN`), and `body.metadata.user_id` (per-run
+//     nondeterminism). A third, `body.thinking`, was removed once the migration
+//     to the package made both paths emit the same value: it had stopped
+//     excluding any difference and would only have hidden a future real one.
+//
 //  3. TRUE DIFFERENTIAL on the two routes where the LEGACY forge still runs.
 //     `_useAdapter` is false when signature emulation is off and on
 //     `/v1/messages/count_tokens`. `legacy request path` pins both, and asserts
@@ -185,7 +194,6 @@ const DIFFERENTIAL_VECTORS = [
       thinking: { type: "enabled", budget_tokens: 10000 },
     },
     cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-    normalizeThinking: true,
   },
   {
     name: "multi-block-system",
@@ -488,21 +496,18 @@ function normalizeHeaders(headers) {
   ]);
 }
 
-function normalizeBody(body, { normalizeThinking = false } = {}) {
+// `metadata.user_id` is the ONLY body field held out of the byte-for-byte
+// comparison, and it is held out for per-run nondeterminism alone. `thinking`
+// used to be excluded here too, opt-in per vector: as of rc.10 the package
+// emitted upstream's enabled branch and the plugin did not. That divergence is
+// closed — the first-party turn routes through the package, both paths emit
+// `ENABLED_THINKING_GOLDEN`, and the exclusion was excluding nothing while
+// still hiding any future real drift in the field. It was removed; `thinking`
+// is now compared as bytes like every other field.
+function normalizeBody(body) {
   const parsed = JSON.parse(body);
   if (!parsed.metadata?.user_id) throw new Error("Missing normalized path: body.metadata.user_id");
   parsed.metadata.user_id = "<normalized>";
-  // Opt-in, and only for the enabled-thinking vector. Unlike `user_id` this is
-  // not per-run nondeterminism: as of rc.10 the package emits the enabled
-  // branch the way upstream does and the plugin does not (see
-  // `ENABLED_THINKING_DIVERGENCE` below). Excluding the field keeps the rest of
-  // that vector's body under byte-for-byte comparison. Vectors that send
-  // `type: "adaptive"` do NOT set this flag — both paths still agree there and
-  // must keep agreeing.
-  if (normalizeThinking) {
-    if (parsed.thinking === undefined) throw new Error("Missing normalized path: body.thinking");
-    parsed.thinking = "<normalized>";
-  }
   return JSON.stringify(parsed);
 }
 
@@ -583,27 +588,28 @@ describe("shared package foreground parity", () => {
 
   it.each(DIFFERENTIAL_VECTORS)(
     "matches the $name request byte-for-byte after golden normalization",
-    async ({ hostBody, cacheControl, antiVerbosity, normalizeThinking }) => {
+    async ({ hostBody, cacheControl, antiVerbosity }) => {
       testPolicy.antiVerbosity = antiVerbosity !== false;
       const existing = await captureExistingRequest(
         vi.fn(() => Promise.resolve(makeSuccessResponse())),
         hostBody,
       );
       const adapter = await buildAdapterRequest(hostBody, cacheControl);
-      const bodyOptions = { normalizeThinking: normalizeThinking === true };
 
       expect(normalizeUrl(adapter.url)).toBe(normalizeUrl(existing.url));
       expect(adapter.method).toBe(existing.method);
       expect(normalizeHeaders(adapter.headers)).toEqual(normalizeHeaders(existing.headers));
-      expect(normalizeBody(adapter.body, bodyOptions)).toBe(normalizeBody(existing.body, bodyOptions));
+      expect(normalizeBody(adapter.body)).toBe(normalizeBody(existing.body));
     },
   );
 
-  // `normalizeBody` excludes `thinking` from the byte-for-byte comparison for
-  // the enabled-thinking vector. This test is what keeps that exclusion honest,
-  // pinning the exact serialised object each path produces against the captured
-  // golden. The clamp to 7999 and the `budget_tokens`-first key order are
-  // APPROVED wire changes; the assertion exists so an UNAPPROVED one fails.
+  // `thinking` is NO LONGER excluded from the byte-for-byte comparison above —
+  // both paths emit the same object, so the vector compares it as bytes like
+  // any other field. What that vector cannot catch is the two paths drifting
+  // TOGETHER, which is exactly what a package bump does. This test pins the
+  // exact serialised object each path produces against the captured golden. The
+  // clamp to 7999 and the `budget_tokens`-first key order are APPROVED wire
+  // changes; the assertion exists so an UNAPPROVED one fails.
   it("pins the enabled-thinking golden on both construction paths", async () => {
     const hostBody = { ...HOST_BODY, thinking: { type: "enabled", budget_tokens: 10000 } };
     const existing = await captureExistingRequest(
