@@ -74,7 +74,7 @@ the rollback; there are no placeholders to resolve during an incident.
 
 | SHA       | Message                                                                             | What reverting it undoes                                                    |
 | --------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `daa1ca4` | `COM-466 deps: migrate the shared wire package pin to rc.15`                        | pin to `rc.15`; falls back to `rc.14` and its two defects                   |
+| `0508b55` | `COM-466 deps: migrate the shared wire package pin to rc.15`                        | pin to `rc.15`; falls back to `rc.14` and its two defects                   |
 | `df639f3` | `COM-466 deps: migrate the shared wire package pin to rc.14`                        | pin to `rc.14` and the `extraHeaderPolicy` seam; falls back to `rc.13`      |
 | `f57b06b` | `COM-466 deps: migrate the shared wire package pin to rc.13`                        | pin to `rc.13` and its four seams; falls back to `rc.11`                    |
 | `8f1d954` | `deps: upgrade the shared wire package to rc.11 and record the divergences`         | pin to `rc.11`, the divergences document, and its parity cases              |
@@ -100,7 +100,7 @@ through the table above, re-running the full gate after each step.
    fix when a specific release candidate regressed the wire bytes:
 
    ```bash
-   git revert --no-edit daa1ca4
+   git revert --no-edit 0508b55
    npm ci
    npm test -- --run test/conformance/shared-package-parity.test.mjs
    ```
