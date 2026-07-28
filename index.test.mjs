@@ -1038,7 +1038,13 @@ describe("fetch interceptor", () => {
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
         max_tokens: 1024,
-        tools: [{ name: "read_file", description: "Read a file" }],
+        tools: [
+          {
+            name: "read_file",
+            description: "Read a file",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
         messages: [
           {
             role: "assistant",
@@ -1064,9 +1070,13 @@ describe("fetch interceptor", () => {
         model: "claude-sonnet-4-5",
         max_tokens: 1024,
         tools: [
-          { name: "todowrite", description: "Manage todos" },
-          { name: "bash", description: "Run commands" },
-          { name: "webfetch", description: "Fetch web" },
+          {
+            name: "todowrite",
+            description: "Manage todos",
+            input_schema: { type: "object", properties: {} },
+          },
+          { name: "bash", description: "Run commands", input_schema: { type: "object", properties: {} } },
+          { name: "webfetch", description: "Fetch web", input_schema: { type: "object", properties: {} } },
         ],
         messages: [
           {
@@ -1094,8 +1104,12 @@ describe("fetch interceptor", () => {
         model: "claude-sonnet-4-5",
         max_tokens: 1024,
         tools: [
-          { name: "mcp_server", description: "An MCP server tool" },
-          { name: "chrome-devtools_click", description: "Click" },
+          {
+            name: "mcp_server",
+            description: "An MCP server tool",
+            input_schema: { type: "object", properties: {} },
+          },
+          { name: "chrome-devtools_click", description: "Click", input_schema: { type: "object", properties: {} } },
         ],
         messages: [],
       }),
@@ -1453,7 +1467,7 @@ describe("file-id account pinning", () => {
         messages: [
           {
             role: "user",
-            content: [{ type: "file", source: { type: "file", file_id: "file-xyz" } }],
+            content: [{ type: "document", source: { type: "file", file_id: "file-xyz" } }],
           },
         ],
       }),
@@ -1608,7 +1622,7 @@ describe("file-id account pinning", () => {
         messages: [
           {
             role: "user",
-            content: [{ type: "file", source: { type: "file", file_id: "file-xyz" } }],
+            content: [{ type: "document", source: { type: "file", file_id: "file-xyz" } }],
           },
         ],
       }),
@@ -3734,13 +3748,104 @@ describe("header handling", () => {
             content: [{ type: "text", text: "hello", stainlessHelper: "compaction" }],
           },
         ],
-        tools: [{ name: "read_file", stainlessHelper: "BetaToolRunner" }],
+        tools: [
+          {
+            name: "read_file",
+            input_schema: { type: "object", properties: {} },
+            stainlessHelper: "BetaToolRunner",
+          },
+        ],
       }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
     expect(init.headers.get("x-stainless-helper")).toContain("BetaToolRunner");
     expect(init.headers.get("x-stainless-helper")).toContain("compaction");
+    // The marker is an INTERNAL signal for the header only. The Anthropic API
+    // has never known these keys, so they must not survive into the wire body.
+    expect(init.body).not.toContain("stainlessHelper");
+    expect(init.body).not.toContain("BetaToolRunner");
+    expect(init.body).not.toContain("compaction");
+  });
+
+  it("strips stainless helper markers from every carrier (tool, message, content block)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [
+          {
+            role: "user",
+            "x-stainless-helper": "message-level-helper",
+            content: [{ type: "text", text: "hi", x_stainless_helper: "content-block-helper" }],
+          },
+        ],
+        tools: [
+          {
+            name: "read_file",
+            input_schema: { type: "object", properties: {} },
+            _stainless_helper: "tool-level-helper",
+          },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const helperHeader = init.headers.get("x-stainless-helper");
+    // All three traversal sites feed the header...
+    expect(helperHeader).toContain("tool-level-helper");
+    expect(helperHeader).toContain("message-level-helper");
+    expect(helperHeader).toContain("content-block-helper");
+    // ...and all three disappear from the serialized body.
+    const wireBody = JSON.parse(init.body);
+    expect(init.body).not.toContain("stainless_helper");
+    expect(init.body).not.toContain("x-stainless-helper");
+    expect(init.body).not.toContain("-level-helper");
+    expect(init.body).not.toContain("content-block-helper");
+    // The surrounding content survives the strip untouched.
+    expect(wireBody.messages.at(-1).content.at(-1).text).toBe("hi");
+  });
+
+  it("strips stainless helper markers on the legacy path too (count_tokens)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    // /v1/messages/count_tokens never goes through the adapter, so this pins the
+    // legacy half of the strip: the header is still derived, the body is clean.
+    await fetchFn("https://api.anthropic.com/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "hi", stainless_helper: "legacy-content-helper" }],
+          },
+        ],
+        tools: [
+          {
+            name: "read_file",
+            input_schema: { type: "object", properties: {} },
+            stainlessHelper: "legacy-tool-helper",
+          },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const helperHeader = init.headers.get("x-stainless-helper");
+    expect(helperHeader).toContain("legacy-tool-helper");
+    expect(helperHeader).toContain("legacy-content-helper");
+    expect(init.body).not.toContain("stainlessHelper");
+    expect(init.body).not.toContain("stainless_helper");
+    expect(init.body).not.toContain("legacy-tool-helper");
+    expect(init.body).not.toContain("legacy-content-helper");
+    expect(JSON.parse(init.body).messages.at(-1).content.at(-1).text).toBe("hi");
   });
 
   it("injects billing and identity system blocks in request body", async () => {

@@ -63,6 +63,7 @@ import {
   buildAnthropicBetaHeader,
   parseRequestBodyMetadata,
   extractFileIds,
+  stripStainlessHelperMarkers,
 } from "./lib/mimicry/headers.mjs";
 import {
   buildSystemPromptBlocks,
@@ -3165,6 +3166,7 @@ export async function AnthropicAuthPlugin({ client }) {
 
                 let requestHeaders;
                 let adapterBody;
+                let legacyStrippedBody;
                 if (_useAdapter) {
                   const _adapterResult = buildAdapterTransport({
                     input,
@@ -3187,6 +3189,13 @@ export async function AnthropicAuthPlugin({ client }) {
                     cachePolicy: effectiveCachePolicy,
                     requestRole: _requestRole,
                     isSubagent: _isSubagent,
+                    // Derived from the PRE-transform body on purpose: the lean
+                    // gate in buildSystemPromptBlocks tests the incoming system
+                    // blocks, and by now the title-generator swap has already
+                    // rewritten them in `body`.
+                    isTitleGenerator: _parsedBodyOnce
+                      ? isTitleGeneratorSystemBlocks(normalizeSystemTextBlocks(_parsedBodyOnce.system))
+                      : false,
                     body,
                     env: resolveAdapterEnv(process.env),
                     platform: process.platform,
@@ -3215,13 +3224,29 @@ export async function AnthropicAuthPlugin({ client }) {
                     _adaptiveOverride,
                     _tokenEconomy,
                   );
+                  // buildRequestHeaders just derived x-stainless-helper from the
+                  // markers. They are an internal signal — the Anthropic API has
+                  // never known those keys — so they are dropped from the body now
+                  // that the header exists. The adapter path does the same strip in
+                  // buildWireCompatibleRequest; this is the legacy half of it.
+                  if (typeof body === "string" && body.length > 0) {
+                    try {
+                      const _strippable = JSON.parse(body);
+                      if (stripStainlessHelperMarkers(_strippable?.tools, _strippable?.messages) > 0) {
+                        legacyStrippedBody = JSON.stringify(_strippable);
+                      }
+                    } catch (error) {
+                      // A non-JSON body carries no markers to strip; forward it untouched.
+                      debugLog(`stainless-helper strip skipped (unparsable body): ${error.message}`);
+                    }
+                  }
                 }
                 // cch stays as the static "00000" placeholder — cc-107 and cc-108
                 // JS bundles both emit `cch=00000;` unconditionally in the billing
                 // header. The Bun-binary Attestation.zig xxHash64 mechanism lives in
                 // a SEPARATE header path, not in this body field. Re-hashing here
                 // mutates system[0] each turn, invalidating the prompt cache.
-                const finalBody = adapterBody ?? body;
+                const finalBody = adapterBody ?? legacyStrippedBody ?? body;
 
                 const correlationId = createDebugCorrelationId();
 

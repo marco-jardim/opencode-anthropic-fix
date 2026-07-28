@@ -1,21 +1,29 @@
 /**
- * Conformance tests for the Claude Code 2.1.195 context-hint gate.
+ * Conformance tests for the deprecated Claude Code context-hint knob.
  *
- * The genuine `tengu_hazel_osprey` GrowthBook gate defaults to false, so
- * `token_economy.context_hint` requires explicit opt-in.
+ * The genuine Claude Code 2.1.195 client sends neither the
+ * `context-hint-2026-04-09` beta nor the paired `context_hint` body field, so
+ * emitting either one would make requests fingerprintable. Both emissions were
+ * removed from every request path (adapter and legacy), and
+ * `token_economy.context_hint` is deprecated rather than honoured.
+ *
  * These tests pin:
  *   1. Default resolves to false
- *   2. Explicit opt-out (false) honored
- *   3. Explicit opt-in (true) honored
- *   4. Gating: claude-3 models excluded
- *   5. Gating: non-first-party provider (bedrock/vertex/mantle) excluded
- *   6. Gating: non-main-thread (title/small/empty) excluded
- *   7. Main-thread + first-party + claude-4 — beta sent; latch keeps it on
- *      for subsequent requests (sticky-ON design)
+ *   2. Explicit opt-out (false) changes nothing
+ *   3. Explicit opt-in (true) ALSO changes nothing — no beta, no body field,
+ *      on the first request and on every subsequent one
+ *   4. The same holds for the old gating dimensions (claude-3 models,
+ *      non-first-party providers, non-main-thread request shapes), which are
+ *      kept because their INPUT shape is still discriminating
+ *   5. The knob is not a silent no-op: an explicit opt-in emits a one-time
+ *      deprecation warning from validateConfig
  *
  * Test harness mirrors test/conformance/regression.test.mjs.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll, afterEach, afterAll } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Mocks — mirrors regression.test.mjs
@@ -311,11 +319,25 @@ describe("context-hint explicit opt-in", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("context_hint=true → beta sent even when the below-threshold body is suppressed", async () => {
+  it("context_hint=true → beta STILL not sent (knob deprecated, emission removed)", async () => {
     const { headers, body } = await sendRequest(fetchFn);
 
-    expect(headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
+    // The knob used to push the beta here. It no longer does, on any path: the
+    // genuine Claude Code 2.1.195 client sends neither the beta nor the body
+    // field, so emitting them was a fingerprint. The opt-in now only produces a
+    // deprecation warning at config-validation time (see the describe below).
+    expect(headers.get("anthropic-beta") || "").not.toContain("context-hint-2026-04-09");
     expect(body.context_hint).toBeUndefined();
+  });
+
+  it("context_hint=true → beta absent on every subsequent request too", async () => {
+    const first = await sendRequest(fetchFn);
+    const second = await sendRequest(fetchFn);
+
+    expect(first.headers.get("anthropic-beta") || "").not.toContain("context-hint-2026-04-09");
+    expect(second.headers.get("anthropic-beta") || "").not.toContain("context-hint-2026-04-09");
+    expect(first.body.context_hint).toBeUndefined();
+    expect(second.body.context_hint).toBeUndefined();
   });
 });
 
@@ -449,5 +471,101 @@ describe("context-hint gating — non-main-thread excluded", () => {
     const [, init] = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
     expect(init.headers.get("anthropic-beta") || "").not.toContain("context-hint-2026-04-09");
     expect(JSON.parse(init.body).context_hint).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// Deprecation: the knob must not become a silent no-op
+// =============================================================================
+
+describe("token_economy.context_hint deprecation warning", () => {
+  // This suite deliberately bypasses the module-level vi.mock of lib/config.mjs:
+  // the warning lives in validateConfig, which a mocked loadConfig never reaches.
+  // getConfigDir() reads APPDATA on win32 and XDG_CONFIG_HOME elsewhere, and both
+  // resolve to <dir>/opencode/anthropic-auth.json, so pointing both at a temp dir
+  // makes the real loader hermetic on every platform.
+  let tmpRoot;
+  let configPath;
+  let savedAppData;
+  let savedXdg;
+  let realConfig;
+  let warnSpy;
+
+  const writeUserConfig = (tokenEconomy) => {
+    writeFileSync(configPath, JSON.stringify({ token_economy: tokenEconomy }), "utf-8");
+  };
+
+  beforeAll(async () => {
+    realConfig = await vi.importActual("../../lib/config.mjs");
+    tmpRoot = mkdtempSync(join(tmpdir(), "opencode-context-hint-"));
+    mkdirSync(join(tmpRoot, "opencode"), { recursive: true });
+    configPath = join(tmpRoot, "opencode", "anthropic-auth.json");
+
+    savedAppData = process.env.APPDATA;
+    savedXdg = process.env.XDG_CONFIG_HOME;
+    process.env.APPDATA = tmpRoot;
+    process.env.XDG_CONFIG_HOME = tmpRoot;
+  });
+
+  afterAll(() => {
+    if (savedAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = savedAppData;
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  // Ordered on purpose: the warning latch is one-shot per process, so the two
+  // silent cases must be proven before the opt-in trips it.
+  it("stays silent for the default (knob absent from the config file)", () => {
+    writeUserConfig({});
+
+    const cfg = realConfig.loadConfig();
+
+    expect(cfg.token_economy.context_hint).toBe(false);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("stays silent for an explicit opt-out (context_hint: false)", () => {
+    writeUserConfig({ context_hint: false });
+
+    const cfg = realConfig.loadConfig();
+
+    expect(cfg.token_economy.context_hint).toBe(false);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("warns on an explicit opt-in (context_hint: true) instead of silently ignoring it", () => {
+    writeUserConfig({ context_hint: true });
+
+    const cfg = realConfig.loadConfig();
+
+    // The value is still normalized so an existing config file keeps loading...
+    expect(cfg.token_economy.context_hint).toBe(true);
+    // ...but the user is told the switch does nothing.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = warnSpy.mock.calls[0][0];
+    expect(message).toContain("[anthropic-auth]");
+    expect(message).toContain("token_economy.context_hint");
+    expect(message).toContain("deprecated");
+    expect(message).toContain("no effect");
+  });
+
+  it("warns only once per process, not on every config reload", () => {
+    writeUserConfig({ context_hint: true });
+
+    realConfig.loadConfig();
+    realConfig.loadConfig();
+
+    // The latch tripped in the previous test; reloads must stay quiet.
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });

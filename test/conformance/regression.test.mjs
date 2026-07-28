@@ -482,7 +482,10 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
     });
 
     const [, init] = mockFetch.mock.calls[0];
-    expect(init.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
+    // The `context_hint` field left the request body, so announcing a beta whose
+    // capability is no longer in the body would be incoherent. The genuine 2.1.195
+    // client does not emit it either, so the header must NOT carry it.
+    expect(init.headers.get("anthropic-beta") || "").not.toContain("context-hint-2026-04-09");
     expect(JSON.parse(init.body).context_hint).toBeUndefined();
   });
 
@@ -534,7 +537,7 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
     // 3 calls: initial (400) → retry (200) → next user request (200)
     expect(mockFetch).toHaveBeenCalledTimes(3);
     const [, firstInit] = mockFetch.mock.calls[0];
-    expect(firstInit.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
+    expect(firstInit.headers.get("anthropic-beta") || "").not.toContain("context-hint-2026-04-09");
 
     const [, retryInit] = mockFetch.mock.calls[1];
     expect(retryInit.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
@@ -556,8 +559,9 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
       {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "x".repeat(5000) },
+          { type: "thinking", thinking: "x".repeat(5000), signature: "sig-heavy-1" },
           { type: "text", text: "Okay." },
+          { type: "tool_use", id: "toolu_1", name: "read_file", input: {} },
         ],
       },
       {
