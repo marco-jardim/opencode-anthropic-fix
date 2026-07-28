@@ -14,10 +14,10 @@ document is enforced by
 | Field              | Value                                                                                                                                         |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Package            | `@tormentalabs/claude-code-wire-compat`                                                                                                       |
-| Version            | `0.1.0-rc.14`                                                                                                                                 |
-| Release tag        | `v0.1.0-rc.14`                                                                                                                                |
-| Artifact           | `https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.14/tormentalabs-claude-code-wire-compat-0.1.0-rc.14.tgz` |
-| Lockfile integrity | `sha512-yi0ivAkVpq4b/QhChRVtnhOqtr0EnP+0rK1CADDD98n4iKTBufa+11YjyQrBEKFoj6lz7hjkTIjedGZtgE+Xsg==`                                             |
+| Version            | `0.1.0-rc.15`                                                                                                                                 |
+| Release tag        | `v0.1.0-rc.15`                                                                                                                                |
+| Artifact           | `https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.15/tormentalabs-claude-code-wire-compat-0.1.0-rc.15.tgz` |
+| Lockfile integrity | `sha512-U5ShTpaFFXCydvbjnSjicNDTL9EwNK7xDjkwT2xdocatHSaYROtqd5MzF7QQnE4hhdHhzY9TZ2hhAisxCDn2ew==`                                             |
 | License            | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                                                                                       |
 
 The specifier lives in [`package.json`](../package.json) and the resolved artifact plus its integrity
@@ -74,7 +74,8 @@ the rollback; there are no placeholders to resolve during an incident.
 
 | SHA       | Message                                                                             | What reverting it undoes                                                    |
 | --------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| _pending_ | `COM-466 deps: migrate the shared wire package pin to rc.14`                        | pin to `rc.14` and the `extraHeaderPolicy` seam; falls back to `rc.13`      |
+| `daa1ca4` | `COM-466 deps: migrate the shared wire package pin to rc.15`                        | pin to `rc.15`; falls back to `rc.14` and its two defects                   |
+| `df639f3` | `COM-466 deps: migrate the shared wire package pin to rc.14`                        | pin to `rc.14` and the `extraHeaderPolicy` seam; falls back to `rc.13`      |
 | `f57b06b` | `COM-466 deps: migrate the shared wire package pin to rc.13`                        | pin to `rc.13` and its four seams; falls back to `rc.11`                    |
 | `8f1d954` | `deps: upgrade the shared wire package to rc.11 and record the divergences`         | pin to `rc.11`, the divergences document, and its parity cases              |
 | `19847f1` | `deps: upgrade the shared wire package to the client-derived protocol`              | pin to the client-derived protocol build and the adapter line it required   |
@@ -99,13 +100,13 @@ through the table above, re-running the full gate after each step.
    fix when a specific release candidate regressed the wire bytes:
 
    ```bash
-   git revert --no-edit f57b06b
+   git revert --no-edit daa1ca4
    npm ci
    npm test -- --run test/conformance/shared-package-parity.test.mjs
    ```
 
-   Chain further reverts (`8f1d954`, then `19847f1`, then `6d64945`, then `fc7cf2e`) to step further
-   back.
+   Chain further reverts (`df639f3`, then `f57b06b`, then `8f1d954`, then `19847f1`, then `6d64945`,
+   then `fc7cf2e`) to step further back.
 
 2. Reverting the whole chain removes the shared package entirely. The last commit to revert is the
    adapter commit, which also drops the dependency from `package.json` and `package-lock.json`:
