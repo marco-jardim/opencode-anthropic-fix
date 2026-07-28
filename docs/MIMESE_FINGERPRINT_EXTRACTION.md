@@ -169,25 +169,25 @@ function buildRequestMetadata(input) {
 
 ---
 
-### 1.6 buildAnthropicBillingHeader() — Lines 5610-5634
+### 1.6 buildAnthropicBillingHeader() — `lib/mimicry/system-prompt.mjs`
 
 ```javascript
 /**
  * Build the billing header block for Claude Code system prompt injection.
- * Claude Code v2.1.92: cc_version includes 3-char fingerprint hash (not model ID).
- * cch is a static "00000" placeholder for Bun native client attestation.
+ * Claude Code v2.1.97: cc_version includes 3-char fingerprint hash (not model ID).
+ * cch is a static "00000" placeholder (xxHash64 attestation removed in v2.1.97).
  *
  * Real CC (system.ts:78): version = `${MACRO.VERSION}.${fingerprint}`
  * Real CC (system.ts:82): cch = feature('NATIVE_CLIENT_ATTESTATION') ? ' cch=00000;' : ''
  *
- * @param {string} version - CLI version (e.g., "2.1.92")
+ * @param {string} version - CLI version (e.g., "2.1.97")
  * @param {string} [firstUserMessage] - First user message text for fingerprint computation
- * @param {string} [provider] - API provider ("anthropic" | "bedrock" | "vertex" | "foundry")
+ * @param {string} [workloadOverride] - Explicit workload tag from config
  * @returns {string}
  */
-function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
+export function buildAnthropicBillingHeader(version, firstUserMessage, workloadOverride) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "unknown";
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
   // Fix #1: cc_version suffix is the 3-char fingerprint hash, NOT the model ID.
   // computeBillingCacheHash() computes SHA256(salt + msg[4]+msg[7]+msg[20] + version)[:3]
   // which matches computeFingerprint() in the real CC source (utils/fingerprint.ts).
@@ -195,34 +195,37 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
   // the hash from "000" chars (indices 4,7,20 all missing → fallback "0").
   const fingerprint = computeBillingCacheHash(firstUserMessage || "", version);
   const ccVersion = `${version}.${fingerprint}`;
-  // Fix #4: cch is a static "00000" placeholder for Bun's native client attestation.
-  // Real CC v92: cch is included for all providers EXCEPT bedrock/anthropicAws.
+  // cch is a static "00000" placeholder for Bun's native client attestation.
   // The real Bun binary overwrites these zeros in the serialized body bytes.
   // ASSUMPTION (UNVERIFIED): for non-Bun runtimes, the server sees "00000" and skips
   // attestation verification. No wire capture in this repo demonstrates this; it is
   // inferred from the fact that the plugin ships cch=00000 and requests are accepted.
   // Evidence that would confirm it: a wire capture of a non-Bun client sending
   // cch=00000 and receiving a 200 with no attestation challenge.
-  const isBedrock = provider === "bedrock" || provider === "anthropicAws";
-  const cchPart = isBedrock ? "" : " cch=00000;";
-  let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}`;
-  const workload = process.env.CLAUDE_CODE_WORKLOAD;
+  // Emitted unconditionally — the plugin is first-party only.
+  const cchPart = " cch=00000;";
+  let workloadPart = "";
+  const workload = workloadOverride || process.env.CLAUDE_CODE_WORKLOAD;
   if (workload) {
     // QA fix M5: sanitize workload value to prevent header injection
-    const safeWorkload = workload.replace(/[;\s\r\n]/g, "_");
-    header = header.replace(/;$/, ` cc_workload=${safeWorkload};`);
+    const safeWorkload = String(workload).replace(/[;\s\r\n]/g, "_");
+    if (safeWorkload) workloadPart = ` cc_workload=${safeWorkload};`;
   }
-  return header;
+  return `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}${workloadPart}`;
 }
 ```
 
 **Purpose:** Generates the `x-anthropic-billing-header` system prompt text block. Includes version fingerprint and optional workload hint.
 
-**Header Format:**
+> **Upstream vs plugin.** Real CC v92 omits `cch` for the `bedrock`/`anthropicAws`
+> providers. The plugin has no such branch — the function takes no `provider`
+> argument. See [Provider Scope](../README.md#provider-scope).
+
+**Header Format (plugin, always):**
 
 - **Standard:** `x-anthropic-billing-header: cc_version={version}.{fingerprint}; cc_entrypoint={entrypoint}; cch=00000;`
-- **Bedrock:** `x-anthropic-billing-header: cc_version={version}.{fingerprint}; cc_entrypoint={entrypoint};` (no cch)
 - **With workload:** Appends ` cc_workload={workload};`
+- **Upstream-only variant (not emitted by this plugin):** on Bedrock, real CC drops the ` cch=00000;` segment.
 
 > **v2.1.107 NOTE (corrected):** The plugin emits `cch=00000` as a **static literal** and never rewrites it post-serialization. `computeAndReplaceCCH()` does not exist in this repository. Re-hashing would mutate `system[0]` on every turn and invalidate the prompt cache (see the comment in `index.mjs` near the body-serialization path); the static placeholder is deliberate and pinned by `index.test.mjs` (`toContain("cch=00000")`). The section below documents the _compiled Bun binary's_ observed behavior and is kept for reverse-engineering value only.
 
@@ -275,7 +278,7 @@ copying the literal above.
 - The hash is computed over the full serialized body (including the `cch=00000` placeholder)
 - After hashing, `cch=00000` is replaced with the computed value via string replacement
 - This means the hash is computed with the placeholder still present — the server knows to expect this
-- Bedrock/anthropicAws providers skip cch entirely (no `cch=00000` in the header)
+- In the upstream binary, Bedrock/anthropicAws providers skip cch entirely (no `cch=00000` in the header). The plugin never does this — see [Provider Scope](../README.md#provider-scope).
 
 **Environment Variables:**
 
@@ -417,7 +420,18 @@ function buildSystemPromptBlocks(system, signature) {
 
 ---
 
-### 1.8 buildAnthropicBetaHeader() — Lines 5914-6072
+### 1.8 buildAnthropicBetaHeader() — UPSTREAM reconstruction
+
+> **Not current plugin code.** The listing below reconstructs the provider-aware
+> beta assembly of the **official Claude Code client** and is kept for its
+> reverse-engineering value. The plugin's `buildAnthropicBetaHeader()`
+> (`lib/mimicry/headers.mjs`) takes **no `provider` argument** and contains none
+> of the provider branches shown here: no `vertex`/`bedrock` tool-search fork and
+> no `BEDROCK_UNSUPPORTED_BETAS` filter. That symbol does not exist in this
+> codebase — its absence is pinned by `lib/mimicry/headers.test.mjs`
+> (`expect(headersModule.BEDROCK_UNSUPPORTED_BETAS).toBeUndefined()`).
+> The plugin always takes the first-party branch. See
+> [Provider Scope](../README.md#provider-scope).
 
 ```javascript
 /**
@@ -593,13 +607,13 @@ function buildAnthropicBetaHeader(
 }
 ```
 
-**Purpose:** Constructs the `anthropic-beta` header with all required Claude Code betas. 11 parameters cover signature status, model, provider, custom settings.
+**Purpose:** Constructs the `anthropic-beta` header with all required Claude Code betas. In the upstream client, the parameter list covers signature status, model, provider and custom settings; the plugin's variant drops the provider parameter.
 
 **Always-On Betas (v2.1.90+):**
 
 - `oauth-2025-04-20` (foundation)
 - `claude-code-20250219` (except Haiku)
-- `advanced-tool-use-2025-11-20` (1P/Foundry) OR `tool-search-tool-2025-10-19` (Bedrock/Vertex)
+- `advanced-tool-use-2025-11-20` — the plugin always sends this one. (Upstream sends `tool-search-tool-2025-10-19` instead on Bedrock/Vertex; the plugin has no such branch.)
 - `fast-mode-2026-02-01`
 - `effort-2025-11-24`
 - `interleaved-thinking-2025-05-14`

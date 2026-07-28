@@ -296,8 +296,9 @@ x-anthropic-billing-header: cc_version=<v>.<entrypoint>; cc_entrypoint=<e>; cch=
 - Set via the `--workload <tag>` CLI flag (only for `--print` non-interactive
   runs; "process-scoped, set by SDK daemon callers that spawn subprocesses for
   cron work").
-- Provider-gated: bedrock / anthropicAws / mantle skip the `cch` and `cc_workload`
-  segments entirely.
+- Provider-gated **in real CC**: bedrock / anthropicAws / mantle skip the `cch` and
+  `cc_workload` segments entirely. The plugin has no such gate — it is Anthropic
+  first-party only, see [Provider Scope](../README.md#provider-scope).
 - Plugin status: never emits `cc_workload`. Absence is silently tolerated by the
   server, so this is not a hard fingerprint mismatch. Opportunity: expose a
   `signature_emulation.workload` config knob so SDK-daemon users can tag their
@@ -570,5 +571,5 @@ it process-scoped. The plugin doesn't have a CLI; the natural surface is:
 2. `CLAUDE_CODE_WORKLOAD=<tag>` env var (fallback, was already supported).
 
 Config wins. Both are sanitised against header-injection characters
-(`[;\s\r\n]` -> `_`). Provider gated: bedrock / anthropicAws / mantle skip the
-segment (same gate as `cch=00000`).
+(`[;\s\r\n]` -> `_`). Not provider gated: the segment is emitted whenever a tag is
+set, exactly like `cch=00000` (see [Provider Scope](../README.md#provider-scope)).

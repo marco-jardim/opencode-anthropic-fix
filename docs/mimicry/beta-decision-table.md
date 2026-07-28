@@ -1,12 +1,15 @@
 # Beta Decision Table
 
-Use this table when deciding whether a beta belongs on a mimicked Claude Code request. The normal transport is the
-`anthropic-beta` HTTP header: request headers are merged and the final value is installed on the wire
-(`index.mjs:8033-8063`). The exception is Bedrock. For a signed Bedrock request, header-derived betas are copied into
-the request body as `parsed.anthropic_beta` (`index.mjs:8192-8201`), with `oauth-2025-04-20` excluded from that body
-array (`index.mjs:8200`). First-party requests instead remove an incoming body `betas` property
-(`index.mjs:8203-8205`). The source contract also describes betas as header-only
-(`docs/mimese-http-header-system-prompt.md:861`).
+Use this table when deciding whether a beta belongs on a mimicked Claude Code request. Betas travel **only** in the
+`anthropic-beta` HTTP header: request headers are merged and the final value is installed on the wire. There is no
+provider fork and no body transport — the plugin removes an incoming body `betas` property and never writes an
+`anthropic_beta` body field. The source contract also describes betas as header-only
+(`docs/mimese-http-header-system-prompt.md`).
+
+> **Scope.** The upstream Claude Code binary copies header betas into the body as `anthropic_beta` for signed Bedrock
+> requests and filters a Bedrock-unsupported list. The plugin does neither: there is no `BEDROCK_UNSUPPORTED_BETAS`
+> export (its absence is pinned by `lib/mimicry/headers.test.mjs`) and `buildAnthropicBetaHeader()` takes no
+> `provider` argument. See [Provider Scope](../../README.md#provider-scope).
 
 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` is read while the beta set is assembled (`index.mjs:7680`). When enabled,
 the removal pass strips experimental mimicry betas (`index.mjs:7865-7872`); the documented core that survives is

@@ -12,6 +12,22 @@ This fork continues that work and extends it with deeper research into how the o
 
 > **Account risk.** There is a real risk of account suspension if Anthropic detects requests are not coming from Claude Code. The mimicry tries hard to make every request look as close as possible to a genuine Claude Code request, but that reduces rather than eliminates the risk. Use at your own risk.
 
+<a id="provider-scope"></a>
+
+## Provider Scope: Anthropic First-Party Only
+
+This plugin targets the Anthropic first-party API and nothing else. **Amazon Bedrock, Anthropic on AWS (`anthropicAws`), Google Vertex AI, Azure/Microsoft Foundry and Mantle are permanently out of scope.** They are not a backlog item, not a "not yet" — support for them will not be added.
+
+What that means concretely:
+
+- The signature-emulation adapter **declines** any provider that is not `anthropic` (`lib/adapter-input.mjs`). Those requests fall through to the legacy request path, which serves them without any provider-specific branching.
+- **Nothing is suppressed based on the provider.** There is no provider-gated logic for the `x-anthropic-billing-header` segments (`cch`, `cc_workload`), no provider filter over the `anthropic-beta` header, and no provider-conditional request-body segment. `cch=00000` and the beta list are emitted unconditionally.
+- Constructs such as a `BEDROCK_UNSUPPORTED_BETAS` list or an `anthropic_beta` field inside the request body do not exist in this codebase. Their absence is pinned by tests.
+
+Provider names still appear in three legitimate places, and none of them imply multi-provider support: reverse-engineering notes describing the **official upstream Claude Code binary** (which does branch by provider), Bedrock model-ARN parsing kept for identifier normalization, and the provider environment variables listed by `anthropic doctor`.
+
+If a document or comment claims this plugin branches on the provider, that claim is stale — this section is the canonical answer.
+
 ## Quick Start
 
 **Prerequisites:** [OpenCode](https://github.com/anomalyco/opencode) installed, a Claude Pro or Max subscription, Node.js 18+.

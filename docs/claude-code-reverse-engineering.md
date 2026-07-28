@@ -448,10 +448,15 @@ x-anthropic-billing-header: cc_version=2.1.92.{fingerprint}; cc_entrypoint={CLAU
   The real CC uses the 3-char fingerprint from `computeFingerprint()` (utils/fingerprint.ts:50).
 - `cc_entrypoint`: from `CLAUDE_CODE_ENTRYPOINT` env var (e.g., `"cli"`, `"sdk"`, `"vscode"`)
 - `cch=00000`: static placeholder for Bun native client attestation. The real Bun binary
-  overwrites these zeros in serialized body bytes (Attestation.zig). Omitted for bedrock/anthropicAws.
+  overwrites these zeros in serialized body bytes (Attestation.zig). **In the upstream Claude Code
+  binary** the segment is omitted for the bedrock/anthropicAws providers. This whole section
+  documents upstream client behaviour, not plugin behaviour: the plugin emits `cch=00000`
+  unconditionally and has no provider gate — see
+  [Provider Scope](../README.md#provider-scope).
   **Note:** In v2.1.80, `cch=00000` was hardcoded. v2.1.81-88 computed it dynamically. v2.1.92
   reverted to a static `00000` placeholder behind `feature('NATIVE_CLIENT_ATTESTATION')`, which
-  was later simplified to a provider check (always included except bedrock/anthropicAws).
+  was later simplified to a provider check (upstream includes it for every provider except
+  bedrock/anthropicAws).
 - `cc_workload`: optional workload ID from `CLAUDE_CODE_WORKLOAD` env var
 - **Cache scope:** `null` — never cached
 - **Disable:** `CLAUDE_CODE_ATTRIBUTION_HEADER=false` or feature flag `tengu_attribution_header=false`
@@ -1670,7 +1675,7 @@ const system = [
 
 11. **OAuth token endpoint requests MUST match axios 1.13.6 fingerprint** — the real CLI uses axios (not `fetch()`) for all OAuth calls. Must include `Accept: application/json, text/plain, */*` and `User-Agent: axios/1.13.6`. As of 2026-03-21, requests without this fingerprint receive HTTP 429. See [§1.15](#115-oauth-http-client-fingerprint).
 
-12. **The billing header fingerprint and cch** — `cc_version` suffix is a 3-char fingerprint hash from `SHA256(salt + chars_at[4,7,20]_of_first_user_msg + version).slice(0,3)`. The `cch` field is a static `00000` placeholder for Bun native client attestation (v2.1.92+); omitted for bedrock/anthropicAws. See [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181).
+12. **The billing header fingerprint and cch** — `cc_version` suffix is a 3-char fingerprint hash from `SHA256(salt + chars_at[4,7,20]_of_first_user_msg + version).slice(0,3)`. The `cch` field is a static `00000` placeholder for Bun native client attestation (v2.1.92+); **the upstream binary** omits it for the bedrock/anthropicAws providers. That omission is upstream client behaviour only — this plugin targets Anthropic first-party exclusively, emits `cch=00000` on every request and implements no provider gate ([Provider Scope](../README.md#provider-scope)). See [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181).
 
 ### 14.3 Quick Reference — What Makes a Request "Look Like Claude Code"
 
@@ -1829,8 +1834,12 @@ See [§1.16](#116-billing-cache-hash-cch--dynamic-computation-v2181) for full de
 hex hash: `SHA256(salt + msg[4]+msg[7]+msg[20] + version)[:3]` (e.g., `2.1.92.a3f`).
 
 **Fix:** Now uses `computeBillingCacheHash()` for the suffix (same algorithm as real CC's `computeFingerprint()`).
-Also fixed: `cch` is now static `00000` (Bun attestation placeholder) instead of dynamic hash,
-and is omitted for bedrock/anthropicAws providers.
+Also fixed: `cch` is now static `00000` (Bun attestation placeholder) instead of dynamic hash.
+The plugin emits that literal unconditionally — `buildAnthropicBillingHeader(version, firstUserMessage, workloadOverride)`
+takes no `provider` argument and contains no provider gate.
+**Upstream only:** the real Claude Code binary omits the segment for the bedrock/anthropicAws
+providers. The plugin does not implement that branch and never will — it targets Anthropic
+first-party exclusively ([Provider Scope](../README.md#provider-scope)).
 
 ### 15.8 Billing Header `cc_workload` — MISSING
 

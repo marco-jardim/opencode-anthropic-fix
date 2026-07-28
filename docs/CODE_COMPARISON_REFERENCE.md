@@ -334,12 +334,13 @@ const KNOWN_IDENTITY_STRINGS = new Set([
 ]);
 ```
 
-### buildAnthropicBillingHeader (lines 5568-5592)
+### buildAnthropicBillingHeader (`lib/mimicry/system-prompt.mjs`)
 
 ```javascript
-function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
+export function buildAnthropicBillingHeader(version, firstUserMessage, workloadOverride) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "unknown";
+  // Real CC sends cc_entrypoint=cli (confirmed via proxy capture).
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
   // Fix #1: cc_version suffix is the 3-char fingerprint hash, NOT the model ID.
   // computeBillingCacheHash() computes SHA256(salt + msg[4]+msg[7]+msg[20] + version)[:3]
   // which matches computeFingerprint() in the real CC source (utils/fingerprint.ts).
@@ -347,22 +348,25 @@ function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
   // the hash from "000" chars (indices 4,7,20 all missing → fallback "0").
   const fingerprint = computeBillingCacheHash(firstUserMessage || "", version);
   const ccVersion = `${version}.${fingerprint}`;
-  // Fix #4: cch is a static "00000" placeholder for Bun's native client attestation.
-  // Real CC v92: cch is included for all providers EXCEPT bedrock/anthropicAws.
+  // cch is a static "00000" placeholder for Bun's native client attestation.
   // The real Bun binary overwrites these zeros in the serialized body bytes.
   // For non-Bun runtimes, the server sees "00000" and skips attestation verification.
-  const isBedrock = provider === "bedrock" || provider === "anthropicAws";
-  const cchPart = isBedrock ? "" : " cch=00000;";
-  let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}`;
-  const workload = process.env.CLAUDE_CODE_WORKLOAD;
+  // Emitted unconditionally — the plugin is first-party only.
+  const cchPart = " cch=00000;";
+  let workloadPart = "";
+  const workload = workloadOverride || process.env.CLAUDE_CODE_WORKLOAD;
   if (workload) {
     // QA fix M5: sanitize workload value to prevent header injection
-    const safeWorkload = workload.replace(/[;\s\r\n]/g, "_");
-    header = header.replace(/;$/, ` cc_workload=${safeWorkload};`);
+    const safeWorkload = String(workload).replace(/[;\s\r\n]/g, "_");
+    if (safeWorkload) workloadPart = ` cc_workload=${safeWorkload};`;
   }
-  return header;
+  return `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}${workloadPart}`;
 }
 ```
+
+> **Upstream note.** Real CC v92 omits `cch` for the `bedrock`/`anthropicAws`
+> providers. The plugin has no such branch and takes no `provider` argument:
+> see [Provider Scope](../README.md#provider-scope).
 
 ### buildSystemPromptBlocks - Complete Implementation (lines 5751-5850)
 

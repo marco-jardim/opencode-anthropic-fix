@@ -532,7 +532,7 @@ When `signatureEnabled=true`, current implementation may add dynamically:
 - `redact-thinking-2026-02-12` (**default ON** — matches CC 2.1.150; opt out via `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`)
 - `context-management-2025-06-27` (opt-in via `token_economy.context_management`; hardcoded `&& false` in CC 2.1.150 D5q)
 - `structured-outputs-2025-12-15` (opt-in via `token_economy.structured_outputs`; enabled by a caller-supplied output format in CC)
-- `web-search-2025-03-05` (provider `vertex`/`foundry` + supported model)
+- `web-search-2025-03-05` (added on supported models; the plugin gates on the model only — upstream additionally gates on provider `vertex`/`foundry`)
 - `prompt-caching-scope-2026-01-05` (non-interactive mode; **skipped in round-robin** — cache is per-workspace)
 - `extended-cache-ttl-2025-04-11` (default ON; extended prompt cache TTL — plugin addition for better cache rates)
 - `thinking-token-count-2026-05-13` (default ON; token tracking — plugin addition via `token_economy.thinking_token_count`)
@@ -553,9 +553,14 @@ Strategy filter:
 
 Provider filter:
 
-- if detected provider is `bedrock`, remove betas listed in `BEDROCK_UNSUPPORTED_BETAS` (includes `code-execution-2025-08-25` and `files-api-2025-04-14`).
-
-Provider detection is based on request URL hostname (`anthropic`, `bedrock`, `vertex`, `foundry`).
+- **None.** The plugin applies no provider-based filtering to the beta set. `buildAnthropicBetaHeader()`
+  takes no `provider` argument and `BEDROCK_UNSUPPORTED_BETAS` does not exist in this codebase (its
+  absence is pinned by `lib/mimicry/headers.test.mjs`).
+- Upstream reference: the official client removes betas listed in its `BEDROCK_UNSUPPORTED_BETAS` set
+  (including `code-execution-2025-08-25` and `files-api-2025-04-14`) when the detected provider is
+  `bedrock`, detecting the provider from the request URL hostname (`anthropic`, `bedrock`, `vertex`,
+  `foundry`). The plugin is Anthropic first-party only and never takes that path — see
+  [Provider Scope](../README.md#provider-scope).
 
 ### 5.2 Claude Code reference beta list (consolidated)
 
@@ -751,27 +756,29 @@ In both paths, user system blocks are joined with `\n\n` into a single text bloc
 
 ### 6.5 Billing header generation
 
-`buildAnthropicBillingHeader(version, firstUserMessage, provider)`:
+`buildAnthropicBillingHeader(version, firstUserMessage, workloadOverride)`:
 
 - can be disabled by `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
 - `cc_version` suffix is a 3-char fingerprint hash computed from the first user message:
   `SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]` (matching real CC `computeFingerprint()`)
-- `cch=00000` is always the static placeholder — xxHash64 attestation was **removed in v2.1.97**
-  Omitted for bedrock/anthropicAws/mantle providers.
+- `cch=00000` is always the static placeholder — xxHash64 attestation was **removed in v2.1.97**.
+  It is emitted **unconditionally**: the function takes no `provider` argument and there is no
+  provider gate. See [Provider Scope](../README.md#provider-scope).
 - builds:
 
 ```text
 x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>; cch=00000;
 ```
 
-For bedrock/anthropicAws/mantle providers, `cch` is omitted:
+Upstream reference only — the official client omits `cch` for the bedrock/anthropicAws/mantle
+providers, producing the shape below. The plugin never emits this variant:
 
 ```text
 x-anthropic-billing-header: cc_version=<version>.<3-char-fingerprint>; cc_entrypoint=<entrypoint>;
 ```
 
-Detail: `cc_entrypoint` uses `CLAUDE_CODE_ENTRYPOINT` or `unknown` (matching upstream default).
-Optional `cc_workload` is appended when `CLAUDE_CODE_WORKLOAD` is set.
+Detail: `cc_entrypoint` uses `CLAUDE_CODE_ENTRYPOINT` or `cli`.
+Optional `cc_workload` is appended when `signature_emulation.workload` or `CLAUDE_CODE_WORKLOAD` is set.
 
 ### 6.6 CCH Attestation (Removed in v2.1.97)
 
@@ -793,8 +800,10 @@ Optional `cc_workload` is appended when `CLAUDE_CODE_WORKLOAD` is set.
 
 **Detection & Omission:**
 
-- `cch` field is omitted on non-1P providers (`bedrock`, `anthropicAws`, `mantle`)
-- `cch` field is omitted if `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no`
+- `cch` field is omitted if `CLAUDE_CODE_ATTRIBUTION_HEADER=0/false/no` — this is the only condition
+  under which the plugin omits it
+- Upstream only: the official client also omits `cch` on non-1P providers (`bedrock`, `anthropicAws`,
+  `mantle`). The plugin has no provider gate — see [Provider Scope](../README.md#provider-scope)
 
 **References:**
 
@@ -1098,16 +1107,18 @@ the plugin should replicate CC's fast-mode strip (do not send it alongside
 `speed:"fast"`). The API, when the flag is active, summarizes assistant text between
 tool calls (anti-distillation measure).
 
-### 11.5 Provider-Aware Tool Search Header
+### 11.5 Tool Search Header — upstream provider table
 
-The plugin now uses the correct tool search beta header per provider:
+Claude Code's `getToolSearchBetaHeader()` picks the tool search beta per provider:
 
-| Provider                  | Header                         |
+| Provider (upstream)       | Header                         |
 | ------------------------- | ------------------------------ |
 | 1P (firstParty) / Foundry | `advanced-tool-use-2025-11-20` |
 | Vertex / Bedrock / Mantle | `tool-search-tool-2025-10-19`  |
 
-This matches Claude Code's `getToolSearchBetaHeader()` function.
+The plugin implements only the first row and has no provider branch: it always emits
+`advanced-tool-use-2025-11-20`, which is the correct value for the first-party API — the only API it
+targets. See [Provider Scope](../README.md#provider-scope).
 
 ### 11.6 Beta Header Latching
 
