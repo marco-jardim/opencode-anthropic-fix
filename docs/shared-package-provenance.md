@@ -74,6 +74,7 @@ the rollback; there are no placeholders to resolve during an incident.
 
 | SHA       | Message                                                                             | What reverting it undoes                                                    |
 | --------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `f57b06b` | `COM-466 deps: migrate the shared wire package pin to rc.13`                        | pin to `rc.13` and its four seams; falls back to `rc.11`                    |
 | `8f1d954` | `deps: upgrade the shared wire package to rc.11 and record the divergences`         | pin to `rc.11`, the divergences document, and its parity cases              |
 | `19847f1` | `deps: upgrade the shared wire package to the client-derived protocol`              | pin to the client-derived protocol build and the adapter line it required   |
 | `6d64945` | `chore(deps): upgrade the shared wire package to the catalogue-derived model table` | pin to the catalogue-derived model table                                    |
@@ -97,12 +98,13 @@ through the table above, re-running the full gate after each step.
    fix when a specific release candidate regressed the wire bytes:
 
    ```bash
-   git revert --no-edit 8f1d954
+   git revert --no-edit f57b06b
    npm ci
    npm test -- --run test/conformance/shared-package-parity.test.mjs
    ```
 
-   Chain further reverts (`19847f1`, then `6d64945`, then `fc7cf2e`) to step further back.
+   Chain further reverts (`8f1d954`, then `19847f1`, then `6d64945`, then `fc7cf2e`) to step further
+   back.
 
 2. Reverting the whole chain removes the shared package entirely. The last commit to revert is the
    adapter commit, which also drops the dependency from `package.json` and `package-lock.json`:
