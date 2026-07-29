@@ -286,16 +286,24 @@ plugin is correct.
 Real CC's `--workload <tag>` CLI flag (since at least 2.1.133) appends a
 `cc_workload=<tag>;` segment to the `x-anthropic-billing-header`, between
 `cch=00000;` and the end. It's process-scoped, "set by SDK daemon callers that
-spawn subprocesses for cron work". Provider-gated: bedrock/anthropicAws/mantle
-skip both `cch` and `cc_workload`.
+spawn subprocesses for cron work". In the **upstream Claude Code binary** — and only there —
+this is provider-gated: the bedrock/anthropicAws/mantle code paths of that binary skip both
+`cch` and `cc_workload`. This plugin has no equivalent gate: it emits `cch=00000;` on every
+request and appends `cc_workload=` whenever the value is non-empty, because Anthropic
+first-party is the only supported provider ([Provider Scope](../README.md#provider-scope)).
 
 ### Plugin proposal
 
 1. Add `signature_emulation.workload` (string, optional).
 2. Read `CLAUDE_CODE_WORKLOAD` env override.
-3. When non-empty AND provider is firstParty, append `cc_workload=<value>;` to
-   the billing header after the existing `cch=00000;`.
-4. Skip for bedrock / anthropicAws / mantle (matches real CC).
+3. When non-empty, append `cc_workload=<value>;` to the billing header after the
+   existing `cch=00000;`.
+4. ~~Skip for bedrock / anthropicAws / mantle (matches real CC).~~
+   **REJECTED BY SCOPE DECISION.** The plugin is Anthropic first-party only, so
+   there is no provider to gate on. Bedrock, anthropicAws, Vertex, Foundry and
+   Mantle are permanently out of scope — see
+   [Provider Scope](../README.md#provider-scope). Steps 1–3 shipped without any
+   provider condition.
 
 This lets SDK-daemon users on opencode tag their cron traffic for billing
 attribution exactly like real CC. Zero cost when unset.

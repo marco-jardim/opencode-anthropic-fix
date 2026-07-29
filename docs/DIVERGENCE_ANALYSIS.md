@@ -280,33 +280,36 @@ export function getAttributionHeader(fingerprint: string): string {
 
 ### Plugin Attribution Header
 
-**index.mjs:5568-5592**
+**`lib/mimicry/system-prompt.mjs` — `buildAnthropicBillingHeader()`**
 
 ```javascript
-function buildAnthropicBillingHeader(version, firstUserMessage, provider) {
+export function buildAnthropicBillingHeader(version, firstUserMessage, workloadOverride) {
   if (isFalsyEnv(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER)) return "";
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "unknown";
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || "cli";
   const fingerprint = computeBillingCacheHash(firstUserMessage || "", version);
   const ccVersion = `${version}.${fingerprint}`;
-  // Fix #4: cch is a static "00000" placeholder for Bun's native client attestation.
-  const isBedrock = provider === "bedrock" || provider === "anthropicAws";
-  const cchPart = isBedrock ? "" : " cch=00000;";
-  let header = `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}`;
-  const workload = process.env.CLAUDE_CODE_WORKLOAD;
+  // cch is a static "00000" placeholder; emitted unconditionally.
+  const cchPart = " cch=00000;";
+  let workloadPart = "";
+  const workload = workloadOverride || process.env.CLAUDE_CODE_WORKLOAD;
   if (workload) {
-    const safeWorkload = workload.replace(/[;\s\r\n]/g, "_");
-    header = header.replace(/;$/, ` cc_workload=${safeWorkload};`);
+    const safeWorkload = String(workload).replace(/[;\s\r\n]/g, "_");
+    if (safeWorkload) workloadPart = ` cc_workload=${safeWorkload};`;
   }
-  return header;
+  return `x-anthropic-billing-header: cc_version=${ccVersion}; cc_entrypoint=${entrypoint};${cchPart}${workloadPart}`;
 }
 ```
+
+> **Scope note.** The function takes no `provider` argument and has no `isBedrock`
+> branch. The plugin is Anthropic first-party only — see
+> [Provider Scope](../README.md#provider-scope) in the README.
 
 ### ⚠️ DIVERGENCE #3: Attestation Flag Handling
 
 | Aspect                     | Real CC                                                      | Plugin                                                                |
 | -------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------- |
-| **Attestation Check**      | `feature('NATIVE_CLIENT_ATTESTATION')` — feature flag-driven | **Hardcoded logic** — checks `provider !== bedrock/anthropicAws`      |
-| **Placeholder Logic**      | Only adds `cch=00000` if feature enabled                     | Always adds `cch=00000` for non-Bedrock providers                     |
+| **Attestation Check**      | `feature('NATIVE_CLIENT_ATTESTATION')` — feature flag-driven | **Hardcoded** — always emits the placeholder, no feature flag         |
+| **Placeholder Logic**      | Only adds `cch=00000` if feature enabled                     | Always adds `cch=00000` (no provider gate — first-party only)         |
 | **Scope in System Prompt** | Always `cacheScope: null` (never cached)                     | Always `{type: "text", text: billingHeader}` — no cache_control field |
 
 **Real CC Comment (line 3222):**
@@ -461,14 +464,17 @@ This adds/removes `cch=00000;` from the header string, but does **NOT** change:
 
 ### Plugin Behavior
 
-No feature flag handling for attestation — **hardcoded based on provider**:
+No feature flag handling for attestation — the placeholder is **hardcoded and unconditional**:
 
-**index.mjs:5582-5583**
+**`lib/mimicry/system-prompt.mjs` — `buildAnthropicBillingHeader()`**
 
 ```javascript
-const isBedrock = provider === "bedrock" || provider === "anthropicAws";
-const cchPart = isBedrock ? "" : " cch=00000;";
+const cchPart = " cch=00000;";
 ```
+
+There is no provider gate here. The upstream binary does branch on
+`bedrock`/`anthropicAws`; the plugin does not, because it only ever talks to the
+Anthropic first-party API — see [Provider Scope](../README.md#provider-scope).
 
 System prompt structure is **unaffected** — no feature flag checking.
 
@@ -511,18 +517,18 @@ If found, uses that as boundary; otherwise uses `Math.ceil(filtered.length / 2)`
 
 > **Status: ALL RESOLVED** (2026-04-07). See resolution column for implementation details.
 
-| #      | Category                  | Real CC                                              | Plugin (before)                                   | Resolution                                                                                |
-| ------ | ------------------------- | ---------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **1**  | Function signature        | 3 params: systemPrompt, enablePromptCaching, options | 2 params: system, signature                       | RESOLVED: Delegated to `splitSysPromptPrefix()` + `getCacheControlForScope()`             |
-| **2**  | Cache scoping paths       | 3 distinct paths (tool-based, boundary, fallback)    | 2 simplified modes (boundary heuristic, original) | RESOLVED: 3 paths implemented (A/C unified + B). Wire output matches real CC exactly.     |
-| **3**  | Identity string selection | Dynamic via `getCLISyspromptPrefix()` flags          | Hardcoded to `DEFAULT_PREFIX`                     | RESOLVED: Dynamic `getCLISyspromptPrefix()` selects based on env vars.                    |
-| **4**  | Org-scope support         | Full support: `cacheScope: 'org'`                    | None: only 'global' and null                      | RESOLVED: `getCacheControlForScope('org')` → `{type:'ephemeral', ttl}` (no scope on wire) |
-| **5**  | Attestation handling      | Feature flag `NATIVE_CLIENT_ATTESTATION`             | Hardcoded provider check                          | ACCEPTED: Provider check is functionally equivalent (CC enables for all non-Bedrock)      |
-| **6**  | Identity cache_control    | Conditional (null in boundary mode)                  | Always present (ephemeral or global)              | RESOLVED: `cacheScope: null` in boundary mode → no `cache_control` on wire                |
-| **7**  | Attribution header cache  | Always null (never cached)                           | No cache_control field                            | RESOLVED: `cacheScope: null` → `cache_control` omitted (identical wire result)            |
-| **8**  | Boundary detection        | Explicit marker match                                | Heuristic string search                           | RESOLVED: Exact match on `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` constant                        |
-| **9**  | TTL determination         | `should1hCacheTTL(querySource)` with GrowthBook      | Static from config                                | ACCEPTED: Default '1h' matches real CC for majority of users. No GrowthBook available.    |
-| **10** | Block assembly            | Via delegation to `splitSysPromptPrefix()`           | Direct inline logic                               | RESOLVED: `splitSysPromptPrefix()` delegation mirrors real CC architecture                |
+| #      | Category                  | Real CC                                              | Plugin (before)                                   | Resolution                                                                                 |
+| ------ | ------------------------- | ---------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **1**  | Function signature        | 3 params: systemPrompt, enablePromptCaching, options | 2 params: system, signature                       | RESOLVED: Delegated to `splitSysPromptPrefix()` + `getCacheControlForScope()`              |
+| **2**  | Cache scoping paths       | 3 distinct paths (tool-based, boundary, fallback)    | 2 simplified modes (boundary heuristic, original) | RESOLVED: 3 paths implemented (A/C unified + B). Wire output matches real CC exactly.      |
+| **3**  | Identity string selection | Dynamic via `getCLISyspromptPrefix()` flags          | Hardcoded to `DEFAULT_PREFIX`                     | RESOLVED: Dynamic `getCLISyspromptPrefix()` selects based on env vars.                     |
+| **4**  | Org-scope support         | Full support: `cacheScope: 'org'`                    | None: only 'global' and null                      | RESOLVED: `getCacheControlForScope('org')` → `{type:'ephemeral', ttl}` (no scope on wire)  |
+| **5**  | Attestation handling      | Feature flag `NATIVE_CLIENT_ATTESTATION`             | Hardcoded, always on                              | ACCEPTED: First-party only, so the unconditional placeholder matches CC's first-party path |
+| **6**  | Identity cache_control    | Conditional (null in boundary mode)                  | Always present (ephemeral or global)              | RESOLVED: `cacheScope: null` in boundary mode → no `cache_control` on wire                 |
+| **7**  | Attribution header cache  | Always null (never cached)                           | No cache_control field                            | RESOLVED: `cacheScope: null` → `cache_control` omitted (identical wire result)             |
+| **8**  | Boundary detection        | Explicit marker match                                | Heuristic string search                           | RESOLVED: Exact match on `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` constant                         |
+| **9**  | TTL determination         | `should1hCacheTTL(querySource)` with GrowthBook      | Static from config                                | ACCEPTED: Default '1h' matches real CC for majority of users. No GrowthBook available.     |
+| **10** | Block assembly            | Via delegation to `splitSysPromptPrefix()`           | Direct inline logic                               | RESOLVED: `splitSysPromptPrefix()` delegation mirrors real CC architecture                 |
 
 ---
 

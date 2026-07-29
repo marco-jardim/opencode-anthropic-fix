@@ -19,6 +19,23 @@ baseline, not an expected exact count. New tests may legitimately increase the o
 When a higher count is established on `master`, raise the floor deliberately in the workflow and
 its policy test in the same reviewed change. Never lower the floor to make a regression pass.
 
+Raising the floor is never a documentation-only change: it edits
+[`ci.yml`](../.github/workflows/ci.yml) and its assertion in
+[`ci-policy.test.mjs`](../test/conformance/ci-policy.test.mjs) together, and the new value must be
+the count actually observed on `master`, never an aspirational one.
+
+### Recorded baselines
+
+| Date       | Ref                                         | `npm test` result                        | Enforced floor                |
+| ---------- | ------------------------------------------- | ---------------------------------------- | ----------------------------- |
+| 2026-07-24 | pre-flight `master`                         | 1374 passing across 75 files             | 1374 (pre-flight record only) |
+| 2026-07-26 | `master` after the CI wave                  | at least 1414 passing                    | 1414                          |
+| 2026-07-27 | `refactor/extract-wire-compat` at `8f1d954` | 1563 passing, 2 skipped, across 79 files | 1414                          |
+
+The floor lags the latest measurement on purpose: it is the value a reviewer has agreed to enforce,
+not the last number a local run happened to print. A branch that measures above the floor does not
+authorize raising it; only a measurement on `master` does.
+
 The Node matrix checks should be required by branch protection and required to be up to date
 before merge. The [`ci` workflow](../.github/workflows/ci.yml) and the
 [`publish` workflow](../.github/workflows/publish.yml) are independent. Publication runs its own
@@ -45,6 +62,17 @@ Dist-tags are selected from the version in `package.json`:
 - A hyphenated version such as `0.3.0-beta.0` publishes to the npm `beta` dist-tag.
 - A non-hyphenated stable version publishes to the npm `latest` dist-tag.
 - A prerelease must never be published to `latest`.
+
+Inspect the published state before and after any release:
+
+```bash
+npm view opencode-anthropic-fix dist-tags
+```
+
+At the time of writing, `latest` is `0.2.1`, which predates the shared wire package migration. That
+release is deliberately held: the next publication is a `0.3.0-beta.0` prerelease on `beta`,
+followed by the human canary window and the human-gated promotion below. Shipping the migration
+straight to `latest` is forbidden, and so is any shortcut that reaches `latest` without a canary.
 
 ## Canary and promotion procedure
 

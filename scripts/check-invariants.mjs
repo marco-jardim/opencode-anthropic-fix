@@ -4,7 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const CHANGELOG_VERSION_PATTERN = /^##\s*\[(\d+\.\d+\.\d+)\]/m;
+const CHANGELOG_VERSION_PATTERN = /^##\s*\[(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\]/m;
+const PACKAGE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const ANALYSIS_FILENAME_PATTERN = /^claude-code-(\d+\.\d+\.\d+)-analysis\.md$/;
 
 /**
@@ -23,8 +24,10 @@ export function extractChangelogVersion(contents) {
  * @returns {number}
  */
 function compareVersions(left, right) {
-  const leftParts = left.split(".").map(Number);
-  const rightParts = right.split(".").map(Number);
+  const [leftRelease, leftPrerelease = ""] = splitPrerelease(left);
+  const [rightRelease, rightPrerelease = ""] = splitPrerelease(right);
+  const leftParts = leftRelease.split(".").map(Number);
+  const rightParts = rightRelease.split(".").map(Number);
 
   for (let index = 0; index < 3; index += 1) {
     if (leftParts[index] !== rightParts[index]) {
@@ -32,7 +35,31 @@ function compareVersions(left, right) {
     }
   }
 
-  return 0;
+  // Semver: a release outranks any prerelease of the same three-part version, so
+  // a `0.3.0` changelog head is AHEAD of a `0.3.0-beta.0` package version rather
+  // than equal to it. Equal prerelease strings compare equal, which is the case
+  // this project actually ships (`## [0.3.0-beta.0]` against `0.3.0-beta.0`).
+  if (leftPrerelease === rightPrerelease) {
+    return 0;
+  }
+  if (leftPrerelease === "") {
+    return 1;
+  }
+  if (rightPrerelease === "") {
+    return -1;
+  }
+  return leftPrerelease < rightPrerelease ? -1 : 1;
+}
+
+/**
+ * Split a semver string into its three-part release and its prerelease suffix.
+ *
+ * @param {string} version
+ * @returns {[string, string]}
+ */
+function splitPrerelease(version) {
+  const separator = version.indexOf("-");
+  return separator === -1 ? [version, ""] : [version.slice(0, separator), version.slice(separator + 1)];
 }
 
 /**
@@ -77,7 +104,7 @@ export function runChecks({ cwd }) {
   if (packageContents !== null) {
     try {
       const packageData = JSON.parse(packageContents);
-      if (typeof packageData.version === "string" && /^\d+\.\d+\.\d+$/.test(packageData.version)) {
+      if (typeof packageData.version === "string" && PACKAGE_VERSION_PATTERN.test(packageData.version)) {
         packageVersion = packageData.version;
       } else {
         errors.push("package.json version is missing or is not a three-part version");

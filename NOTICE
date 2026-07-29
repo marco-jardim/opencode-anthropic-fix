@@ -1,0 +1,36 @@
+opencode-anthropic-fix
+Copyright (C) 2025-2026 Marco Jardim and contributors.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. The full text is in LICENSE.
+
+This project is a fork of the original OpenCode Anthropic auth plugin by
+AnomalyCo (https://github.com/anomalyco/opencode-anthropic-auth) and contains
+modifications by the maintainers of this repository. GPL notices in this file,
+in LICENSE, and in source headers must never be removed, including during a
+dependency rollback.
+
+Third-party dependencies
+========================
+
+@tormentalabs/claude-code-wire-compat
+  Runtime-neutral Claude Code Messages wire compatibility primitives.
+  License: GPL-3.0-or-later
+  Copyright (C) claude-code-wire-compat contributors.
+  Upstream: https://github.com/marco-jardim/claude-code-wire-compat
+  Distributed with its own LICENSE and NOTICE inside the published artifact.
+
+  This package builds the outgoing Anthropic Messages request. It is currently
+  pinned to a release-candidate tarball; the exact artifact, its integrity hash,
+  the reason for the temporary pin, and the rollback procedure are recorded in
+  docs/shared-package-provenance.md.
+
+xxhash-wasm
+  License: MIT
+  Upstream: https://github.com/jungomi/xxhash-wasm
+
+Development-only dependencies are not redistributed by this package: the "files"
+allowlist in package.json publishes only index.mjs, cli.mjs, lib/**/*.mjs,
+README.md, and LICENSE.

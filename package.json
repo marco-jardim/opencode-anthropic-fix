@@ -1,6 +1,6 @@
 {
   "name": "opencode-anthropic-fix",
-  "version": "0.2.1",
+  "version": "0.3.0-beta.0",
   "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
@@ -15,6 +15,7 @@
     "index.mjs",
     "cli.mjs",
     "lib/**/*.mjs",
+    "!lib/**/*.test.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -54,7 +55,6 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@tormentalabs/claude-code-wire-compat": "https://github.com/marco-jardim/claude-code-wire-compat/releases/download/v0.1.0-rc.11/tormentalabs-claude-code-wire-compat-0.1.0-rc.11.tgz",
-    "xxhash-wasm": "^1.1.0"
+    "@tormentalabs/claude-code-wire-compat": "0.1.0"
   }
 }

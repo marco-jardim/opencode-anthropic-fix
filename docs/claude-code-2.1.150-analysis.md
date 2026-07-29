@@ -41,7 +41,7 @@ Wire-level drift from 2.1.143: **MEDIUM** — beta set changed substantially.
 | `x-` headers                  | `x-anthropic-additional-protection: true` confirmed as conditional header. |
 | `anthropic-version`           | Still `2023-06-01`.                                                        |
 | `x-stainless-package-version` | SDK bumped to `0.94.0` (was `0.81.0`).                                     |
-| Billing header                | Format unchanged. Not sent for bedrock/anthropicAws/mantle.                |
+| Billing header                | Format unchanged. Upstream CC omits it for bedrock/anthropicAws/mantle.    |
 | Beta registry                 | Expanded to 26 entries (full list in §4).                                  |
 
 **TL;DR:** The main mimicry risk is the 4 always-on betas that CC dropped. The plugin should
@@ -126,7 +126,8 @@ Feature-flagged (not default):
 ## 7. Billing Header
 
 Format unchanged: `x-anthropic-billing-header: cc_version=<ver>; cc_entrypoint=<entry>;[ cch=00000;][ cc_workload=<wl>;]`
-Still gated: NOT sent for bedrock/anthropicAws/mantle.
+Still gated **in upstream CC**: NOT sent for bedrock/anthropicAws/mantle. The plugin has no provider
+gate and always sends it — see [Provider Scope](../README.md#provider-scope).
 
 ---
 

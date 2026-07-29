@@ -67,12 +67,6 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
   };
 });
 
-vi.mock("../../lib/context-hint-persist.mjs", () => ({
-  loadContextHintDisabledFlag: vi.fn(() => ({ disabled: false })),
-  saveContextHintDisabledFlag: vi.fn(),
-  getContextHintFlagPath: vi.fn(() => "/tmp/test-context-hint-disabled.flag"),
-}));
-
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
@@ -158,7 +152,7 @@ async function sendRequest(fetchFn, bodyOverrides = {}, headerOverrides = {}) {
   await fetchFn("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json", ...headerOverrides },
-    body: JSON.stringify({ model: "claude-sonnet-4", messages: [], ...bodyOverrides }),
+    body: JSON.stringify({ model: "claude-sonnet-4", max_tokens: 1024, messages: [], ...bodyOverrides }),
   });
 
   const [, init] = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
@@ -363,7 +357,7 @@ describe("Fix #5: x-should-retry: true forces retry on service-wide errors", () 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(500);
@@ -385,7 +379,7 @@ describe("Fix #5: x-should-retry: true forces retry on service-wide errors", () 
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -410,7 +404,7 @@ describe("Fix #6: 529 overloaded responses are retried", () => {
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(529);
@@ -426,7 +420,7 @@ describe("Fix #6: 529 overloaded responses are retried", () => {
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -482,7 +476,10 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
     });
 
     const [, init] = mockFetch.mock.calls[0];
-    expect(init.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
+    // The `context_hint` field left the request body, so announcing a beta whose
+    // capability is no longer in the body would be incoherent. The genuine 2.1.195
+    // client does not emit it either, so the header must NOT carry it.
+    expect(init.headers.get("anthropic-beta") || "").not.toContain("context-hint-2026-04-09");
     expect(JSON.parse(init.body).context_hint).toBeUndefined();
   });
 
@@ -504,60 +501,15 @@ describe("Context-hint protocol (CC v2.1.110+)", () => {
     expect(JSON.parse(init.body).context_hint).toBeUndefined();
   });
 
-  it("disables context-hint after 400 'Unexpected value / anthropic-beta / context-hint' rejection + retries without the beta + persists the flag", async () => {
-    const { saveContextHintDisabledFlag } = await import("../../lib/context-hint-persist.mjs");
-    saveContextHintDisabledFlag.mockClear();
-
-    mockFetch
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            error: { message: 'Unexpected value "context-hint-2026-04-09" in anthropic-beta header' },
-          }),
-          { status: 400 },
-        ),
-      )
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
-      .mockResolvedValueOnce(new Response("", { status: 200 }));
-
-    await fetchFn("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(MAIN_THREAD_BODY()),
-    });
-    await fetchFn("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(MAIN_THREAD_BODY()),
-    });
-
-    // 3 calls: initial (400) → retry (200) → next user request (200)
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    const [, firstInit] = mockFetch.mock.calls[0];
-    expect(firstInit.headers.get("anthropic-beta")).toContain("context-hint-2026-04-09");
-
-    const [, retryInit] = mockFetch.mock.calls[1];
-    expect(retryInit.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
-    expect(JSON.parse(retryInit.body).context_hint).toBeUndefined();
-
-    const [, secondInit] = mockFetch.mock.calls[2];
-    expect(secondInit.headers.get("anthropic-beta")).not.toContain("context-hint-2026-04-09");
-    expect(JSON.parse(secondInit.body).context_hint).toBeUndefined();
-
-    expect(saveContextHintDisabledFlag).toHaveBeenCalledWith({
-      reason: "beta_unsupported_400",
-      status: 400,
-    });
-  }, 15000);
-
   it("compacts messages and retries on 422", async () => {
     const heavyMessages = [
       { role: "user", content: [{ type: "text", text: "Start" }] },
       {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "x".repeat(5000) },
+          { type: "thinking", thinking: "x".repeat(5000), signature: "sig-heavy-1" },
           { type: "text", text: "Okay." },
+          { type: "tool_use", id: "toolu_1", name: "read_file", input: {} },
         ],
       },
       {
@@ -918,8 +870,14 @@ describe("Fix #10: MAX_THINKING_TOKENS env var honored in budget fallback", () =
     process.env.OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING = "1";
     process.env.MAX_THINKING_TOKENS = "32000";
 
+    // `max_tokens` must stay ABOVE the expected budget: the package clamps the
+    // thinking budget with `Math.min(max_tokens - 1, requested)`, so the shared
+    // helper's default of 1024 would cap the budget at 1023 regardless of the
+    // env var under test. A real request emitting budget_tokens > max_tokens
+    // would be rejected with a 400, so the clamp itself is correct.
     const { body } = await sendRequest(fetchFn, {
       model: "claude-opus-4-6",
+      max_tokens: 8192,
       thinking: { type: "enabled", budget_tokens: 5000 },
     });
 
@@ -930,23 +888,32 @@ describe("Fix #10: MAX_THINKING_TOKENS env var honored in budget fallback", () =
 
   it("uses MAX_THINKING_TOKENS as fallback when no budget_tokens provided", async () => {
     process.env.OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING = "1";
-    process.env.MAX_THINKING_TOKENS = "32000";
+    // 20000, not 32000: `max_tokens` is itself clamped to the model's default
+    // output limit (32000 for claude-opus-4-6), and the budget is then clamped
+    // to `max_tokens - 1`, so a 32000 budget is unreachable on this model. The
+    // value only has to be low enough that the env var, not the clamp, is what
+    // the assertion observes.
+    process.env.MAX_THINKING_TOKENS = "20000";
 
     const { body } = await sendRequest(fetchFn, {
       model: "claude-opus-4-6",
+      max_tokens: 32000,
       thinking: { type: "enabled" },
     });
 
     expect(body.thinking.type).toBe("enabled");
-    expect(body.thinking.budget_tokens).toBe(32000);
+    expect(body.thinking.budget_tokens).toBe(20000);
   });
 
   it("defaults to 16000 when MAX_THINKING_TOKENS not set", async () => {
     process.env.OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING = "1";
     delete process.env.MAX_THINKING_TOKENS;
 
+    // Above the expected 16000 default so the `max_tokens - 1` budget clamp is
+    // not what the assertion ends up measuring.
     const { body } = await sendRequest(fetchFn, {
       model: "claude-opus-4-6",
+      max_tokens: 20000,
       thinking: { type: "enabled" },
     });
 
@@ -1016,7 +983,7 @@ describe("Fix #12: Refresh timeout is 15s (not 10s)", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     // The first call should be the refresh (to platform.claude.com/v1/oauth/token)
@@ -1058,7 +1025,7 @@ describe("Fix #13: 5-minute expiry buffer on foreground refresh", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     // Should have made 2 calls: 1 refresh + 1 API
@@ -1089,7 +1056,7 @@ describe("Fix #14: Multiple rate-limit subtypes monitored", () => {
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -1106,7 +1073,7 @@ describe("Fix #14: Multiple rate-limit subtypes monitored", () => {
     const response = await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     expect(response.status).toBe(200);
@@ -1389,9 +1356,32 @@ describe("E2E: Thinking normalization", () => {
     expect(body.thinking).toEqual({ type: "adaptive" });
   });
 
+  // Pins the observable side effect of normalizing dotted model ids to dashed
+  // ones before they reach the shared package (lib/mimicry/wire-compat.mjs).
+  // The package classifies models by dashed id only, so a dotted id would fall
+  // through to `claude-opus-4-0` and silently lose adaptive thinking. Because
+  // the emitted wire id derives from the same string, the `model` field itself
+  // changes too — which is correct, the real API only accepts dashed ids.
+  it("rewrites a dotted model id to the dashed spelling on the wire", async () => {
+    const { body } = await sendRequest(fetchFn, { model: "claude-opus-4.7" });
+
+    expect(body.model).toBe("claude-opus-4-7");
+  });
+
+  it("rewrites the dotted Opus 4.8 id to the dashed spelling too", async () => {
+    const { body } = await sendRequest(fetchFn, { model: "claude-opus-4.8" });
+
+    expect(body.model).toBe("claude-opus-4-8");
+  });
+
   it("older model keeps original thinking config", async () => {
+    // Same `Math.min(max_tokens - 1, requested)` budget clamp as the
+    // MAX_THINKING_TOKENS tests above: `max_tokens` has to exceed the expected
+    // budget or the clamp, not the "keeps original config" behaviour under
+    // test, is what the assertion measures.
     const { body } = await sendRequest(fetchFn, {
       model: "claude-sonnet-4-5",
+      max_tokens: 16000,
       thinking: { type: "enabled", budget_tokens: 10000 },
     });
 
@@ -1614,7 +1604,7 @@ describe("E2E: URL transform adds ?beta=true", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const [input] = mockFetch.mock.calls[0];
@@ -1628,7 +1618,7 @@ describe("E2E: URL transform adds ?beta=true", () => {
     await fetchFn("https://api.anthropic.com/v1/messages/count_tokens", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
     });
 
     const [input] = mockFetch.mock.calls[0];

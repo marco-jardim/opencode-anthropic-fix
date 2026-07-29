@@ -131,7 +131,11 @@ to `EXPERIMENTAL_BETA_FLAGS` for registry-completeness + the disable-guard only)
 - `S2r = Set([interleaved_thinking, long_context, tool-search-tool])` — **the
   bedrock-unsupported filter** (`V9`: on bedrock these three are stripped from the
   header and re-added to the body `anthropic_beta` via the inverse set `O9r`). This
-  **matches the plugin's `BEDROCK_UNSUPPORTED_BETAS`** — no change.
+  is upstream-only. The plugin has **no** `BEDROCK_UNSUPPORTED_BETAS` set and no bedrock
+  branch — `buildAnthropicBetaHeader()` takes no `provider` argument, and the absence of the
+  symbol is pinned by `lib/mimicry/headers.test.mjs`. Anthropic first-party is the only
+  supported provider ([Provider Scope](../README.md#provider-scope)),
+  so there is nothing to filter — no change.
 - `E2r = Set([claude_code, interleaved_thinking, context_management, oauth])` —
   the **count-tokens allowlist** (`beta.messages.countTokens` filters request betas
   to this set). It does **not** gate `/v1/messages`.
@@ -414,5 +418,6 @@ These are optimizations, not correctness bugs; none changes the wire fingerprint
 - OAuth login flow, scopes, `client_id`, PKCE: unchanged.
 - `anthropic-dispatch-id`, `x-cc-atis`, `x-is-refusal-fallback`: keep omitting
   (experimental/default-off/unmimicable).
-- `S2r` bedrock-unsupported filter: plugin's `BEDROCK_UNSUPPORTED_BETAS` matches.
+- `S2r` bedrock-unsupported filter: upstream-only. The plugin has no equivalent set and needs
+  none — it is Anthropic first-party only. No change.
 - `anthropic-version 2023-06-01`, `x-stainless-package-version 0.94.0`: unchanged.

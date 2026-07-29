@@ -162,6 +162,54 @@ function driveForegroundRequest(fetchFn) {
   });
 }
 
+// Captured before any `vi.useFakeTimers()` call so it stays a genuine
+// event-loop macrotask even while the fake clock is installed.
+const realSetTimeout = globalThis.setTimeout;
+
+function realEventLoopTurn() {
+  return new Promise((resolve) => realSetTimeout(resolve, 0));
+}
+
+/**
+ * Drives a promise to settlement while fake timers are installed.
+ *
+ * The request builder awaits `crypto.subtle.digest` (billing fingerprint),
+ * which resolves on the libuv threadpool and is therefore immune to fake
+ * timers. A single `advanceTimersByTimeAsync` can run while zero timers are
+ * pending and then never get another chance to release the backoff sleep.
+ * So we alternate: one real event-loop turn (lets the digest land), then a
+ * fake-clock advance (releases any retry sleep that just got scheduled).
+ */
+async function settleWithFakeTimers(promise, { stepMs = 500, maxIterations = 60 } = {}) {
+  let settled = false;
+  let value;
+  let failure;
+  const tracked = promise.then(
+    (result) => {
+      settled = true;
+      value = result;
+    },
+    (error) => {
+      settled = true;
+      failure = error;
+    },
+  );
+
+  for (let i = 0; i < maxIterations && !settled; i += 1) {
+    await realEventLoopTurn();
+    if (settled) break;
+    await vi.advanceTimersByTimeAsync(stepMs);
+  }
+
+  if (!settled) {
+    throw new Error(`settleWithFakeTimers: promise did not settle within ${maxIterations} iterations`);
+  }
+
+  await tracked;
+  if (failure) throw failure;
+  return value;
+}
+
 function authorizationAt(fake, index) {
   return new Headers(fake.calls[index].init.headers).get("authorization");
 }
@@ -237,9 +285,7 @@ describe("retry and rotation injection", () => {
     enqueueSuccess(fake);
     vi.useFakeTimers();
 
-    const responsePromise = driveForegroundRequest(fetchFn);
-    await vi.advanceTimersByTimeAsync(4000);
-    const response = await responsePromise;
+    const response = await settleWithFakeTimers(driveForegroundRequest(fetchFn));
 
     expect(fake.calls).toHaveLength(3);
     expect(fake.calls.map((_, index) => authorizationAt(fake, index))).toEqual([
@@ -248,7 +294,7 @@ describe("retry and rotation injection", () => {
       "Bearer access-A",
     ]);
     expect(response.status).toBe(200);
-  });
+  }, 15000);
 
   it("surfaces a user-facing overload message when 529s exhaust with no account to switch to", async () => {
     const { client, fake, fetchFn } = await setup([makeAccount(0, "access-A")]);
@@ -257,14 +303,12 @@ describe("retry and rotation injection", () => {
     enqueueError(fake, 529, "overloaded_error", "Overloaded");
     vi.useFakeTimers();
 
-    const responsePromise = driveForegroundRequest(fetchFn);
-    await vi.advanceTimersByTimeAsync(4000);
-    const response = await responsePromise;
+    const response = await settleWithFakeTimers(driveForegroundRequest(fetchFn));
 
     expect(fake.calls).toHaveLength(3);
     expect(response.status).toBe(529);
     expect(toastMessages(client, "error").some((message) => /overload|exhaust/i.test(message))).toBe(true);
-  });
+  }, 15000);
 
   // Pure-529 model fallback is unreachable in the public interceptor because
   // the two service-wide retries are exhausted before its third-529 gate.

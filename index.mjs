@@ -3,7 +3,6 @@ import { stdin, stdout } from "node:process";
 import { randomBytes, randomUUID, createHash as createHashCrypto } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import xxhashInit from "xxhash-wasm";
 import { AccountManager, RATE_LIMIT_KEY_FAST } from "./lib/accounts.mjs";
 import {
   authorize as oauthAuthorize,
@@ -18,7 +17,6 @@ import {
   resolveBetaShortcut,
 } from "./lib/request-headers.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, getConfigDir } from "./lib/config.mjs";
-import { loadContextHintDisabledFlag, saveContextHintDisabledFlag } from "./lib/context-hint-persist.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import {
@@ -62,8 +60,8 @@ import {
   buildRequestHeaders,
   buildAnthropicBetaHeader,
   parseRequestBodyMetadata,
-  detectProvider,
   extractFileIds,
+  stripStainlessHelperMarkers,
 } from "./lib/mimicry/headers.mjs";
 import {
   buildSystemPromptBlocks,
@@ -78,6 +76,8 @@ import {
   CLAUDE_CODE_IDENTITY_STRING,
   SUBAGENT_CC_ANCHOR,
 } from "./lib/mimicry/system-prompt.mjs";
+import { buildAdapterTransport, resolveAdapterEnv } from "./lib/mimicry/adapter-input.mjs";
+import { buildWireCompatibleRequest } from "./lib/mimicry/wire-compat.mjs";
 import {
   hasOneMillionContext,
   isEligibleFor1MContext,
@@ -318,34 +318,6 @@ export async function AnthropicAuthPlugin({ client }) {
   const SESSION_REJECTED_BETA_TTL_MS = 5 * 60 * 1000; // 5 minutes
   /** @type {Map<string, number>} canonical-beta to rejected-at epoch ms */
   const sessionRejectedBetas = new Map();
-
-  // Context-hint controller (CC v2.1.110+). Mirrors real CC's `createContextHintController`:
-  // sticky on across requests until the server responds with a specific error family.
-  //   - 422/424 → apply hint compaction (clear thinking + microcompact) and retry
-  //   - 400 "Unexpected value" + "anthropic-beta" → disable for session (beta unsupported)
-  //   - 409      → disable for session (conflict)
-  //   - 529 / overloaded → disable for session (temporary overload)
-  // When disabled, we strip context-hint from betas + body on subsequent requests so
-  // we don't keep triggering the same rejection and churning the cache.
-  // Persisted disable: if a prior session saw a 400 rejecting the context-hint
-  // beta (account lacks access), skip the beta from turn 1 of every subsequent
-  // session. Delete ~/.config/opencode/context-hint-disabled.flag (or the
-  // %APPDATA%\opencode equivalent on Windows) to re-enable once access is
-  // granted. See lib/context-hint-persist.mjs.
-  const _persistedCtxHint = loadContextHintDisabledFlag();
-  const contextHintState = {
-    /** Permanently disabled for this session after a server rejection. */
-    disabled: _persistedCtxHint.disabled === true,
-    /** Number of 422/424 compactions applied this session (for telemetry). */
-    compactionsApplied: 0,
-  };
-  if (contextHintState.disabled) {
-    debugLog(
-      "context-hint: loaded persisted disable flag",
-      _persistedCtxHint.status ? `status=${_persistedCtxHint.status}` : "",
-      _persistedCtxHint.timestamp ? `ts=${new Date(_persistedCtxHint.timestamp).toISOString()}` : "",
-    );
-  }
 
   // Token economy — session state for layered compaction strategies.
   const tokenEconomySession = {
@@ -2875,7 +2847,6 @@ export async function AnthropicAuthPlugin({ client }) {
                   requestInit.body,
                   _parsedBodyOnce,
                 );
-                const _reqProvider = detectProvider(requestUrl);
 
                 // --- Adaptive 1M context decision (once per logical request, not per retry) ---
                 if (!_adaptiveDecisionMade) {
@@ -2910,12 +2881,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 const _adaptiveOverride = _adaptiveOverrideForRequest;
 
                 // Token economy config (resolved once, passed to beta builder).
-                // If the server has rejected context-hint this session, reflect it here
-                // so buildAnthropicBetaHeader (called again inside buildRequestHeaders)
-                // drops the beta on subsequent requests.
-                // Also classify the request role (CC's querySource analog) and
-                // suppress context-hint for non-main-thread requests so we don't
-                // opt subagent/title/tool one-shots into a server retry loop.
+                // Also classify the request role (CC's querySource analog).
                 const _requestRole = classifyRequestRole(_parsedBodyOnce);
                 // opencode tags subagent requests with the x-parent-session-id header
                 // (set in its request builder only when a parent session exists).
@@ -2924,10 +2890,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 // only to pick the cheaper 5m cache tier for one-shot subagents.
                 const _isSubagent = getIncomingHeader(input, requestInit, "x-parent-session-id") != null;
                 const _baseTE = config.token_economy || {};
-                const _disableCtxHint = contextHintState.disabled || _requestRole !== "main";
-                const _tokenEconomy = _disableCtxHint
-                  ? { ..._baseTE, context_hint: false, __requestRole: _requestRole }
-                  : { ..._baseTE, __requestRole: _requestRole };
+                const _tokenEconomy = { ..._baseTE, __requestRole: _requestRole };
 
                 // Microcompact: inject clear betas at high context utilization
                 let _microcompactBetas = null;
@@ -2969,7 +2932,6 @@ export async function AnthropicAuthPlugin({ client }) {
                   "",
                   getSignatureEmulationEnabled(),
                   _reqModel,
-                  _reqProvider,
                   _sessionFilteredCustomBetas,
                   getEffectiveStrategy(),
                   requestUrl?.pathname,
@@ -2998,12 +2960,6 @@ export async function AnthropicAuthPlugin({ client }) {
                   // Merge latched betas that aren't in the current set
                   const merged = new Set(currentBetas);
                   for (const b of betaLatchState.sent) merged.add(b);
-                  // Context-hint kill switch: once server rejected it this session,
-                  // stop sending the beta (body field is gated on header, so it drops too).
-                  if (contextHintState.disabled) {
-                    merged.delete("context-hint-2026-04-09");
-                    betaLatchState.sent.delete("context-hint-2026-04-09");
-                  }
                   // Custom-beta strip kill switch: when the server rejected our custom
                   // betas (customBetasStripped latch fired), evict them from the latch so
                   // they do not re-appear on the retry attempt.
@@ -3046,13 +3002,38 @@ export async function AnthropicAuthPlugin({ client }) {
                 const effectiveCachePolicy = latchedCachePolicy ||
                   config.cache_policy || { ttl: "1h", ttl_supported: true };
 
+                // Single decision point for the whole request: does this turn go
+                // through the shared wire package, or through the legacy
+                // buildRequestHeaders path?
+                //
+                // Two conditions remain now that multi-provider support is gone:
+                //  1. signature emulation on — with it off the plugin emits only
+                //     3 headers and a minimal beta set, while the package always
+                //     emits the full Claude Code set;
+                //  2. the /v1/messages endpoint — the package pins
+                //     `https://api.anthropic.com/v1/messages?beta=true`, so a
+                //     /v1/messages/count_tokens turn sent through it would be
+                //     silently rewritten to the wrong endpoint.
+                //
+                // The former first-party check is now structural: the plugin only
+                // speaks to first-party Anthropic, so it is always satisfied.
+                //  3. a JSON body is actually present — the package requires
+                //     `model` and `max_tokens`, so a bodiless request must keep
+                //     using the legacy path rather than throwing INVALID_INPUT.
+                const _adapterPathname = requestUrl?.pathname;
+                const _useAdapter =
+                  getSignatureEmulationEnabled() &&
+                  (_adapterPathname === "/v1/messages" || _adapterPathname === "/messages") &&
+                  typeof requestInit.body === "string" &&
+                  requestInit.body.length > 0;
+
                 const body = transformRequestBody(
                   requestInit.body,
                   {
                     enabled: getSignatureEmulationEnabled(),
                     claudeCliVersion,
                     promptCompactionMode: getPromptCompactionMode(),
-                    provider: _reqProvider,
+                    useAdapter: _useAdapter,
                     cachePolicy: effectiveCachePolicy,
                     fastMode: config.fast_mode || false,
                     // When the account's fast pool is cooling down, suppress
@@ -3121,29 +3102,107 @@ export async function AnthropicAuthPlugin({ client }) {
                   }
                 }
 
-                // Build headers with the selected account's token
-                const requestHeaders = buildRequestHeaders(
-                  input,
-                  requestInit,
-                  accessToken,
-                  body,
-                  requestUrl,
-                  {
-                    enabled: getSignatureEmulationEnabled(),
-                    claudeCliVersion,
-                    customBetas: _sessionFilteredCustomBetas,
-                    strategy: getEffectiveStrategy(),
-                    sessionId: signatureSessionId,
-                  },
-                  _adaptiveOverride,
-                  _tokenEconomy,
-                );
+                // Build headers with the selected account's token.
+                //
+                // Adapter path: the shared package composes the headers AND
+                // rebuilds the body (canonical system prefix, metadata, beta
+                // header). Legacy path: unchanged, byte for byte.
+                //
+                // The URL deliberately stays whatever transformRequestUrl already
+                // produced. `built.url` is the package's pinned
+                // `https://api.anthropic.com/v1/messages?beta=true`, which would
+                // override a custom ANTHROPIC_BASE_URL or proxy endpoint.
+                const _adapterSignature = {
+                  enabled: getSignatureEmulationEnabled(),
+                  claudeCliVersion,
+                  customBetas: _sessionFilteredCustomBetas,
+                  strategy: getEffectiveStrategy(),
+                  sessionId: signatureSessionId,
+                };
+
+                let requestHeaders;
+                let adapterBody;
+                let legacyStrippedBody;
+                if (_useAdapter) {
+                  const _adapterResult = buildAdapterTransport({
+                    input,
+                    requestInit,
+                    accessToken,
+                    requestUrl,
+                    provider: "anthropic",
+                    clientRequestId: randomUUID(),
+                    signature: _adapterSignature,
+                    identity: {
+                      persistentUserId: signatureUserId,
+                      accountId: getAccountIdentifier(account),
+                    },
+                    adaptiveOverride: _adaptiveOverride,
+                    tokenEconomy: _tokenEconomy,
+                    // Role inputs for the identity-block cache ttl: the adapter
+                    // re-runs the same resolveCacheTtl the body transform used,
+                    // so system[1] cannot carry a ttl the rest of the request
+                    // does not.
+                    cachePolicy: effectiveCachePolicy,
+                    requestRole: _requestRole,
+                    isSubagent: _isSubagent,
+                    // Derived from the PRE-transform body on purpose: the lean
+                    // gate in buildSystemPromptBlocks tests the incoming system
+                    // blocks, and by now the title-generator swap has already
+                    // rewritten them in `body`.
+                    isTitleGenerator: _parsedBodyOnce
+                      ? isTitleGeneratorSystemBlocks(normalizeSystemTextBlocks(_parsedBodyOnce.system))
+                      : false,
+                    body,
+                    env: resolveAdapterEnv(process.env),
+                    platform: process.platform,
+                    arch: process.arch,
+                    nodeVersion: process.version,
+                  });
+                  if (_adapterResult.applicable) {
+                    const built = await buildWireCompatibleRequest(body, _adapterResult.transport);
+                    requestHeaders = built.headers;
+                    adapterBody = built.body;
+                  } else {
+                    debugLog(`adapter not applicable (${_adapterResult.reason}); using the legacy request path`);
+                  }
+                }
+
+                if (!requestHeaders) {
+                  // Legacy path, and the fallback whenever the adapter declined:
+                  // a bodiless request, or a transport the translation refused.
+                  requestHeaders = buildRequestHeaders(
+                    input,
+                    requestInit,
+                    accessToken,
+                    body,
+                    requestUrl,
+                    _adapterSignature,
+                    _adaptiveOverride,
+                    _tokenEconomy,
+                  );
+                  // buildRequestHeaders just derived x-stainless-helper from the
+                  // markers. They are an internal signal — the Anthropic API has
+                  // never known those keys — so they are dropped from the body now
+                  // that the header exists. The adapter path does the same strip in
+                  // buildWireCompatibleRequest; this is the legacy half of it.
+                  if (typeof body === "string" && body.length > 0) {
+                    try {
+                      const _strippable = JSON.parse(body);
+                      if (stripStainlessHelperMarkers(_strippable?.tools, _strippable?.messages) > 0) {
+                        legacyStrippedBody = JSON.stringify(_strippable);
+                      }
+                    } catch (error) {
+                      // A non-JSON body carries no markers to strip; forward it untouched.
+                      debugLog(`stainless-helper strip skipped (unparsable body): ${error.message}`);
+                    }
+                  }
+                }
                 // cch stays as the static "00000" placeholder — cc-107 and cc-108
                 // JS bundles both emit `cch=00000;` unconditionally in the billing
                 // header. The Bun-binary Attestation.zig xxHash64 mechanism lives in
                 // a SEPARATE header path, not in this body field. Re-hashing here
                 // mutates system[0] each turn, invalidating the prompt cache.
-                const finalBody = body;
+                const finalBody = adapterBody ?? legacyStrippedBody ?? body;
 
                 const correlationId = createDebugCorrelationId();
 
@@ -3514,76 +3573,35 @@ export async function AnthropicAuthPlugin({ client }) {
                     // Ignore read errors in debug logging path.
                   }
 
-                  // Context-hint protocol (CC v2.1.110+): detect server rejections and
-                  // apply the same disable/compact semantics as real Claude Code.
-                  //   - 400 w/ "Unexpected value" + "anthropic-beta" → beta unsupported, disable
-                  //   - 409 / 529 / overloaded                      → temporary, disable
-                  //   - 422 / 424                                    → compact messages (strip
-                  //     thinking blocks + old tool_result content) and retry ONCE.
-                  // Disable is permanent for the session; the beta latch strips it from future
-                  // requests so we don't keep triggering the same rejection.
-                  if (!contextHintState.disabled) {
-                    if (
-                      response.status === 400 &&
-                      errorBody &&
-                      errorBody.includes("Unexpected value") &&
-                      errorBody.includes("anthropic-beta") &&
-                      errorBody.includes("context-hint")
-                    ) {
-                      contextHintState.disabled = true;
-                      betaLatchState.dirty = true;
-                      // Persist across sessions: a 400 "Unexpected value" on the
-                      // context-hint beta means the account lacks access to the
-                      // beta entirely. Re-attempting next session would burn
-                      // another turn to the same rejection.
-                      saveContextHintDisabledFlag({
-                        reason: "beta_unsupported_400",
-                        status: 400,
-                      });
-                      debugLog("context-hint: beta rejected by server (400), disabling + persisting");
-                      // Retry without the beta. The latch above drops the header
-                      // and the body field on the rebuilt request.
-                      attempt--;
-                      continue;
-                    } else if (response.status === 409) {
-                      contextHintState.disabled = true;
-                      betaLatchState.dirty = true;
-                      debugLog("context-hint: 409 conflict, disabling for session");
-                      attempt--;
-                      continue;
-                    } else if (response.status === 529 && errorBody && errorBody.includes("context_hint")) {
-                      contextHintState.disabled = true;
-                      betaLatchState.dirty = true;
-                      debugLog("context-hint: 529 overloaded referencing hint, disabling for session");
-                      attempt--;
-                      continue;
-                    } else if (
-                      (response.status === 422 || response.status === 424) &&
-                      !requestInit._contextHintCompactAttempted
-                    ) {
-                      try {
-                        const hintBody = JSON.parse(requestInit.body);
-                        if (Array.isArray(hintBody.messages)) {
-                          const compacted = applyContextHintCompaction(hintBody.messages);
-                          if (compacted.changed) {
-                            hintBody.messages = compacted.messages;
-                            requestInit.body = JSON.stringify(hintBody);
-                            _parsedBodyOnce = null;
-                            requestInit._contextHintCompactAttempted = true;
-                            contextHintState.compactionsApplied += 1;
-                            attempt--;
-                            toast(
-                              `⚙ Context hint compaction (${response.status}) — cleared ${compacted.stats.thinkingCleared} thinking / ${compacted.stats.toolResultsCleared} tool results`,
-                              "info",
-                              { debounceKey: "context-hint-compact" },
-                            ).catch(() => {});
-                            debugLog("context-hint: applied compaction on status", response.status, compacted.stats);
-                            continue;
-                          }
+                  // Compact-and-retry on 422/424: strip thinking blocks + old tool_result
+                  // content and retry ONCE. This reacts to the response status alone, so it
+                  // stays live even though the plugin no longer announces the
+                  // context-hint-2026-04-09 beta nor the paired body field.
+                  if (
+                    (response.status === 422 || response.status === 424) &&
+                    !requestInit._contextHintCompactAttempted
+                  ) {
+                    try {
+                      const hintBody = JSON.parse(requestInit.body);
+                      if (Array.isArray(hintBody.messages)) {
+                        const compacted = applyContextHintCompaction(hintBody.messages);
+                        if (compacted.changed) {
+                          hintBody.messages = compacted.messages;
+                          requestInit.body = JSON.stringify(hintBody);
+                          _parsedBodyOnce = null;
+                          requestInit._contextHintCompactAttempted = true;
+                          attempt--;
+                          toast(
+                            `⚙ Context hint compaction (${response.status}) — cleared ${compacted.stats.thinkingCleared} thinking / ${compacted.stats.toolResultsCleared} tool results`,
+                            "info",
+                            { debounceKey: "context-hint-compact" },
+                          ).catch(() => {});
+                          debugLog("context-hint: applied compaction on status", response.status, compacted.stats);
+                          continue;
                         }
-                      } catch {
-                        // fall through to normal error handling
                       }
+                    } catch {
+                      // fall through to normal error handling
                     }
                   }
 
@@ -5564,17 +5582,6 @@ process.once("beforeExit", _beforeExitHandler);
 // ---------------------------------------------------------------------------
 // Request building helpers (extracted from original fetch interceptor)
 // ---------------------------------------------------------------------------
-
-// cch attestation: RE-ENABLED with xxHash64 (matching Bun binary's Attestation.zig).
-// The compiled Bun binary computes cch dynamically: xxHash64(body, seed) & 0xFFFFF.
-// Captured real CC v2.1.107 request shows cch=6d00f (5-hex-char, 20-bit masked hash).
-// Seed extracted from binary: 0x6E52736AC806831E (unchanged since v2.1.96).
-
-/** @type {null | ((buf: Uint8Array, seed: bigint) => bigint)} */
-let _xxh64Raw = null;
-const _xxhashReady = xxhashInit().then((h) => {
-  _xxh64Raw = h.h64Raw;
-});
 
 /**
  * Extract the text content of the first user message for billing hash computation.

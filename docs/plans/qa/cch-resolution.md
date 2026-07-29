@@ -19,7 +19,7 @@ No temporary probe or source modification was used.
 
 - `lib/mimicry/system-prompt.mjs:93-96` computes the three-character SHA-256 billing fingerprint. Despite the function's historical name and comment at line 87, this value is appended to `cc_version`; it is not the five-character `cch` value.
 - `lib/mimicry/system-prompt.mjs:122`, `lib/mimicry/system-prompt.mjs:125`, `lib/mimicry/system-prompt.mjs:145`, and `lib/mimicry/system-prompt.mjs:146` state that the `cch` value is static.
-- `lib/mimicry/system-prompt.mjs:147-148` is the only executable product-code write of a `cch` value: eligible providers receive the literal `" cch=00000;"`; Bedrock, Anthropic AWS, and Mantle receive an empty segment.
+- `const cchPart = " cch=00000;"` in `buildAnthropicBillingHeader()` is the only executable product-code write of a `cch` value. It is unconditional: every request receives the literal `" cch=00000;"`. There is no provider gate — `buildAnthropicBillingHeader(version, firstUserMessage, workloadOverride)` takes no `provider` argument. See [Provider Scope](../../../README.md#provider-scope).
 - `lib/mimicry/system-prompt.mjs:159` interpolates that already-resolved segment into the billing header.
 - `index.mjs:3141-3146` leaves the serialized request body unchanged with `const finalBody = body`.
 - `index.mjs:3200` passes `finalBody` to the actual outbound fetch request.
@@ -30,7 +30,7 @@ Non-value mentions found by the search are `lib/config.mjs:123`, `lib/mimicry/re
 ### Tests
 
 - `index.test.mjs:3737-3738` contains an outdated computed-value comment and asserts only the broad shape `/cch=[0-9a-f]{5};/`. The static value `00000` satisfies this assertion, so it does not prove computation.
-- `index.test.mjs:4095` and `index.test.mjs:4123` assert that the literal is omitted for provider-gated requests.
+- No test asserts that the `cch` literal is omitted for provider-gated requests, because no such product behaviour exists. An earlier revision of this document cited `index.test.mjs:4095` and `index.test.mjs:4123` for that claim; both citations were false. Verified 2026-07: `index.test.mjs:4095` is the second assertion of the test `"strips any incoming betas from request body (API rejects betas in body)"` (`index.test.mjs:4081-4097`), which asserts `parsed.betas` is `undefined` and that the `anthropic-beta` header still contains `claude-code-20250219`. `index.test.mjs:4123` is the closing line of the `fetchFn` call inside the test `"builds user-agent with agent sdk suffixes"` (`index.test.mjs:4113-4128`), whose only assertion is that the `user-agent` header contains `(external, cli, agent-sdk/1.2.3, client-app/my-app)`. Neither test mentions `cch`, providers or provider gating.
 - `test/conformance/regression.test.mjs:1223-1226` asserts the exact static literal `cch=00000;` in the captured outbound body.
 - `test/conformance/golden-outgoing.test.mjs:208-219` captures two actual outbound calls and compares both complete normalized requests to the golden fixture.
 

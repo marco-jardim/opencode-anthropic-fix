@@ -96,7 +96,7 @@ Last block             → cache_control: ephemeral (WRONG! Should be org-scope)
 ### Feature Flag Gaps
 
 - **Real CC**: Checks `feature('NATIVE_CLIENT_ATTESTATION')` to conditionally add `cch=00000`
-- **Plugin**: Hardcoded `if (provider !== bedrock) add cch=00000`
+- **Plugin**: Hardcoded, unconditional `cch=00000` (no provider gate — first-party only, see [Provider Scope](../README.md#provider-scope))
 - **Symptom**: When feature is disabled server-side (e.g., for security), real CC stops adding cch, but plugin continues
 
 ### Identity String Selection

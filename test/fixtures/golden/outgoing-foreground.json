@@ -1,6 +1,6 @@
 {
   "headers": {
-    "anthropic-beta": "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,web-search-2025-03-05,advisor-tool-2026-03-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+    "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01",
     "anthropic-dangerous-direct-browser-access": "true",
     "anthropic-version": "2023-06-01",
     "authorization": "Bearer test-access",
