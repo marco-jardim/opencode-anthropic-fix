@@ -80,16 +80,14 @@ import {
   buildWireCompatibleRequest,
   buildWireCompatibleCountTokensRequest,
   WIRE_PROFILE,
-} from "./lib/mimicry/wire-compat.mjs";
-import {
   hasOneMillionContext,
-  isEligibleFor1MContext,
+  isEligibleFor1MContextWire,
   isOpus46Model,
   isOpus47Model,
   isOpus48Model,
-} from "./lib/mimicry/models.mjs";
+} from "./lib/mimicry/wire-compat.mjs";
 
-export { isFable5Model, isMythos5Model, isAdaptiveThinkingModel } from "./lib/mimicry/models.mjs";
+export { isFable5Model, isMythos5Model, isAdaptiveThinkingModel } from "./lib/mimicry/wire-compat.mjs";
 
 // Max times a single logical request may fall back from fast->standard speed on
 // the same account before giving up the fast attempt entirely. 1 is enough: one
@@ -5225,7 +5223,7 @@ function resolveAdaptiveContext(bodyString, model, adaptiveConfig, parsedBody) {
   }
 
   // Model must be eligible for 1M context at all (includes Opus 4.6)
-  if (!isEligibleFor1MContext(model)) {
+  if (!isEligibleFor1MContextWire(model)) {
     return false;
   }
 

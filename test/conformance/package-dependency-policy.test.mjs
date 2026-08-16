@@ -249,12 +249,15 @@ describe("shared wire package rollback documentation", () => {
     // this assertion fails and the documented procedure must be rewritten.
     //
     // EVERY package binding is named here. The count-tokens migration added
-    // `buildClaudeCodeCountTokensRequest`, and the request-headers migration
-    // added `CLAUDE_CODE_2_1_233_PROFILE` (re-exported as `WIRE_PROFILE` so the
-    // rest of the tree reads the baseline CLI version without importing the
-    // package), so a revert has three entry points to unwind rather than one.
+    // `buildClaudeCodeCountTokensRequest`, the request-headers migration added
+    // `CLAUDE_CODE_2_1_233_PROFILE` (re-exported as `WIRE_PROFILE` so the rest
+    // of the tree reads the baseline CLI version without importing the
+    // package), and the model-predicate migration added the nine
+    // model-query bindings that replaced the hand-written regexes of the
+    // deleted `lib/mimicry/models.mjs`. A revert therefore has twelve entry
+    // points to unwind rather than one.
     expect(adapter).toMatch(
-      /^import \{\n {2}buildClaudeCodeRequest,\n {2}buildClaudeCodeCountTokensRequest,\n {2}CLAUDE_CODE_2_1_233_PROFILE,\n\} from "@tormentalabs\/claude-code-wire-compat";$/m,
+      /^import \{\n {2}buildClaudeCodeRequest,\n {2}buildClaudeCodeCountTokensRequest,\n {2}CLAUDE_CODE_2_1_233_PROFILE,\n {2}hasOneMillionContext,\n {2}isAdaptiveThinkingModel,\n {2}isClaude3Model,\n {2}isEligibleFor1MContext,\n {2}isFable5Model,\n {2}isMythos5Model,\n {2}isOpus46Model,\n {2}isOpus47Model,\n {2}isOpus48Model,\n\} from "@tormentalabs\/claude-code-wire-compat";$/m,
     );
     expect(provenance).toMatch(/static[^\n]*import|import[^\n]*static/i);
   });
