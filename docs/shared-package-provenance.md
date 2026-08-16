@@ -38,8 +38,8 @@ reaches this plugin's wire without a code change to the composition path.
 
 Two constants shadow that default and must move with it —
 `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT` in
-[`adapter-input.mjs`](../lib/mimicry/adapter-input.mjs) and `FALLBACK_CLAUDE_CLI_VERSION` in
-[`request-headers.mjs`](../lib/request-headers.mjs). They exist so `resolveProfileOverride` stays
+[`adapter-input.mjs`](../lib/mimicry/adapter-input.mjs), both tracking `WIRE_PROFILE.cliVersion` as
+re-exported by [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs). They exist so `resolveProfileOverride` stays
 silent in the common case; if they lag the package, every request starts carrying a redundant profile
 override. The conformance suite fails loudly when they drift, so this is a caught mistake rather than
 a silent one.
