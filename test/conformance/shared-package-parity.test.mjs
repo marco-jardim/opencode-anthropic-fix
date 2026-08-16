@@ -1,52 +1,67 @@
-// WHAT THIS SUITE GUARANTEES (the file name is now only half accurate).
+// WHAT THIS SUITE GUARANTEES (the file name is a historical artifact — this is
+// no longer a parity suite).
 //
 // It was written as a DIFFERENTIAL suite: it captured the request the plugin's
 // own legacy forge produced and compared it byte for byte against the shared
 // package (`@tormentalabs/claude-code-wire-compat`), to prove the migration
-// would not move the wire. That framing is spent for the first-party
-// `/v1/messages` turn: `index.mjs` now routes that turn THROUGH the package
-// (`_useAdapter` in index.mjs), so the "existing" side is no longer an
+// would not move the wire. That framing is SPENT for the first-party
+// `/v1/messages` turn. `index.mjs` now routes that turn THROUGH the package
+// (`_useAdapter` in index.mjs), so the "existing" side stopped being an
 // independent implementation — it is the package plus a thin layer of
-// plugin-owned policy. Comparing the two proves less than it used to, and where
-// they agree completely the comparison is a tautology.
+// plugin-owned policy. A byte-for-byte comparison of the two was therefore
+// asserting that the package equals itself, and it was RETIRED (Phase 4.1): the
+// `shared package foreground parity` describe, its `DIFFERENTIAL_VECTORS` table
+// and its normalization helpers are gone. Nothing in this file compares the two
+// paths for SAMENESS any more.
 //
-// What the suite guarantees NOW, in three parts:
+// What the suite guarantees now, in four parts:
 //
 //  1. GOLDEN PINNING of the package output. `adapter golden wire` pins the
 //     literal URL, header list and body the package emits for the reference
-//     foreground request, plus the per-model `anthropic-beta` string, the
-//     enabled-thinking shape and the `max_tokens` clamp. Every value here was
-//     CAPTURED from a run of the real code, never hand-written. Its job is to
-//     make an unintended wire change in a future package bump fail loudly.
+//     foreground request, key order included. Every value here was CAPTURED
+//     from a run of the real code, never hand-written. Its job is to make an
+//     unintended wire change in a future package bump fail loudly. The three
+//     machine-dependent stainless headers are held out of the list golden and
+//     asserted separately against the runtime facts the transport was handed.
 //
-//  2. NO-DRIFT between the package called bare and the package called through
-//     the plugin. `shared package foreground parity` still runs byte for byte,
-//     but what it now proves is that the plugin's pre-processing
-//     (`transformRequestBody`) and transport construction (`buildAdapterTransport`)
-//     do not perturb the wire beyond the fields listed in
-//     `NORMALIZED_HEADER_NAMES`. That is a real property, and it is the one that
-//     breaks first when someone adds body-mutating policy.
+//  2. THE EMULATION-OFF ENVELOPE. `emulation-off passthrough envelope` is the
+//     one place `_useAdapter` is false, and so the only genuinely independent
+//     construction left in the file. It pins that with signature emulation off
+//     the outgoing request is the host's request plus the AUTH ENVELOPE
+//     (`authorization`, an ADDITIVE `oauth-2025-04-20`, and the removal of
+//     `x-api-key`/`x-session-affinity`) and nothing else — including a named
+//     negative list of headers that must NOT appear. It also pins that
+//     `/v1/messages/count_tokens` routes through the package's own count
+//     surface with emulation ON, which is what proves the routing guard in
+//     index.mjs has not quietly collapsed into the adapter path.
 //
-//     Every field held out of that comparison costs coverage, so the held-out
-//     set is kept minimal and each member has to earn its slot. It is currently
-//     TWO: `anthropic-beta` (a real, permanent divergence — the plugin merges
-//     `custom_betas` on top of the package's list — re-pinned on both sides by
-//     `BETA_HEADER_GOLDEN`), and `body.metadata.user_id` (per-run
-//     nondeterminism). A third, `body.thinking`, was removed once the migration
-//     to the package made both paths emit the same value: it had stopped
-//     excluding any difference and would only have hidden a future real one.
+//  3. ADAPTER INPUT NORMALIZATION. `shared package adapter input normalization`
+//     exercises the seam in `lib/mimicry/wire-compat.mjs` directly: what it
+//     accepts (string and array system prompts, `thinking.display`, a
+//     `cacheControl` decision, a profile override from config or env) and what
+//     it rejects loudly (a non-string/array system prompt, a non-array `tools`,
+//     a missing body, malformed override JSON). This is contract coverage of
+//     our own wrapper, not of the package.
 //
-//  3. TRUE DIFFERENTIAL on the two routes where the LEGACY forge still runs.
-//     `_useAdapter` is false when signature emulation is off and on
-//     `/v1/messages/count_tokens`. `legacy request path` pins both, and asserts
-//     they are distinguishable from the package output — that is what proves the
-//     routing guard in index.mjs is still doing its job rather than having
-//     quietly collapsed into the adapter path.
+//  4. THE BOUNDARY. `shared package boundary - deferred plugin policy` pins the
+//     exact places the two paths still DISAGREE — plugin-retained policy the
+//     package has no surface for (anti-verbosity injection, adaptive-thinking
+//     derivation, default effort) and plugin-retained configuration layered on
+//     top (the `custom_betas` merge). These are the file's remaining
+//     differential assertions, and unlike the retired block they assert
+//     difference, not sameness, so none of them can go tautological.
 //
-// APPROVED wire changes that this suite now records as golden rather than as
-// bugs: the package's `anthropic-beta` ORDER wins (it was derived from the
-// genuine Claude Code 2.1.195 binary), `thinking` is re-ordered and clamped, and
+// APPROVED wire changes that this suite records as golden rather than as bugs:
+// the package's `anthropic-beta` ORDER wins (it was derived from the genuine
+// Claude Code 2.1.195 binary), `thinking` is re-ordered and clamped, and
 // `max_tokens` is clamped to the model's real output ceiling.
+//
+// WHERE THE RETIRED BLOCK'S NON-TAUTOLOGICAL PINS LIVE NOW: per-model
+// `anthropic-beta` composition is covered by
+// test/conformance/adapter-beta-composition.test.mjs and the
+// test/fixtures/migration-baseline/ corpus; the `context_hint` omission by
+// test/conformance/context-hint-gating.test.mjs; the thinking-budget clamp by
+// the adapter-side assertion in part 3 below.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -80,11 +95,13 @@ vi.mock("../../lib/refresh-lock.mjs", () => ({
 
 // Anti-verbosity injection is plugin-retained POLICY. The shared package has no
 // `systemPromptFeatures` surface as of rc.10, so it never emits the
-// `# Text output (does not apply to tool calls)` block. Vectors that assert
-// PROTOCOL parity on Opus 4.6/4.7 therefore disable it; the boundary suite
-// below asserts the divergence explicitly so the deferral stays visible.
+// `# Text output (does not apply to tool calls)` block. The retired parity
+// vectors used to switch `antiVerbosity` off on Opus 4.6/4.7 so a byte-for-byte
+// comparison could survive that divergence; with the comparison gone the knob
+// is left at its default in every test here, and the boundary suite at the foot
+// of the file asserts the divergence explicitly instead.
 // `signature` is the `_useAdapter` switch in index.mjs: with emulation off the
-// plugin's LEGACY forge runs instead of the package. The `legacy request path`
+// plugin runs no forge at all. The `emulation-off passthrough envelope`
 // describe below is the only place that turns it off.
 const testPolicy = vi.hoisted(() => ({ antiVerbosity: true, signature: true }));
 
@@ -128,231 +145,10 @@ const HOST_BODY = {
   messages: golden.body.messages,
 };
 
-const DIFFERENTIAL_VECTORS = [
-  {
-    name: "golden foreground",
-    hostBody: HOST_BODY,
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-  {
-    name: "short-user",
-    hostBody: {
-      ...HOST_BODY,
-      messages: [{ role: "user", content: "hi" }],
-    },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-  {
-    name: "tools",
-    hostBody: {
-      ...HOST_BODY,
-      tools: [
-        {
-          name: "lookup_weather",
-          description: "Look up the weather for a city",
-          input_schema: {
-            type: "object",
-            required: ["city"],
-            properties: { city: { type: "string" } },
-          },
-        },
-        {
-          name: "lookup_time",
-          description: "Look up the time for a timezone",
-          input_schema: {
-            type: "object",
-            required: ["timezone"],
-            properties: { timezone: { type: "string" } },
-          },
-        },
-      ],
-    },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true, toolBreakpoint: true },
-  },
-  {
-    name: "tool-use-result",
-    hostBody: {
-      ...HOST_BODY,
-      messages: [
-        { role: "user", content: "What is 2+2?" },
-        {
-          role: "assistant",
-          content: [{ type: "tool_use", id: "tu_1", name: "calc", input: { expr: "2+2" } }],
-        },
-        {
-          role: "user",
-          content: [{ type: "tool_result", tool_use_id: "tu_1", content: "4" }],
-        },
-      ],
-    },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true, messageBreakpoint: true },
-  },
-  {
-    name: "thinking",
-    hostBody: {
-      ...HOST_BODY,
-      thinking: { type: "enabled", budget_tokens: 10000 },
-    },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-  {
-    name: "multi-block-system",
-    hostBody: {
-      ...HOST_BODY,
-      system: [
-        { type: "text", text: "You are a helpful assistant." },
-        { type: "text", text: "Keep answers concise." },
-      ],
-    },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-  {
-    name: "model-haiku-4-5",
-    hostBody: { ...HOST_BODY, model: "claude-haiku-4-5" },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-  {
-    name: "model-sonnet-4-6-adaptive",
-    hostBody: { ...HOST_BODY, model: "claude-sonnet-4-6", thinking: { type: "adaptive" }, effort: "high" },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-  {
-    name: "model-opus-4-6-adaptive",
-    hostBody: { ...HOST_BODY, model: "claude-opus-4-6", thinking: { type: "adaptive" }, effort: "high" },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-    antiVerbosity: false,
-  },
-  {
-    name: "model-opus-4-7-adaptive",
-    hostBody: { ...HOST_BODY, model: "claude-opus-4-7", thinking: { type: "adaptive" }, effort: "high" },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-    antiVerbosity: false,
-  },
-  {
-    name: "model-opus-4-8-adaptive",
-    hostBody: { ...HOST_BODY, model: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "high" },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-  {
-    name: "effort-medium-adaptive",
-    hostBody: { ...HOST_BODY, model: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "medium" },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-  {
-    name: "model-fable-5-adaptive",
-    hostBody: { ...HOST_BODY, model: "claude-fable-5", thinking: { type: "adaptive" }, effort: "high" },
-    cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: true },
-  },
-];
-
 beforeEach(() => {
   testPolicy.antiVerbosity = true;
   testPolicy.signature = true;
 });
-
-const NORMALIZED_HEADER_NAMES = new Set([
-  "x-claude-code-session-id",
-  "x-client-request-id",
-  "x-stainless-arch",
-  "x-stainless-os",
-  "x-stainless-runtime-version",
-  // NOT a per-run nondeterminism normalization like the rest of this set. Both
-  // sides now get their base beta set from the package, but the plugin path
-  // additionally merges its own configured betas on top (`custom_betas` reaches
-  // the package as `signature.customBetas`), so the two legitimately differ on
-  // every vector. Excluding the value here keeps the byte-for-byte assertion
-  // enforcing every OTHER header, while `BETA_HEADER_GOLDEN` below pins the
-  // exact captured value on both sides for each model so nothing is lost.
-  "anthropic-beta",
-]);
-
-// GOLDEN, per model, for the `anthropic-beta` header. Both columns were
-// captured from a run of the real code; neither was hand-composed.
-//
-//   * `packageOnly` is what `buildWireCompatibleRequest` emits when called bare.
-//     This is the reference: the package's beta list and its ORDER were derived
-//     from the genuine Claude Code 2.1.195 binary, so the package order is the
-//     client's order and it wins. `claude-code-20250219` leads on non-haiku
-//     models and is suppressed entirely on `claude-3-5-haiku` (upstream `$9r`
-//     does `if (!isHaiku) push(CLAUDE_CODE)`), and
-//     `mid-conversation-system-2026-04-07` appears only for opus-4-8 and
-//     fable-5.
-//   * `pluginPath` is what actually leaves index.mjs for the same request. It is
-//     the package list PLUS the plugin's own configured betas merged on top —
-//     `web-search-2025-03-05` and `advisor-tool-2026-03-01` come from
-//     `custom_betas`, which is why they trail the package's entries. On
-//     `claude-3-5-haiku` and `claude-haiku-4-5` that merge also re-adds
-//     `claude-code-20250219` at the END, where the package deliberately dropped
-//     it.
-//
-// The order is upstream's emergent push order, not a sorted or curated list, so
-// both columns are pinned as exact strings rather than as sets. Any drift on
-// EITHER column fails here.
-const BETA_HEADER_GOLDEN = [
-  {
-    name: "golden foreground model",
-    hostBody: HOST_BODY,
-    pluginPath:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01",
-    packageOnly:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11",
-  },
-  {
-    name: "claude-3-5-haiku",
-    hostBody: { ...HOST_BODY, model: "claude-3-5-haiku" },
-    pluginPath:
-      "oauth-2025-04-20,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,web-search-2025-03-05,claude-code-20250219",
-    packageOnly: "oauth-2025-04-20,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11",
-  },
-  {
-    name: "claude-haiku-4-5",
-    hostBody: { ...HOST_BODY, model: "claude-haiku-4-5" },
-    pluginPath:
-      "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01,claude-code-20250219",
-    packageOnly:
-      "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11",
-  },
-  {
-    name: "claude-sonnet-4-6",
-    hostBody: { ...HOST_BODY, model: "claude-sonnet-4-6", thinking: { type: "adaptive" }, effort: "high" },
-    pluginPath:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01",
-    packageOnly:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11",
-  },
-  {
-    name: "claude-opus-4-6",
-    hostBody: { ...HOST_BODY, model: "claude-opus-4-6", thinking: { type: "adaptive" }, effort: "high" },
-    pluginPath:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01",
-    packageOnly:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11",
-  },
-  {
-    name: "claude-opus-4-7",
-    hostBody: { ...HOST_BODY, model: "claude-opus-4-7", thinking: { type: "adaptive" }, effort: "high" },
-    pluginPath:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01",
-    packageOnly:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11",
-  },
-  {
-    name: "claude-opus-4-8",
-    hostBody: { ...HOST_BODY, model: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "high" },
-    pluginPath:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01",
-    packageOnly:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,extended-cache-ttl-2025-04-11",
-  },
-  {
-    name: "claude-fable-5",
-    hostBody: { ...HOST_BODY, model: "claude-fable-5", thinking: { type: "adaptive" }, effort: "high" },
-    pluginPath:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01",
-    packageOnly:
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,extended-cache-ttl-2025-04-11",
-  },
-];
 
 // The literal wire the package emits for the reference foreground request.
 // Captured, not composed. `x-stainless-os`, `x-stainless-arch` and
@@ -490,47 +286,6 @@ function makeSuccessResponse() {
   });
 }
 
-function normalizeUrl(value) {
-  return new URL(String(value)).toString();
-}
-
-function normalizeHeaders(headers) {
-  return [...new Headers(headers).entries()].map(([name, value]) => [
-    name,
-    NORMALIZED_HEADER_NAMES.has(name) ? "<normalized>" : value,
-  ]);
-}
-
-// `metadata.user_id` is the ONLY body field held out of the byte-for-byte
-// comparison, and it is held out for per-run nondeterminism alone. `thinking`
-// used to be excluded here too, opt-in per vector: as of rc.10 the package
-// emitted upstream's enabled branch and the plugin did not. That divergence is
-// closed — the first-party turn routes through the package, both paths emit
-// `ENABLED_THINKING_GOLDEN`, and the exclusion was excluding nothing while
-// still hiding any future real drift in the field. It was removed; `thinking`
-// is now compared as bytes like every other field.
-function normalizeBody(body) {
-  const parsed = JSON.parse(body);
-  if (!parsed.metadata?.user_id) throw new Error("Missing normalized path: body.metadata.user_id");
-  parsed.metadata.user_id = "<normalized>";
-  return JSON.stringify(parsed);
-}
-
-// GOLDEN for the enabled-thinking shape, for a host request carrying
-// `thinking: {type: "enabled", budget_tokens: 10000}` against `max_tokens:
-// 8000`. Captured from a run, and identical on both construction paths now that
-// the first-party turn routes through the package:
-//
-//   * the budget is clamped with upstream's `Tr = Math.min(Fi - 1, Tr)`, so
-//     10000 becomes 7999;
-//   * `budget_tokens` is emitted FIRST, which is upstream's insertion order for
-//     the enabled branch.
-//
-// Both are APPROVED wire changes, not regressions. Key order is load-bearing
-// because these bodies are compared as serialised bytes, so this is pinned as an
-// exact string rather than with `toEqual`.
-const ENABLED_THINKING_GOLDEN = '{"budget_tokens":7999,"type":"enabled"}';
-
 async function captureExistingRequest(mockFetch, hostBody, pathname = "/v1/messages", hostHeaders = {}) {
   vi.stubGlobal("fetch", mockFetch);
   const plugin = await AnthropicAuthPlugin({ client: makeClient() });
@@ -579,130 +334,6 @@ function stubCleanEnvironment() {
   vi.stubEnv("CLAUDE_CODE_REMOTE_SESSION_ID", "");
   vi.stubEnv("OPENCODE_ANTHROPIC_PROFILE_OVERRIDE", "");
 }
-
-describe("shared package foreground parity", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    stubCleanEnvironment();
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.unstubAllEnvs();
-  });
-
-  it.each(DIFFERENTIAL_VECTORS)(
-    "matches the $name request byte-for-byte after golden normalization",
-    async ({ hostBody, cacheControl, antiVerbosity }) => {
-      testPolicy.antiVerbosity = antiVerbosity !== false;
-      const existing = await captureExistingRequest(
-        vi.fn(() => Promise.resolve(makeSuccessResponse())),
-        hostBody,
-      );
-      const adapter = await buildAdapterRequest(hostBody, cacheControl);
-
-      expect(normalizeUrl(adapter.url)).toBe(normalizeUrl(existing.url));
-      expect(adapter.method).toBe(existing.method);
-      expect(normalizeHeaders(adapter.headers)).toEqual(normalizeHeaders(existing.headers));
-      expect(normalizeBody(adapter.body)).toBe(normalizeBody(existing.body));
-    },
-  );
-
-  // `thinking` is NO LONGER excluded from the byte-for-byte comparison above —
-  // both paths emit the same object, so the vector compares it as bytes like
-  // any other field. What that vector cannot catch is the two paths drifting
-  // TOGETHER, which is exactly what a package bump does. This test pins the
-  // exact serialised object each path produces against the captured golden. The
-  // clamp to 7999 and the `budget_tokens`-first key order are APPROVED wire
-  // changes; the assertion exists so an UNAPPROVED one fails.
-  it("pins the enabled-thinking golden on both construction paths", async () => {
-    const hostBody = { ...HOST_BODY, thinking: { type: "enabled", budget_tokens: 10000 } };
-    const existing = await captureExistingRequest(
-      vi.fn(() => Promise.resolve(makeSuccessResponse())),
-      hostBody,
-    );
-    const adapter = await buildAdapterRequest(hostBody);
-
-    expect(JSON.stringify(JSON.parse(existing.body).thinking)).toBe(ENABLED_THINKING_GOLDEN);
-    expect(JSON.stringify(JSON.parse(adapter.body).thinking)).toBe(ENABLED_THINKING_GOLDEN);
-    expect(JSON.parse(existing.body).max_tokens).toBe(8000);
-    expect(JSON.parse(adapter.body).max_tokens).toBe(8000);
-  });
-
-  // `normalizeHeaders` excludes `anthropic-beta` from the byte-for-byte
-  // comparison above because the plugin path merges its own configured betas on
-  // top of the package's list. This test is what keeps that exclusion honest:
-  // both sides stay pinned to an exact captured string, so neither can drift
-  // unnoticed — not the package's list or order, and not the plugin's merge.
-  it.each(BETA_HEADER_GOLDEN)(
-    "pins the $name anthropic-beta golden on both construction paths",
-    async ({ hostBody, pluginPath, packageOnly }) => {
-      const existing = await captureExistingRequest(
-        vi.fn(() => Promise.resolve(makeSuccessResponse())),
-        hostBody,
-      );
-      const adapter = await buildAdapterRequest(hostBody);
-
-      expect(new Headers(existing.headers).get("anthropic-beta")).toBe(pluginPath);
-      expect(adapter.headers.get("anthropic-beta")).toBe(packageOnly);
-    },
-  );
-
-  // The package caps `max_tokens` at the model's own default output limit before
-  // it reaches the wire, matching upstream's `Fi = Math.min(callerValue,
-  // qct(model))`. This is an APPROVED wire change and it converts an error into
-  // a success: `max_tokens: 64000` on sonnet-4-5 takes an HTTP 400 from the real
-  // API today, and the clamp is what stops that.
-  //
-  // The clamp is invisible to the byte-for-byte vectors above because
-  // `HOST_BODY.max_tokens` is 8000 and every model those vectors exercise has a
-  // default output limit at or above 8192. It only appears once a caller asks
-  // for more than the model will give, which is what this vector does. Both
-  // paths land on the same golden because the first-party turn now routes
-  // through the package; the assertion is here so a future package bump that
-  // moved the ceiling would fail rather than silently change the wire.
-  it("pins the max_tokens clamp golden on both construction paths", async () => {
-    // claude-sonnet-4-5 has a default output limit of 32000.
-    const hostBody = { ...HOST_BODY, max_tokens: 40000 };
-    const existing = await captureExistingRequest(
-      vi.fn(() => Promise.resolve(makeSuccessResponse())),
-      hostBody,
-    );
-    const adapter = await buildAdapterRequest(hostBody);
-
-    expect(JSON.parse(existing.body).max_tokens).toBe(32000);
-    expect(JSON.parse(adapter.body).max_tokens).toBe(32000);
-  });
-
-  it("leaves max_tokens untouched on both paths when it is under the model limit", async () => {
-    // The control for the test above: at 8000 the cap cannot bite, which is why
-    // the byte-for-byte vectors still agree on this field.
-    const existing = await captureExistingRequest(
-      vi.fn(() => Promise.resolve(makeSuccessResponse())),
-      HOST_BODY,
-    );
-    const adapter = await buildAdapterRequest(HOST_BODY);
-
-    expect(JSON.parse(existing.body).max_tokens).toBe(8000);
-    expect(JSON.parse(adapter.body).max_tokens).toBe(8000);
-  });
-
-  it("omits the context hint beta and body field on both construction paths", async () => {
-    const existing = await captureExistingRequest(
-      vi.fn(() => Promise.resolve(makeSuccessResponse())),
-      HOST_BODY,
-    );
-    const adapter = await buildAdapterRequest(HOST_BODY);
-
-    const existingBeta = new Headers(existing.headers).get("anthropic-beta") ?? "";
-    const adapterBeta = adapter.headers.get("anthropic-beta") ?? "";
-
-    expect(existingBeta).not.toContain("context-hint-2026-04-09");
-    expect(adapterBeta).not.toContain("context-hint-2026-04-09");
-    expect(JSON.parse(existing.body).context_hint).toBeUndefined();
-    expect(JSON.parse(adapter.body).context_hint).toBeUndefined();
-  });
-});
 
 // GOLDEN PINNING. Nothing differential here: these assertions exist purely so
 // that an unintended wire change in a future release of
@@ -1175,8 +806,11 @@ describe("shared package adapter input normalization", () => {
 //   * plugin-retained POLICY the package deliberately has no surface for
 //     (anti-verbosity injection, adaptive-thinking derivation, default effort);
 //   * plugin-retained CONFIGURATION layered on top of the package output — the
-//     `custom_betas` merge pinned in `BETA_HEADER_GOLDEN`, which re-adds betas
-//     the package deliberately omits.
+//     `custom_betas` merge, which re-adds betas the package deliberately omits.
+//     Its per-model golden strings used to live in this file as
+//     `BETA_HEADER_GOLDEN`; they went with the retired parity block, and
+//     test/conformance/adapter-beta-composition.test.mjs is where beta
+//     composition is pinned now.
 //
 // Where the two differ on PROTOCOL rather than policy or configuration, the
 // package is correct and its output is the golden.
