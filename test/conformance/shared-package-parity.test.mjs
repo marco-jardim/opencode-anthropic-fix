@@ -848,10 +848,11 @@ describe("legacy request path", () => {
       "/v1/messages/count_tokens",
     );
 
-    // The URL is still transformRequestUrl's, NOT `built.url`: index.mjs
-    // discards the package's pinned endpoint so a custom ANTHROPIC_BASE_URL or
-    // proxy survives. Against the default base the two happen to agree, which
-    // is precisely why the body is what proves the routing.
+    // The URL is now `built.url` — the package's pinned count endpoint, adopted
+    // verbatim by index.mjs so URL, headers and body all come from one source.
+    // Against the default base it agrees with transformRequestUrl's output, so
+    // the body is still what proves the routing; url-source.test.mjs is where
+    // the adoption itself is pinned.
     expect(String(existing.url)).toBe("https://api.anthropic.com/v1/messages/count_tokens?beta=true");
     // The package's count body builder emits exactly these three keys; the
     // legacy forge below emits `max_tokens`, `system` and `temperature`
