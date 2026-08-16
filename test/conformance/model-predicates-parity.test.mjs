@@ -10,7 +10,9 @@ import {
   isOpus46Model,
   isOpus47Model,
   isOpus48Model,
+  buildWireCompatibleRequest,
 } from "../../lib/mimicry/wire-compat.mjs";
+import { buildAdapterTransport, PROFILE_CLI_VERSION } from "../../lib/mimicry/adapter-input.mjs";
 
 /**
  * PARITY TABLE for the model-family predicates.
@@ -169,5 +171,79 @@ describe("model predicate parity after the models.mjs retirement", () => {
       expect(predicate(undefined), name).toBe(false);
       expect(predicate(null), name).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The seam still owes the wire a DASHED model id
+// ---------------------------------------------------------------------------
+
+/**
+ * The migration plan assumed that once the predicates came from the package,
+ * `normalizeModelVersionSeparators` in `lib/mimicry/wire-compat.mjs` could be
+ * retired because the package would normalize the id itself. That premise is
+ * WRONG, and this test is the pin.
+ *
+ * The package is dotted-TOLERANT in its DECISIONS only: the predicates above
+ * classify `claude-opus-4.7` correctly. The request BODY is a separate matter —
+ * the package copies the caller's model through verbatim apart from stripping
+ * `[1m]`-style markers, so a bare call with `claude-opus-4.7` puts
+ * `claude-opus-4.7` on the wire.
+ *
+ * The real API only accepts the dashed spelling, so the dotted-id rewrite stays
+ * in the seam and the built body must be dashed. That is the invariant here.
+ */
+describe("seam — dotted model ids reach the wire dashed", () => {
+  const SESSION_ID = "11111111-1111-4111-8111-111111111111";
+  const DEVICE_ID = "2".repeat(64);
+  const ACCOUNT_UUID = "33333333-3333-4333-8333-333333333333";
+  const CLIENT_REQUEST_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+  /** @param {string} model */
+  function transportFor(model) {
+    const body = JSON.stringify({
+      model,
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const result = buildAdapterTransport({
+      input: undefined,
+      requestInit: {},
+      accessToken: "host-access-token",
+      requestUrl: new URL("https://api.anthropic.com/v1/messages"),
+      provider: "anthropic",
+      clientRequestId: CLIENT_REQUEST_ID,
+      signature: {
+        enabled: true,
+        claudeCliVersion: PROFILE_CLI_VERSION,
+        customBetas: [],
+        strategy: "default",
+        sessionId: SESSION_ID,
+      },
+      identity: { persistentUserId: DEVICE_ID, accountId: ACCOUNT_UUID },
+      adaptiveOverride: undefined,
+      tokenEconomy: {},
+      body,
+      env: {},
+      platform: "win32",
+      arch: "x64",
+      nodeVersion: "v22.11.0",
+    });
+    if (!result.applicable) throw new Error(`expected applicable transport, got skip: ${result.reason}`);
+    return { body, transport: result.transport };
+  }
+
+  it("rewrites a dotted version separator in the built body", async () => {
+    const { body, transport } = transportFor("claude-opus-4.7");
+    const built = await buildWireCompatibleRequest(body, transport);
+
+    expect(JSON.parse(built.body).model).toBe("claude-opus-4-7");
+  });
+
+  it("leaves an already dashed id untouched", async () => {
+    const { body, transport } = transportFor("claude-opus-4-7");
+    const built = await buildWireCompatibleRequest(body, transport);
+
+    expect(JSON.parse(built.body).model).toBe("claude-opus-4-7");
   });
 });
