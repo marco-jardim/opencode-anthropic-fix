@@ -43,6 +43,17 @@ request; it now has one, and "signature emulation off" stopped meaning "less mim
   request with a DIFFERENT fingerprint on the wire mid-session. It is now a hard error naming the endpoint and the
   defect. Endpoints the package has no surface for (files, models, gateway prefixes) are unaffected.
 
+### Removed
+
+- **The beta latch.** `betaLatchState` and the ~50-line merge block that ran on every request are gone, together with
+  the two `/anthropic set` handlers that dirtied it. The latch existed to avoid server-side cache-key churn by never
+  dropping a beta mid-session, but it was INERT on both live paths: `buildRequestHeaders` recomputes its own
+  `mergedBetas` from the incoming header, and the adapter has the package compose the list from `customBetas`. Its
+  output only ever reached one `task-budgets-2026-03-13` check inside `transformRequestBody`. Removal is wire-neutral —
+  all 15 migration-parity vectors stay byte-identical with no re-seal. The session-rejected-beta eviction
+  (`sessionRejectedBetas` -> `_sessionFilteredCustomBetas`) is a separate mechanism, still active, and is what actually
+  reaches the wire.
+
 ### Fixed
 
 - **A `Request`-carried body no longer bypasses the plugin.** `fetchFn(new Request(url, {body}), {})` is a supported

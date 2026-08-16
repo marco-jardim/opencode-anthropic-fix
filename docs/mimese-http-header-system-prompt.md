@@ -1153,11 +1153,22 @@ The plugin implements only the first row and has no provider branch: it always e
 `advanced-tool-use-2025-11-20`, which is the correct value for the first-party API — the only API it
 targets. See [Provider Scope](../README.md#provider-scope).
 
-### 11.6 Beta Header Latching
+### 11.6 Beta Header Latching — REMOVED (Phase 2.2.3)
 
-Once a beta is first sent in a session, it continues being sent for all subsequent requests. This prevents mid-session cache key changes that would bust ~50-70K tokens of server-side prompt cache.
+Upstream Claude Code latches a beta once sent, so a mid-session flip cannot bust ~50-70K tokens of
+server-side prompt cache. The plugin used to mirror that with a `betaLatchState`
+(`{ sent: Set, dirty: false, lastHeader: null }`), dirtied by token-economy changes via
+`/anthropic set`.
 
-State: `betaLatchState = { sent: Set, dirty: false, lastHeader: null }`. The `dirty` flag is set when token economy config changes via `/anthropic set`, allowing intentional removal.
+It is gone. The latch never reached the wire on either construction path: `buildRequestHeaders`
+recomputes its own merged list from the incoming header, and the adapter path has the shared package
+compose the list from `customBetas`. Its only consumer was the `task-budgets-2026-03-13` check inside
+`transformRequestBody`. Removal was verified wire-neutral against all 15 migration-parity vectors.
+
+What still guards against oscillation: the composed set is a pure function of model, config and the
+session-rejected filter, so it only changes when one of those does. Betas the API rejects are evicted
+before composition (`sessionRejectedBetas` -> `_sessionFilteredCustomBetas`), which is a separate
+mechanism and remains active.
 
 ### 11.7 Cache TTL Session Latching
 

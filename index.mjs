@@ -305,18 +305,6 @@ export async function AnthropicAuthPlugin({ client }) {
   let willowLastSuggestionTime = 0;
   let _lastOAuthPruneTime = 0; // QA fix L-oauthPrune: throttle for periodic prune
 
-  // Beta header latching: once a beta is sent in a session, it stays on for
-  // the rest of the session to prevent cache key churn (~50-70K tokens per flip).
-  // Cleared on /clear or /compact if needed.
-  const betaLatchState = {
-    /** @type {Set<string>} betas that have been sent at least once this session */
-    sent: new Set(),
-    /** When true, a config change invalidated the latch and next request rebuilds. */
-    dirty: false,
-    /** @type {string | null} The last computed beta header string (for latching). */
-    lastHeader: null,
-  };
-
   // F4: Session-level latch for rejected custom betas.
   // When a custom beta triggers a 400/anthropic-beta or 413-with-signal rejection,
   // its canonical name is stored here so subsequent requests within
@@ -1247,8 +1235,6 @@ export async function AnthropicAuthPlugin({ client }) {
           te.token_efficient_tools = enabled;
           saveConfig({ token_economy: te });
           config.token_economy = te;
-          // Invalidate latched betas so the change takes effect next request
-          betaLatchState.dirty = true;
         },
         "redact-thinking": () => {
           const enabled = value === "on" || value === "true" || value === "1";
@@ -1258,7 +1244,6 @@ export async function AnthropicAuthPlugin({ client }) {
           te.redact_thinking = enabled;
           saveConfig({ token_economy: te });
           config.token_economy = te;
-          betaLatchState.dirty = true;
         },
         "tool-deferral": () => {
           const enabled = value === "on" || value === "true" || value === "1";
@@ -2951,7 +2936,22 @@ export async function AnthropicAuthPlugin({ client }) {
                       }
                       return false;
                     });
-                let computedBetaHeader = buildAnthropicBetaHeader(
+                // PHASE 2.2.3 — THE BETA LATCH IS GONE. It used to merge every
+                // beta ever sent this session back into this value, to avoid
+                // server-side cache-key churn from a beta flipping mid-session.
+                // It was INERT on both live paths: `buildRequestHeaders`
+                // recomputes its own `mergedBetas` from the incoming header, and
+                // the adapter has the package compose the list from
+                // `customBetas`. Neither ever read the latched value, so the only
+                // thing it reached was the `task-budgets-2026-03-13` check in
+                // `transformRequestBody` below.
+                //
+                // The two evictions the latch carried are not lost: both act on
+                // `_sessionFilteredCustomBetas` above, BEFORE the header is
+                // composed — `customBetasStripped` empties the custom set, and
+                // `sessionRejectedBetas` filters the individual betas the API
+                // rejected. That is the mechanism that actually reaches the wire.
+                const computedBetaHeader = buildAnthropicBetaHeader(
                   "",
                   getSignatureEmulationEnabled(),
                   _reqModel,
@@ -2963,56 +2963,6 @@ export async function AnthropicAuthPlugin({ client }) {
                   _tokenEconomy,
                   _microcompactBetas, // NEW
                 );
-
-                // Beta header latching: once a beta has been sent in this session,
-                // keep sending it to avoid server-side cache key churn (~50-70K tokens
-                // per flip). The latch is sticky-on: new betas can be added but never
-                // removed mid-session unless explicitly invalidated by config change.
-                {
-                  const currentBetas = computedBetaHeader
-                    .split(",")
-                    .map((b) => b.trim())
-                    .filter(Boolean);
-                  // Add all current betas to the latch set
-                  for (const b of currentBetas) betaLatchState.sent.add(b);
-                  // If a config change dirtied the latch, rebuild from current (allow removal)
-                  if (betaLatchState.dirty) {
-                    betaLatchState.dirty = false;
-                    betaLatchState.sent = new Set(currentBetas);
-                  }
-                  // Merge latched betas that aren't in the current set
-                  const merged = new Set(currentBetas);
-                  for (const b of betaLatchState.sent) merged.add(b);
-                  // Custom-beta strip kill switch: when the server rejected our custom
-                  // betas (customBetasStripped latch fired), evict them from the latch so
-                  // they do not re-appear on the retry attempt.
-                  // F1: delete both the raw alias AND the canonical form so that aliases
-                  // like "cache-diag" (cache-diagnosis-2026-04-07) are fully evicted.
-                  if (customBetasStripped && config.custom_betas?.length) {
-                    for (const b of config.custom_betas) {
-                      const canonical = resolveBetaShortcut(b);
-                      merged.delete(b);
-                      merged.delete(canonical);
-                      betaLatchState.sent.delete(b);
-                      betaLatchState.sent.delete(canonical);
-                    }
-                  }
-                  // F4: Evict session-rejected betas from the latch on every request so
-                  // they cannot re-enter the sent set from a prior latched header.
-                  if (sessionRejectedBetas.size > 0) {
-                    const _now = Date.now();
-                    for (const [_canonical, _rejectedAt] of sessionRejectedBetas) {
-                      if (_now - _rejectedAt <= SESSION_REJECTED_BETA_TTL_MS) {
-                        merged.delete(_canonical);
-                        betaLatchState.sent.delete(_canonical);
-                      } else {
-                        sessionRejectedBetas.delete(_canonical);
-                      }
-                    }
-                  }
-                  computedBetaHeader = [...merged].join(",");
-                  betaLatchState.lastHeader = computedBetaHeader;
-                }
 
                 // Cache TTL session latching: latch the cache policy at session start
                 // so mid-session toggles don't bust the server-side prompt cache.
@@ -5931,8 +5881,10 @@ function getAccountIdentifier(account) {
  * @param {boolean} [fastModeActive] - When true, emits FAST_MODE_BETA_FLAG (fast-mode-2026-02-01).
  *   Must be derived structurally from the already-transformed outgoing body (body.includes('"speed":"fast"')).
  *   Only passed from the buildRequestHeaders call site (after body transform). The pre-transform
- *   computedBetaHeader call site (index.mjs:2905) leaves this undefined so the latch never
- *   accumulates fast-mode independently of actual body content.
+ *   `computedBetaHeader` call site leaves it undefined, which is correct: at that point the body
+ *   transform has not run, so `speed:"fast"` cannot be present yet and the value would be a
+ *   guess. That header value no longer reaches the wire in any case — it feeds only the
+ *   `task-budgets-2026-03-13` check in transformRequestBody.
  * @returns {string}
  */
 // Mirrors CC's Kw(model) effort eligibility: returns false for claude-3-* and the

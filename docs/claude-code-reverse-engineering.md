@@ -1447,7 +1447,7 @@ Once a beta header is first sent in a session, it continues being sent for all s
 
 **Claude Code implementation:** Uses `setAfkModeHeaderLatched()`, `setFastModeHeaderLatched()`, `setCacheEditingHeaderLatched()` to track latches. Latches cleared on `/clear` and `/compact` via `clearBetaHeaderLatches()`.
 
-**Plugin implementation:** `betaLatchState` object tracks `sent` (Set of all betas sent), `dirty` (reset flag from config changes), and `lastHeader` (last computed header). After each beta header computation, all current betas are added to `sent`; on subsequent requests, any betas in `sent` but not in the current computation are merged back. The `dirty` flag is set when the user changes token economy config via `/anthropic set`, allowing intentional beta removal.
+**Plugin implementation:** NONE, as of Phase 2.2.3 of the wire-compat consolidation. The plugin used to keep a `betaLatchState` (a `sent` set, a `dirty` flag, a `lastHeader`) and merge every beta ever sent back into each request. It was inert on both live construction paths: `buildRequestHeaders` recomputes its own merged list from the incoming header, and the adapter has the shared package compose the list from `customBetas` — neither ever read the latched value. Removing it was wire-neutral (all 15 migration-parity vectors byte-identical). The behaviour it was meant to guarantee is now a property of the composition itself: the beta set is a pure function of model + config + session-rejected filtering, so it does not oscillate unless one of those actually changes. Session-rejected betas are evicted BEFORE composition (`sessionRejectedBetas`, `_sessionFilteredCustomBetas` in `index.mjs`), which is a separate and still-live mechanism.
 
 ### 12.11 Cache TTL Session Latching
 
