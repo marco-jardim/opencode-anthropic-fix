@@ -384,7 +384,7 @@ has never known, rejected inside a tool definition).
 BEFORE Phase 2.2.2 this switch produced HALF-mimicry: a forged `claude-cli/2.1.233 (external, cli)` user-agent, an
 `anthropic-beta` that REPLACED the host's, and `transformRequestBody`'s non-gated normalizations (which also emptied
 the host's `system` and injected a `temperature` the host never sent). Pinned by
-`test/conformance/shared-package-parity.test.mjs` ("emulation-off passthrough envelope") and migration-parity
+`test/conformance/shared-package-parity.test.mjs` ("emulation-off passthrough envelope") and wire-baseline
 vector 09.
 
 The system-prompt side is unchanged: with emulation off the plugin uses the legacy system-prompt transform path
@@ -1198,7 +1198,7 @@ server-side prompt cache. The plugin used to mirror that with a `betaLatchState`
 It is gone. The latch never reached the wire on either construction path: `buildRequestHeaders`
 recomputes its own merged list from the incoming header, and the adapter path has the shared package
 compose the list from `customBetas`. Its only consumer was the `task-budgets-2026-03-13` check inside
-`transformRequestBody`. Removal was verified wire-neutral against all 15 migration-parity vectors.
+`transformRequestBody`. Removal was verified wire-neutral against all 15 wire-baseline vectors.
 
 What still guards against oscillation: the composed set is a pure function of model, config and the
 session-rejected filter, so it only changes when one of those does. Betas the API rejects are evicted

@@ -1,12 +1,12 @@
-// MIGRATION PARITY HARNESS (Wave 0, task 0.1.4 of
-// docs/plans/wire-compat-consolidation-migration.md).
+// WIRE BASELINE — the plugin's permanent byte-level wire contract.
 //
-// PURPOSE — this file pins the BYTES the plugin's interceptor puts on the wire
-// TODAY, across a matrix of representative requests, so that every phase of the
-// wire-compat consolidation migration can be proven wire-neutral. It is the
-// central regression instrument for the migration: it must run green after
-// EACH phase, unchanged. If a phase moves the wire, this suite fails first and
-// loudest, naming the exact JSON paths that moved.
+// PURPOSE — this file pins the BYTES the plugin's interceptor puts on the wire,
+// across a matrix of representative requests. The fixtures under
+// `test/fixtures/wire-baseline/` are not a snapshot of some past
+// implementation; they ARE the contract. Any code change that moves them is a
+// wire change, and it fails here first and loudest, naming the exact JSON paths
+// that moved. (Historically the fixtures were first sealed pre-migration, at
+// Wave 0 of the wire-compat consolidation, as a legacy-parity harness.)
 //
 // WHAT IT PINS, per vector: the outgoing URL, the full outgoing header set
 // (as an alphabetically ordered [name, value] pair list) and the outgoing body
@@ -22,33 +22,40 @@
 // DETERMINISM — every vector is driven through the real interceptor TWICE per
 // run and the two captures must be byte-identical AFTER normalization. The
 // normalization allowlist is deliberately minimal (see NORMALIZED_PATHS) and
-// covers only per-run generated identifiers, the bearer token, and
-// host-derived Stainless headers. Normalization is applied BEFORE the fixture
-// is written, so the fixture stores the placeholder values and the
-// fixture comparison is strict equality with no further exemptions.
+// covers only per-run generated identifiers (→ `<generated>`), the bearer
+// token (→ `<redacted>`), the host-derived Stainless headers (pinned to fixed
+// values) and, for vector 15 only, the large synthetic escalation payload
+// (redacted to a length+digest descriptor instead of megabytes of text).
+// Normalization is applied BEFORE the fixture is written, so the fixture stores
+// the placeholder values and the fixture comparison is strict equality with no
+// further exemptions.
 //
-// RE-SEALING — run with `UPDATE_MIGRATION_BASELINE=1` to rewrite every fixture:
+// RE-SEALING — run with `UPDATE_WIRE_BASELINE=1` to rewrite every fixture:
 //
-//     $env:UPDATE_MIGRATION_BASELINE=1; npx vitest run migration-parity
+//     $env:UPDATE_WIRE_BASELINE="1"
+//     npx vitest run wire-baseline
+//     Remove-Item Env:UPDATE_WIRE_BASELINE
+//     npx prettier --write test/fixtures/wire-baseline
 //
-// Re-sealing during the migration means one of two things:
-//   (a) a LEGITIMATE wire change (e.g. a deliberate legacy bugfix, or an
-//       approved fidelity correction adopted from the shared package). Re-seal,
-//       and justify the exact fixture diff in the commit message.
-//   (b) an accidental regression. Do NOT re-seal — fix the code.
-// Absent `UPDATE_MIGRATION_BASELINE`, the suite compares byte for byte and
-// fails with the list of differing paths.
+// The prettier pass is required because fixtures are written with
+// `JSON.stringify(value, null, 2)`, whose line breaking differs from
+// Prettier's, and `prettier --check .` runs on pre-push. It is safe because the
+// comparison below reads fixtures through `JSON.parse` — the pinned content is
+// the parsed value and the key ORDER, neither of which Prettier touches.
 //
-// After re-sealing, run `npx prettier --write test/fixtures/migration-baseline`:
-// fixtures are written with `JSON.stringify(value, null, 2)`, whose line breaking
-// differs from Prettier's, and `prettier --check .` runs on pre-push. This is
-// safe because the comparison below reads fixtures through `JSON.parse` — the
-// pinned content is the parsed value and the key ORDER, neither of which
-// Prettier touches.
+// A re-seal is never routine. ANY diff it produces must be reviewed
+// vector-by-vector and justified, per vector, in the commit message. Re-seal
+// only for a wire change that is deliberate and understood; an unexplained diff
+// is a regression, and the fix belongs in the code, not in the fixtures.
+// Absent `UPDATE_WIRE_BASELINE`, the suite compares byte for byte and fails
+// with the list of differing paths.
 //
-// LIFECYCLE — this harness is temporary-by-intent for Waves 1-3 and becomes a
-// PERMANENT conformance suite at Phase 4.1, at which point the fixtures stop
-// being "the legacy output" and start being "the contract".
+// VECTOR 15 MUST STAY LAST. It is the only vector with `adaptive_context`
+// enabled, and it deliberately drives the module-level `adaptiveContextState`
+// in index.mjs into an escalated, sticky state that survives to the end of the
+// file. Every other vector runs with `adaptive_context.enabled === false`,
+// where `resolveAdaptiveContext` short-circuits and never reads that state — so
+// the stickiness is contained only as long as no vector is appended after 15.
 //
 // Infrastructure (module mocks, `driveRequest`, `differingPaths`, the
 // generated-path allowlist and the Stainless normalization) is lifted from
@@ -79,7 +86,7 @@ vi.mock("../../lib/storage.mjs", async (importOriginal) => {
 vi.mock("../../lib/refresh-lock.mjs", () => ({
   acquireRefreshLock: vi.fn().mockResolvedValue({
     acquired: true,
-    lockPath: "/tmp/opencode-migration-parity-test.lock",
+    lockPath: "/tmp/opencode-wire-baseline-test.lock",
   }),
   releaseRefreshLock: vi.fn().mockResolvedValue(undefined),
 }));
@@ -132,8 +139,8 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
 
 import { AnthropicAuthPlugin } from "../../index.mjs";
 
-const baselineDir = fileURLToPath(new URL("../fixtures/migration-baseline/", import.meta.url));
-const UPDATE_BASELINE = process.env.UPDATE_MIGRATION_BASELINE === "1";
+const baselineDir = fileURLToPath(new URL("../fixtures/wire-baseline/", import.meta.url));
+const UPDATE_BASELINE = process.env.UPDATE_WIRE_BASELINE === "1";
 
 const MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const COUNT_TOKENS_URL = "https://api.anthropic.com/v1/messages/count_tokens";
@@ -358,7 +365,7 @@ function readFixture(name) {
   if (!existsSync(path)) {
     throw new Error(
       `Missing migration baseline fixture: ${path}\n` +
-        `Seal it with: $env:UPDATE_MIGRATION_BASELINE=1; npx vitest run migration-parity`,
+        `Seal it with: $env:UPDATE_WIRE_BASELINE="1"; npx vitest run wire-baseline`,
     );
   }
   return JSON.parse(readFileSync(path, "utf8"));

@@ -59,7 +59,7 @@
 // WHERE THE RETIRED BLOCK'S NON-TAUTOLOGICAL PINS LIVE NOW: per-model
 // `anthropic-beta` composition is covered by
 // test/conformance/adapter-beta-composition.test.mjs and the
-// test/fixtures/migration-baseline/ corpus; the `context_hint` omission by
+// test/fixtures/wire-baseline/ corpus; the `context_hint` omission by
 // test/conformance/context-hint-gating.test.mjs; the thinking-budget clamp by
 // the adapter-side assertion in part 3 below.
 

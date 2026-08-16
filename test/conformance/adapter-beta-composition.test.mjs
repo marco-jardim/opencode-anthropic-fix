@@ -10,7 +10,7 @@
 // after the package has composed its own beta list and merged the plugin's
 // contribution into it.
 //
-// WHY IT IS SEPARATE FROM migration-parity.test.mjs — that harness pins whole
+// WHY IT IS SEPARATE FROM wire-baseline.test.mjs — that harness pins whole
 // wire snapshots to fixture files on disk, and its failure mode is "something
 // moved, re-seal or fix". This suite pins named PROPERTIES of the merge
 // (additive, deduplicating, suppressible, capped) as inline literals, so a
@@ -19,7 +19,7 @@
 //
 // The module mocks, `makeClient`/`makeProvider`/`makeSuccessResponse`,
 // `stubRequestEnv` and `driveRequest` are lifted from
-// `test/conformance/migration-parity.test.mjs` on purpose — no new test infra,
+// `test/conformance/wire-baseline.test.mjs` on purpose — no new test infra,
 // and the two suites therefore drive the interceptor identically.
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
