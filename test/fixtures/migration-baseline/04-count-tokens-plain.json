@@ -1,0 +1,35 @@
+{
+  "url": "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+  "headers": [
+    [
+      "anthropic-beta",
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01"
+    ],
+    ["anthropic-dangerous-direct-browser-access", "true"],
+    ["anthropic-version", "2023-06-01"],
+    ["authorization", "<redacted>"],
+    ["content-type", "application/json"],
+    ["user-agent", "claude-cli/2.1.233 (external, cli)"],
+    ["x-app", "cli"],
+    ["x-claude-code-session-id", "<generated>"],
+    ["x-client-request-id", "<generated>"],
+    ["x-stainless-arch", "<host-arch>"],
+    ["x-stainless-lang", "js"],
+    ["x-stainless-os", "<host-os>"],
+    ["x-stainless-package-version", "0.112.1"],
+    ["x-stainless-retry-count", "0"],
+    ["x-stainless-runtime", "node"],
+    ["x-stainless-runtime-version", "<host-runtime-version>"],
+    ["x-stainless-timeout", "600"]
+  ],
+  "body": {
+    "model": "claude-sonnet-4-5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ],
+    "tools": []
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "url": "https://api.anthropic.com/v1/messages?beta=true",
+  "headers": [
+    [
+      "anthropic-beta",
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01"
+    ],
+    ["anthropic-dangerous-direct-browser-access", "true"],
+    ["anthropic-version", "2023-06-01"],
+    ["authorization", "<redacted>"],
+    ["content-type", "application/json"],
+    ["user-agent", "claude-cli/2.1.233 (external, cli)"],
+    ["x-app", "cli"],
+    ["x-claude-code-session-id", "<generated>"],
+    ["x-client-request-id", "<generated>"],
+    ["x-stainless-arch", "<host-arch>"],
+    ["x-stainless-lang", "js"],
+    ["x-stainless-os", "<host-os>"],
+    ["x-stainless-package-version", "0.112.1"],
+    ["x-stainless-retry-count", "0"],
+    ["x-stainless-runtime", "node"],
+    ["x-stainless-runtime-version", "<host-runtime-version>"],
+    ["x-stainless-timeout", "600"]
+  ],
+  "body": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 8000,
+    "system": [
+      {
+        "type": "text",
+        "text": "x-anthropic-billing-header: cc_version=2.1.233.76b; cc_entrypoint=cli; cch=00000;"
+      },
+      {
+        "type": "text",
+        "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "cache_control": {
+          "type": "ephemeral",
+          "ttl": "1h"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read package.json"
+      }
+    ],
+    "tools": [
+      {
+        "name": "read_file",
+        "description": "Read a file from disk.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path."
+            }
+          },
+          "required": ["path"]
+        }
+      },
+      {
+        "name": "list_dir",
+        "description": "List a directory.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": ["path"]
+        },
+        "cache_control": {
+          "type": "ephemeral",
+          "ttl": "1h"
+        }
+      }
+    ],
+    "temperature": 1,
+    "tool_choice": {
+      "type": "auto"
+    },
+    "metadata": {
+      "user_id": "<generated>"
+    }
+  }
+}

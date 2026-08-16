@@ -1,0 +1,66 @@
+{
+  "url": "https://api.anthropic.com/v1/messages?beta=true",
+  "headers": [
+    [
+      "anthropic-beta",
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,extended-cache-ttl-2025-04-11,web-search-2025-03-05,advisor-tool-2026-03-01"
+    ],
+    ["anthropic-dangerous-direct-browser-access", "true"],
+    ["anthropic-version", "2023-06-01"],
+    ["authorization", "<redacted>"],
+    ["content-type", "application/json"],
+    ["user-agent", "claude-cli/2.1.233 (external, cli)"],
+    ["x-app", "cli"],
+    ["x-claude-code-session-id", "<generated>"],
+    ["x-client-request-id", "<generated>"],
+    ["x-stainless-arch", "<host-arch>"],
+    ["x-stainless-lang", "js"],
+    ["x-stainless-os", "<host-os>"],
+    ["x-stainless-package-version", "0.112.1"],
+    ["x-stainless-retry-count", "0"],
+    ["x-stainless-runtime", "node"],
+    ["x-stainless-runtime-version", "<host-runtime-version>"],
+    ["x-stainless-timeout", "600"]
+  ],
+  "body": {
+    "model": "claude-opus-4-6",
+    "max_tokens": 8000,
+    "system": [
+      {
+        "type": "text",
+        "text": "x-anthropic-billing-header: cc_version=2.1.233.768; cc_entrypoint=cli; cch=00000;"
+      },
+      {
+        "type": "text",
+        "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "cache_control": {
+          "type": "ephemeral",
+          "ttl": "1h"
+        }
+      },
+      {
+        "type": "text",
+        "text": "# Text output (does not apply to tool calls)\nAssume users can't see most tool calls or thinking — only your text output. Before your first tool call, state in one sentence what you're about to do. While working, give short updates at key moments: when you find something, when you change direction, or when you hit a blocker. Brief is good — silent is not. One sentence per update is almost always enough.\n\nDon't narrate your internal deliberation. User-facing text should be relevant communication to the user, not a running commentary on your thought process. State results and decisions directly, and focus user-facing text on relevant updates for the user.\n\nWhen you do write updates, write so the reader can pick up cold: complete sentences, no unexplained jargon or shorthand from earlier in the session. But keep it tight — a clear sentence is better than a clear paragraph.\n\nEnd-of-turn summary: one or two sentences. What changed and what's next. Nothing else.\n\nMatch responses to the task: a simple question gets a direct answer, not headers and sections.\n\nIn code: default to writing no comments. Never write multi-paragraph docstrings or multi-line comment blocks — one short line max. Don't create planning, decision, or analysis documents unless the user asks for them — work from conversation context, not intermediate files.",
+        "cache_control": {
+          "type": "ephemeral",
+          "ttl": "1h"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ],
+    "thinking": {
+      "type": "adaptive"
+    },
+    "output_config": {
+      "effort": "high"
+    },
+    "metadata": {
+      "user_id": "<generated>"
+    }
+  }
+}
