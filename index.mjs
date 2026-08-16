@@ -63,13 +63,10 @@ import {
   compactSystemText,
   compactToolDescription,
   dedupeSystemBlocks,
-  getCachedCCPrompt,
   isTitleGeneratorSystemBlocks,
   normalizeSystemTextBlocks,
-  resetCachedCCPrompt,
   sanitizeSystemText,
   CLAUDE_CODE_IDENTITY_STRING,
-  SUBAGENT_CC_ANCHOR,
 } from "./lib/mimicry/system-prompt.mjs";
 import {
   ADAPTER_COUNT_TOKENS_PATHNAMES,
@@ -6375,13 +6372,6 @@ AnthropicAuthPlugin.__testing__ = {
   maybeApplySessionToolResultDedupe,
   // exposed for experimental.session.summarize integration tests
   runHaikuSessionSummarize,
-  get cachedCCPrompt() {
-    return getCachedCCPrompt();
-  },
-  resetCachedCCPrompt() {
-    resetCachedCCPrompt();
-  },
-  SUBAGENT_CC_ANCHOR,
   CLAUDE_CODE_IDENTITY_STRING,
   /** Test-only: drive the session turn counter so code paths gated on
    *  `sessionMetrics.turns >= N` can be exercised without a real SSE stream. */
