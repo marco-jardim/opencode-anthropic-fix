@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -266,5 +266,75 @@ describe("shared wire package rollback documentation", () => {
       /^import \{\n {2}BETA_REGISTRY_2_1_233,\n {2}buildClaudeCodeRequest,\n {2}buildClaudeCodeCountTokensRequest,\n {2}CLAUDE_CODE_2_1_233_PROFILE,\n {2}hasOneMillionContext,\n {2}isAdaptiveThinkingModel,\n {2}isClaude3Model,\n {2}isEligibleFor1MContext,\n {2}isFable5Model,\n {2}isHaikuModel,\n {2}isMythos5Model,\n {2}isOpus46Model,\n {2}isOpus47Model,\n {2}isOpus48Model,\n {2}supportsStructuredOutputs,\n {2}supportsWebSearch,\n\} from "@tormentalabs\/claude-code-wire-compat";$/m,
     );
     expect(provenance).toMatch(/static[^\n]*import|import[^\n]*static/i);
+  });
+});
+
+/**
+ * Collect every .mjs file under a directory, recursively, excluding colocated
+ * test files.
+ * @param {string} dir
+ * @returns {string[]}
+ */
+function collectProductionMjs(dir) {
+  /** @type {string[]} */
+  const found = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      found.push(...collectProductionMjs(full));
+    } else if (entry.endsWith(".mjs") && !entry.endsWith(".test.mjs")) {
+      found.push(full);
+    }
+  }
+  return found;
+}
+
+// Matches a real import of the package, static or dynamic, in either quote
+// style. It deliberately does NOT match a bare mention of the package name:
+// several modules name it in prose, and a comment is not a coupling.
+const packageImport = new RegExp(
+  String.raw`(?:from\s*|import\s*\(\s*)["']${packageName.replaceAll("/", String.raw`\/`)}["']`,
+);
+
+describe("shared wire package import seam", () => {
+  // THE SEAM IS THE ROLLBACK UNIT. docs/shared-package-provenance.md documents
+  // rollback as a code revert, and that procedure is only tractable because the
+  // dependency enters production code at exactly ONE point:
+  // lib/mimicry/wire-compat.mjs. The test above pins WHAT that file imports;
+  // this one pins that no OTHER production file imports the package at all.
+  //
+  // Without this guard the sixteen bindings enumerated above could be pulled
+  // directly from index.mjs or any lib module, and the single-file revert would
+  // silently stop being sufficient — the failure mode is a rollback that leaves
+  // live package calls behind, discovered during an incident rather than in CI.
+  //
+  // TESTS ARE OUT OF SCOPE ON PURPOSE. test/conformance/** and colocated
+  // *.test.mjs files import the package directly to compare its bare output
+  // against the plugin path; that is what makes them differential rather than
+  // circular, so constraining them here would defeat their point.
+  it("is imported by exactly one production file", () => {
+    const files = [
+      resolve(repositoryRoot, "index.mjs"),
+      resolve(repositoryRoot, "cli.mjs"),
+      ...collectProductionMjs(resolve(repositoryRoot, "lib")),
+    ];
+
+    const importers = files
+      .filter((file) => packageImport.test(readFileSync(file, "utf8")))
+      .map((file) => relative(repositoryRoot, file).replaceAll("\\", "/"))
+      .sort();
+
+    expect(importers).toEqual(["lib/mimicry/wire-compat.mjs"]);
+  });
+
+  it("recognizes both static and dynamic import forms", () => {
+    // The guard is only worth its runtime if it cannot be sidestepped by
+    // switching import style, so the pattern is exercised directly.
+    expect(packageImport.test(`import { x } from "${packageName}";`)).toBe(true);
+    expect(packageImport.test(`import { x } from '${packageName}';`)).toBe(true);
+    expect(packageImport.test(`const m = await import("${packageName}");`)).toBe(true);
+    expect(packageImport.test(`const m = await import( "${packageName}" );`)).toBe(true);
+    // A mention in prose is not a coupling.
+    expect(packageImport.test(`// see ${packageName} for the profile`)).toBe(false);
   });
 });
