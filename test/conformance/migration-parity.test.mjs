@@ -54,6 +54,7 @@
 // generated-path allowlist and the Stainless normalization) is lifted from
 // `test/conformance/golden-outgoing.test.mjs` on purpose — no new test infra.
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -87,10 +88,17 @@ vi.mock("../../lib/refresh-lock.mjs", () => ({
 // switch in index.mjs (adapter path vs legacy forge); `fast_mode` and
 // `custom_betas` are the two runtime flags that change the outgoing beta set
 // from outside the request body. See docs/plans/wire-compat-migration-baseline.md §1.
+// `adaptive_context` is OFF for every vector but 15. That is not cosmetic: with
+// `adaptive_context.enabled === false`, `resolveAdaptiveContext` (index.mjs:5165)
+// short-circuits to the pure `hasOneMillionContext(model)` predicate and never
+// reads or writes the module-level `adaptiveContextState`. So the sticky
+// escalation state vector 15 leaves behind cannot reach any other vector, in
+// either direction, regardless of execution order.
 const testConfig = vi.hoisted(() => ({
   signatureEmulation: true,
   fastMode: false,
   customBetas: [],
+  adaptiveContextOverride: {},
 }));
 
 vi.mock("../../lib/config.mjs", async (importOriginal) => {
@@ -106,7 +114,11 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
     custom_betas: [...testConfig.customBetas],
     fast_mode: testConfig.fastMode,
     idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
-    adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
+    adaptive_context: {
+      ...original.DEFAULT_CONFIG.adaptive_context,
+      enabled: false,
+      ...testConfig.adaptiveContextOverride,
+    },
     token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: false },
   });
 
@@ -185,12 +197,17 @@ function stubRequestEnv() {
   vi.stubEnv("CLAUDE_CODE_BACKGROUND", "");
   vi.stubEnv("CLAUDE_CODE_CONTAINER_ID", "");
   vi.stubEnv("CLAUDE_CODE_REMOTE_SESSION_ID", "");
+  // Truthy here would make `resolveAdaptiveContext` bail before the predicate
+  // (index.mjs:5170) and strip experimental betas — pinned explicitly so the
+  // baseline never depends on the developer's ambient environment.
+  vi.stubEnv("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "");
 }
 
 function resetTestConfig() {
   testConfig.signatureEmulation = true;
   testConfig.fastMode = false;
   testConfig.customBetas = [];
+  testConfig.adaptiveContextOverride = {};
 }
 
 /**
@@ -289,6 +306,31 @@ function normalizeOutgoing(outgoing) {
   return normalized;
 }
 
+/**
+ * Replaces any string longer than `limit` with `<large-text:LENGTH:SHA256-16>`.
+ *
+ * Only vector 15 opts in (`redactStringsLongerThan`). Its payload is ~640 KB of
+ * deterministic padding — needed to cross the 150K-token escalation threshold —
+ * and writing it verbatim would produce a 640 KB fixture that no reviewer can
+ * diff. The redaction does NOT weaken the comparison: the length and a SHA-256
+ * prefix are pinned, so any change to the padding (a single character, a
+ * truncation, a re-encode) changes the placeholder and fails the fixture. It is
+ * also applied strictly AFTER the two-drive determinism gate, which runs on the
+ * unredacted captures — so nondeterminism inside the large string still fails.
+ */
+function redactLongStrings(value, limit) {
+  if (typeof value === "string") {
+    if (value.length <= limit) return value;
+    const digest = createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16);
+    return `<large-text:${value.length}:${digest}>`;
+  }
+  if (Array.isArray(value)) return value.map((entry) => redactLongStrings(entry, limit));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactLongStrings(entry, limit)]));
+  }
+  return value;
+}
+
 /** Fixture-on-disk shape: headers become an ordered pair list. */
 function toFixture(normalized) {
   return {
@@ -329,6 +371,28 @@ function writeFixture(name, fixture) {
 
 const SIMPLE_MESSAGES = [{ role: "user", content: "Hello" }];
 const SIMPLE_SYSTEM = "You are a helpful assistant.";
+
+// Deterministic padding for the adaptive-escalation vector (15).
+//
+// The estimator is a flat 4-chars-per-token heuristic over system + message text
+// (lib/token-economy/transforms.mjs:85-125), so crossing the DEFAULT 150_000
+// `escalation_threshold` would need >600_000 chars of prompt. That is not
+// viable: the shared package rejects the request outright with
+// `ClaudeCodeWireError: INPUT_TOO_LARGE (maximumSize=1000000)` before any wire
+// is produced (measured — a 640_000-char body fails). So vector 15 lowers
+// `escalation_threshold` to 20_000 instead (a user-facing setting; 20_000 is
+// exactly the floor `parseConfig` clamps to, lib/config.test.mjs:581) and sends
+// ~100_000 chars ≈ 25_000 estimated tokens.
+//
+// The DECISION CODE exercised is identical either way — `resolveAdaptiveContext`
+// runs `isEligibleFor1MContext(model)` and the `estimatedTokens > threshold`
+// comparison regardless of the threshold's value. What this vector does not pin
+// is the literal 150_000 default, which is config policy, not a models.mjs
+// predicate, and therefore outside what Phase 3.1 can break.
+//
+// Fixed unit, fixed repeat count: nothing here is random or time-dependent.
+const ESCALATION_PADDING_UNIT = "The quick brown fox jumps over the lazy dog while auditing the request log.\n";
+const ESCALATION_PADDING = ESCALATION_PADDING_UNIT.repeat(Math.ceil(100_000 / ESCALATION_PADDING_UNIT.length));
 
 /**
  * The matrix. One entry == one fixture file. Adding a vector requires re-sealing
@@ -541,6 +605,38 @@ const VECTORS = [
       messages: SIMPLE_MESSAGES,
     },
   },
+  {
+    // NATURAL 1M escalation — the path vector 06 does NOT reach. Vector 06 pins
+    // the beta arriving via `custom_betas`, which bypasses the decision entirely.
+    // This one drives `resolveAdaptiveContext` (index.mjs:5163-5228, called at
+    // :2855) for real: `adaptive_context.enabled`, an eligible model
+    // (`isEligibleFor1MContext`), and a prompt over `escalation_threshold`.
+    // Cold start (`lastTransitionTurn === 0`, index.mjs:5217) skips the 2-turn
+    // hysteresis, so a single large request escalates within that same request.
+    //
+    // This covers the predicates Phase 3.1 deletes from lib/mimicry/models.mjs
+    // (`isEligibleFor1MContext`, `hasOneMillionContext`) through their real
+    // caller rather than through a config shortcut.
+    //
+    // MUST STAY LAST: escalation flips the module-level `adaptiveContextState`
+    // to `active: true` and it is never reset between drives. Other vectors are
+    // additionally immunized by `adaptive_context.enabled === false` (see the
+    // `testConfig` comment), so this is belt-and-braces — but the ordering makes
+    // the intent obvious to whoever adds vector 16.
+    name: "15-context-1m-adaptive-escalation",
+    url: MESSAGES_URL,
+    config: {
+      adaptiveContextOverride: { enabled: true, escalation_threshold: 20_000, deescalation_threshold: 10_000 },
+    },
+    redactStringsLongerThan: 4096,
+    expectBetaContains: "context-1m-2025-08-07",
+    body: {
+      model: "claude-sonnet-4-5",
+      max_tokens: 8000,
+      system: SIMPLE_SYSTEM,
+      messages: [{ role: "user", content: ESCALATION_PADDING }],
+    },
+  },
 ];
 
 describe("migration parity baseline", () => {
@@ -584,7 +680,16 @@ describe("migration parity baseline", () => {
       const nondeterministic = differingPaths(first, second);
       expect(nondeterministic, `non-deterministic outgoing fields in ${vector.name}`).toEqual([]);
 
-      const fixture = toFixture(first);
+      const fixture = toFixture(
+        vector.redactStringsLongerThan ? redactLongStrings(first, vector.redactStringsLongerThan) : first,
+      );
+
+      if (vector.expectBetaContains) {
+        const beta = fixture.headers.find(([name]) => name === "anthropic-beta")?.[1];
+        // Proves the beta came from the escalation DECISION, not from
+        // `custom_betas` — this vector sends none.
+        expect(beta, `${vector.name} must emit ${vector.expectBetaContains}`).toContain(vector.expectBetaContains);
+      }
 
       // Header pairs must be alphabetically ordered so the fixture diff is stable.
       const names = fixture.headers.map(([name]) => name);
