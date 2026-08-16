@@ -2,6 +2,52 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.3.0] — 2026-08-16
+
+Graduation release. The code is identical to `0.3.0-beta.0`, already published on the `beta` dist-tag; this release
+promotes the shared wire-compat adapter path to `latest`. The entry below documents the headline change the beta entry
+omitted, plus the dead-code removal that shipped in the same window.
+
+### Changed
+
+- **Outgoing request construction now flows through the shared `@tormentalabs/claude-code-wire-compat` package.** The
+  first-party `/v1/messages` turn no longer builds its Claude Code mimicry headers and body from the plugin's internal
+  implementation: `lib/mimicry/wire-compat.mjs` translates the host request into the package's
+  `ClaudeCodeRequestInput` and hands composition to `buildClaudeCodeRequest`, which owns the header set (including
+  `anthropic-beta` composition, the billing and identity blocks and canonical system-block composition), the body
+  shape and the model-capability derivation. The package is pinned to the exact registry version `0.1.0` — no `^`/`~`
+  range — and it is the reference implementation, derived from the genuine 2.1.195 client binary.
+  Plugin-owned policy is not lost: it is expressed through the package's seams rather than through a fork —
+  `additionalBetas`/`suppressBetas` re-add the betas the plugin deliberately keeps (see
+  `docs/mimicry/wire-compat-divergences.md`), `capabilities` downgrades `adaptiveThinking` for
+  `OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING`, `suppressBillingBlock`/`suppressIdentityBlock` serve the lean
+  system-prompt mode, and `cacheControl`, `betaOverrides`, `metadataOverrides`, `extraHeaders`/`extraHeaderPolicy` and
+  an emergency `profileOverride` (`OPENCODE_ANTHROPIC_PROFILE_OVERRIDE`) cover the rest. The adapter itself keeps four
+  narrow host-tolerance behaviours the package does not owe: dotted model version separators are rewritten to dashed
+  before classification (`claude-opus-4.7` → `claude-opus-4-7`, vendor prefixes untouched), a bare-string `system` is
+  wrapped instead of dropped, a malformed `tools` value raises instead of silently producing a toolless request,
+  internal stainless-helper markers are stripped from `tools`/`messages`, and `cache_control` on
+  `thinking`/`redacted_thinking` blocks is passed through verbatim (any mutation makes the real API answer 400).
+  Guard-rails: `test/conformance/shared-package-parity.test.mjs` compares both construction paths byte-for-byte
+  (URL, method, headers, body) after normalising per-run nondeterminism, `golden-outgoing.test.mjs` pins the exact
+  bytes of the live adapter path, and `wire-compat-input-coverage.test.mjs` fails when the package grows an input
+  field the translator does not map. Provenance for the pin is recorded in `docs/shared-package-provenance.md`.
+
+### Removed
+
+- **The unreachable context-hint machinery** (`2bc3cce`). The plugin stopped advertising the
+  `context-hint-2026-04-09` beta and stopped emitting the `context_hint` body field on both paths, so the server can
+  never reject a hint the client does not announce — and everything that reacted to such a rejection was dead code.
+  Out went `lib/context-hint-persist.mjs` and its import, `contextHintState` and the persisted-flag bootstrap,
+  `_disableCtxHint`, the kill-switch pair that deleted the beta from the merged set and from the latch, the 400/409/529
+  branches matching an error body that mentions context-hint, and the write-only `compactionsApplied` counter
+  (`index.mjs`, −142/+29 lines). Two tests were deleted because they assert only the removed behaviour:
+  `test/context-hint-persist.test.mjs` and the 400-rejection latch case in `test/conformance/regression.test.mjs`,
+  whose collateral assertions are already covered by `context-hint-gating.test.mjs`. Deliberately kept: the 422/424
+  compaction branch (it reacts to the response status, not to an error body), the `context-hint` guard in the
+  custom-beta retry (a live guard in a live handler), `lib/config.mjs`'s knob normalisation and one-shot deprecation
+  warning (the contract for configs already setting it), and `lib/mimicry/context-hint-threshold.mjs`.
+
 ## [0.3.0-beta.0] — 2026-07-28
 
 ### Changed
