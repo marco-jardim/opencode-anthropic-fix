@@ -10,7 +10,7 @@ import {
   parseOAuthCallback,
   refreshToken,
 } from "./lib/oauth.mjs";
-import { CLAUDE_CODE_NPM_LATEST_URL, CLAUDE_CODE_BUILD_TIME, resolveBetaShortcut } from "./lib/request-headers.mjs";
+import { resolveBetaShortcut } from "./lib/betas.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, getConfigDir } from "./lib/config.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
@@ -5479,6 +5479,12 @@ function writeCacheStatsFile(usage, model, hitRate) {
 
 // --- Phase 5: Minimal telemetry emulation ("Silent Observer") ---
 
+// Host telemetry payload only (ClaudeCodeInternalEvent env block) — never sent
+// on /v1/messages, so it is not part of the wire-compat surface.
+// Real build markers extracted from the 2.1.195 native binary (Bun-embedded JS):
+// `BUILD_TIME:"2026-06-26T01:00:56Z"`.
+const CLAUDE_CODE_BUILD_TIME = "2026-06-26T01:00:56Z";
+
 class TelemetryEmitter {
   #enabled = false;
   #sent = false;
@@ -5922,6 +5928,9 @@ function getAccountIdentifier(account) {
  * @param {string} value
  * @returns {string}
  */
+
+// Host update polling only (npm registry lookup), not mimicry.
+const CLAUDE_CODE_NPM_LATEST_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 
 /**
  * Resolve latest claude-code package version from npm registry.
