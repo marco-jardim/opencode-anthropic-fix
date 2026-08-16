@@ -814,10 +814,10 @@ describe("legacy request path", () => {
     expect(adapter.body).toContain("x-anthropic-billing-header");
   });
 
-  // PREMISE FLIP — READ BEFORE EDITING THE THREE ASSERTIONS BELOW.
+  // PREMISE FLIP — READ BEFORE EDITING THE ASSERTION BELOW.
   //
-  // Until the count-tokens migration these tests asserted the opposite of what
-  // they assert now. Their premise was "the shared package has no count_tokens
+  // Until the count-tokens migration this block asserted the opposite of what
+  // it asserts now. Its premise was "the shared package has no count_tokens
   // surface", so /v1/messages/count_tokens was pinned to the legacy forge on
   // BOTH the URL and the body, and the package was pinned to never emit
   // `token-counting-2024-11-01`. That premise is dead: the package exposes
@@ -826,8 +826,19 @@ describe("legacy request path", () => {
   // own body builder. The plugin now routes every count turn through it while
   // signature emulation is on.
   //
+  // WHERE THE COUNT WIRE IS PINNED. The three emulation-ON tests that used to
+  // live here — URL + body keys, the filtered beta set with the Claude Code
+  // user-agent and stainless version, and the absent system/metadata/max_tokens
+  // — were byte-level pins of a single request, which is exactly what a golden
+  // fixture is for. They now live in test/fixtures/golden/outgoing-count.json,
+  // asserted end to end through the real interceptor by
+  // test/conformance/golden-outgoing-count.test.mjs. Duplicating them here
+  // meant two places to recalibrate on every package release; the routing
+  // assertion below is all this file still needs, because parity is about the
+  // package-vs-legacy differential and not about the wire's exact bytes.
+  //
   // `_useAdapter` is consequently false on ONE route, not two: signature
-  // emulation off. That is what the fourth test below guards, and it is now the
+  // emulation off. That is what the second test below guards, and it is now the
   // only genuinely independent count_tokens differential in this file.
   it("routes count_tokens through the package's own count surface", async () => {
     testPolicy.signature = true;
@@ -840,61 +851,13 @@ describe("legacy request path", () => {
     // The URL is still transformRequestUrl's, NOT `built.url`: index.mjs
     // discards the package's pinned endpoint so a custom ANTHROPIC_BASE_URL or
     // proxy survives. Against the default base the two happen to agree, which
-    // is precisely why the body is what proves the routing below.
+    // is precisely why the body is what proves the routing.
     expect(String(existing.url)).toBe("https://api.anthropic.com/v1/messages/count_tokens?beta=true");
-    // The package's count body builder emits exactly these three keys. The
-    // legacy forge would have emitted `max_tokens`, `system` and `metadata` too.
+    // The package's count body builder emits exactly these three keys; the
+    // legacy forge below emits `max_tokens`, `system` and `temperature`
+    // instead. One key set apart from the other is the whole differential —
+    // the values are the golden's business.
     expect(Object.keys(JSON.parse(existing.body))).toEqual(["model", "messages", "tools"]);
-  });
-
-  it("emits the package's filtered count beta set, not the legacy one", async () => {
-    testPolicy.signature = true;
-    const existing = await captureExistingRequest(
-      vi.fn(() => Promise.resolve(makeSuccessResponse())),
-      HOST_BODY,
-      "/v1/messages/count_tokens",
-    );
-
-    // MEASURED from the package, not asserted from first principles. Two things
-    // are load-bearing here:
-    //  * `claude-code-20250219` LEADS. On the legacy forge `oauth-2025-04-20`
-    //    led, so the order alone still tells the two implementations apart;
-    //  * `filterCountTokensBetas` strips everything upstream does not send on a
-    //    count turn — prompt-caching-scope, extended-cache-ttl, web-search,
-    //    advisor-tool, redact-thinking and thinking-token-count are all gone,
-    //    including the ones the plugin pushed in through `additionalBetas`.
-    //    `token-counting-2024-11-01` is appended by the package itself.
-    expect(new Headers(existing.headers).get("anthropic-beta")).toBe(
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01",
-    );
-    // The full Claude Code header set, not the three-header minimal one.
-    expect(new Headers(existing.headers).get("user-agent")).toBe("claude-cli/2.1.233 (external, cli)");
-    expect(new Headers(existing.headers).get("x-stainless-package-version")).toBe("0.112.1");
-  });
-
-  // Upstream's count turn carries no system prompt, no metadata and no token
-  // budget: `buildCountTokensBody` emits `{model, messages, tools}` and nothing
-  // else. Adopting the package means adopting that, so the forged Claude Code
-  // system prefix and the correlation `metadata.user_id` the legacy path used to
-  // send on this route are GONE. Pinned as a deliberate wire change.
-  it("emits the package's count body: no system, no metadata, no max_tokens", async () => {
-    testPolicy.signature = true;
-    const existing = await captureExistingRequest(
-      vi.fn(() => Promise.resolve(makeSuccessResponse())),
-      HOST_BODY,
-      "/v1/messages/count_tokens",
-    );
-    const parsed = JSON.parse(existing.body);
-
-    expect(parsed.system).toBeUndefined();
-    expect(parsed.metadata).toBeUndefined();
-    expect(parsed.max_tokens).toBeUndefined();
-    expect(existing.body).not.toContain("x-anthropic-billing-header");
-    expect(parsed.model).toBe(HOST_BODY.model);
-    expect(parsed.messages).toEqual(HOST_BODY.messages);
-    // `tools` is always present, empty when the host sent none, because the
-    // package normalizes the count body's tool list rather than omitting it.
-    expect(parsed.tools).toEqual([]);
   });
 
   // The remaining count_tokens differential: emulation off keeps the legacy

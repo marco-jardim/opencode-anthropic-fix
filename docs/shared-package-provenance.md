@@ -112,6 +112,13 @@ The `0.1.0` era pinned the profile as a side effect: `0.1.0`'s default was `clau
 moving to `0.3.0` moved the wire to `claude-code-2.1.233-sdk-0.112.1`. That coupling is the reason
 the specifier policy and the profile policy are documented together.
 
+**0.4.0 (plugin 0.6.0).** Picked up by `npm update` under the same `latest` specifier — no
+`package.json` change, lock only. It adds `extraHeaderPolicy` to `ClaudeCodeCountTokensInput`, which
+the plugin adopted immediately: `toClaudeCodeCountTokensInput` now sends
+`extraHeaderPolicy: "dropConflicting"` instead of reproducing the policy plugin-side against three
+mirrored header-ownership lists, and those mirrors were deleted. The count wire is byte-identical
+across the bump. See `docs/mimicry/wire-compat-divergences.md`.
+
 ## Verify the dependency
 
 ```bash

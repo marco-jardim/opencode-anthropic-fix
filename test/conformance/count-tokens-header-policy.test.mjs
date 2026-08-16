@@ -1,35 +1,33 @@
 /**
- * Drift guard for the header-ownership lists the plugin MIRRORS from the shared
- * package.
+ * Pass-through guard for the count-tokens extra-header policy.
  *
- * WHY THESE MIRRORS EXIST. `ClaudeCodeCountTokensInput` is a sixteen-key
- * `Pick<ClaudeCodeRequestInput, ...>` and `extraHeaderPolicy` is NOT one of the
- * sixteen. `validateCountTokensInput` runs `assertExactKeys`, so passing the
- * policy is `INVALID_INPUT` rather than an ignored key. The count surface
- * therefore always resolves extra headers under `strict`, where the first host
- * header the package owns raises `DUPLICATE_HEADER` (a canonical name) or
- * `FORBIDDEN_HEADER` (a hop-by-hop or credential name) and nothing reaches the
- * wire at all. The main turn opts out of that with
- * `extraHeaderPolicy: "dropConflicting"`; the count turn cannot, so
- * `dropConflictingExtraHeaders` in lib/mimicry/wire-compat.mjs reproduces the
- * policy plugin-side against three mirrored lists.
+ * WHAT THIS PINS. `ClaudeCodeCountTokensInput` accepts `extraHeaderPolicy`
+ * since wire-compat 0.4.0, so the plugin no longer reproduces the package's
+ * `dropConflicting` policy against mirrored header-ownership lists — it asks
+ * the package for it, exactly like the main turn does through
+ * `buildAdapterTransport`. The three mirrors and their drift guards died with
+ * that seam; what survives is the seam itself:
  *
- * A mirror is a liability the moment it stops matching its source. These tests
- * assert the lists against the package's REAL behaviour rather than against the
- * package's source text, so a package release that renames, adds or removes an
- * owned header fails here instead of failing in production as a count turn that
- * throws (over-narrow mirror) or a count turn that silently drops a host header
- * it should have forwarded (over-broad mirror).
+ *   (a) `toClaudeCodeCountTokensInput` emits
+ *       `extraHeaderPolicy: "dropConflicting"`;
+ *   (b) the installed package ACCEPTS that key — `validateCountTokensInput`
+ *       runs `assertExactKeys`, so a package that dropped the key from the pick
+ *       would fail here with `INVALID_INPUT` instead of failing in production
+ *       as a count turn that throws on the first host header;
+ *   (c) end to end: a host header the package owns does not reach the wire
+ *       twice, a header it does not own is forwarded verbatim, and a forbidden
+ *       (hop-by-hop / credential) name is dropped rather than raising.
+ *
+ * Under the package default (`strict`) the first owned host header raises
+ * `DUPLICATE_HEADER` or `FORBIDDEN_HEADER` and nothing reaches the wire at all.
+ * The plugin forwards a heterogeneous host header map — the opencode SDK alone
+ * sends `content-type` and `accept` — so (b) and (c) are the difference between
+ * a working count turn and none.
  */
 
 import { describe, it, expect } from "vitest";
-import { buildClaudeCodeCountTokensRequest, ClaudeCodeWireError } from "@tormentalabs/claude-code-wire-compat";
-import {
-  PACKAGE_CANONICAL_HEADER_NAMES,
-  PACKAGE_FORBIDDEN_HEADER_NAMES,
-  PACKAGE_FORBIDDEN_HEADER_PREFIXES,
-  toClaudeCodeCountTokensInput,
-} from "../../lib/mimicry/wire-compat.mjs";
+import { buildClaudeCodeCountTokensRequest } from "@tormentalabs/claude-code-wire-compat";
+import { toClaudeCodeCountTokensInput } from "../../lib/mimicry/wire-compat.mjs";
 
 const RUNTIME = Object.freeze({
   sessionId: "11111111-1111-4111-8111-111111111111",
@@ -53,96 +51,88 @@ const BASE_INPUT = Object.freeze({
 });
 
 /**
- * Build a count request carrying exactly one extra header and report the wire
- * error code, or `null` when the package accepted it.
+ * The package emits headers as an ordered pair list, not a `Headers`. Kept as
+ * pairs here so a duplicate emission is observable rather than collapsed.
  *
+ * @param {readonly (readonly [string, string])[]} headers
  * @param {string} name
- * @returns {Promise<string | null>}
  */
-async function conflictCodeFor(name) {
-  try {
-    await buildClaudeCodeCountTokensRequest({ ...BASE_INPUT, extraHeaders: [[name, "probe-value"]] });
-    return null;
-  } catch (error) {
-    if (!(error instanceof ClaudeCodeWireError)) throw error;
-    return error.code;
-  }
+function headerValues(headers, name) {
+  return [...headers].filter(([header]) => header.toLowerCase() === name).map(([, value]) => value);
 }
 
-describe("count-tokens extra-header policy mirrors the package", () => {
-  it("rejects every mirrored canonical name with DUPLICATE_HEADER", async () => {
-    const observed = await Promise.all(
-      [...PACKAGE_CANONICAL_HEADER_NAMES].map(async (name) => [name, await conflictCodeFor(name)]),
-    );
+/**
+ * Map a host body + host header map through the plugin's count mapper.
+ *
+ * @param {readonly (readonly [string, string])[]} extraHeaders
+ */
+function mapCountInput(extraHeaders) {
+  return toClaudeCodeCountTokensInput(
+    { model: BASE_INPUT.model, messages: BASE_INPUT.messages },
+    {
+      accessToken: BASE_INPUT.accessToken,
+      clientRequestId: BASE_INPUT.clientRequestId,
+      runtime: RUNTIME,
+      extraHeaders,
+    },
+  );
+}
 
-    // OVER-BROAD guard. A name the plugin drops but the package would have
-    // accepted is a host header silently withheld from the wire.
-    expect(Object.fromEntries(observed)).toEqual(
-      Object.fromEntries([...PACKAGE_CANONICAL_HEADER_NAMES].map((name) => [name, "DUPLICATE_HEADER"])),
-    );
+describe("count-tokens extra-header policy is delegated to the package", () => {
+  it("asks the package for the dropConflicting policy", () => {
+    const input = mapCountInput([["accept", "application/json"]]);
+
+    expect(input.extraHeaderPolicy).toBe("dropConflicting");
   });
 
-  it("rejects every mirrored forbidden name and prefix", async () => {
-    const names = [
-      ...PACKAGE_FORBIDDEN_HEADER_NAMES,
-      ...PACKAGE_FORBIDDEN_HEADER_PREFIXES.map((prefix) => `${prefix}probe`),
-    ];
-    const observed = await Promise.all(names.map(async (name) => [name, await conflictCodeFor(name)]));
+  it("is accepted by the installed package rather than rejected as an unknown key", async () => {
+    // `assertExactKeys` guard: a package release that removed `extraHeaderPolicy`
+    // from the count pick would raise INVALID_INPUT here.
+    const built = await buildClaudeCodeCountTokensRequest(mapCountInput([["accept", "application/json"]]));
 
-    // `x-api-key` is both denylisted package-side and stripped plugin-side by
-    // `ADAPTER_STRIPPED_HOST_HEADERS`, so it is covered twice on purpose.
-    expect(Object.fromEntries(observed)).toEqual(Object.fromEntries(names.map((name) => [name, "FORBIDDEN_HEADER"])));
-  });
-
-  it("covers every header the package actually emits on a count build", async () => {
-    // OVER-NARROW guard, and the one that catches a package release ADDING a
-    // canonical header: whatever the package composes for itself is a name the
-    // plugin must never forward.
-    const built = await buildClaudeCodeCountTokensRequest(BASE_INPUT);
-    const emitted = [...built.headers].map(([name]) => name.toLowerCase());
-
-    expect(emitted.length).toBeGreaterThan(0);
-    expect(emitted.filter((name) => !PACKAGE_CANONICAL_HEADER_NAMES.has(name))).toEqual([]);
+    expect(headerValues(built.headers, "accept")).toEqual(["application/json"]);
   });
 
   it("forwards a host header the package does not own", async () => {
-    // The mirrors must not degrade into "drop everything". `accept` is sent by
+    // The policy must not degrade into "drop everything". `accept` is sent by
     // the opencode SDK and is neither canonical nor denylisted.
-    expect(await conflictCodeFor("accept")).toBeNull();
-
-    const input = toClaudeCodeCountTokensInput(
-      { model: BASE_INPUT.model, messages: BASE_INPUT.messages },
-      {
-        accessToken: BASE_INPUT.accessToken,
-        clientRequestId: BASE_INPUT.clientRequestId,
-        runtime: RUNTIME,
-        extraHeaders: [
-          ["accept", "application/json"],
-          ["content-type", "application/json"],
-          ["x-forwarded-for", "10.0.0.1"],
-          ["host", "proxy.internal"],
-        ],
-      },
+    const built = await buildClaudeCodeCountTokensRequest(
+      mapCountInput([
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+        ["x-forwarded-for", "10.0.0.1"],
+        ["host", "proxy.internal"],
+      ]),
     );
 
-    expect(input.extraHeaders).toEqual([["accept", "application/json"]]);
+    expect(headerValues(built.headers, "accept")).toEqual(["application/json"]);
+    // The canonical name the package owns is emitted exactly once, with the
+    // package's own value — the host copy did not duplicate or override it.
+    expect(headerValues(built.headers, "content-type")).toEqual(["application/json"]);
+    // Forbidden names are dropped, not raised on, and never reach the wire.
+    expect(headerValues(built.headers, "host")).toEqual([]);
+    expect(headerValues(built.headers, "x-forwarded-for")).toEqual([]);
   });
 
-  it("omits extraHeaders entirely when every host header is dropped", async () => {
-    // `undefined` rather than `[]`: the package's own default is an empty list,
-    // and emitting the key with an empty array would be a gratuitous divergence
-    // from the input a consumer that forwards nothing would produce.
-    const input = toClaudeCodeCountTokensInput(
-      { model: BASE_INPUT.model, messages: BASE_INPUT.messages },
-      {
-        accessToken: BASE_INPUT.accessToken,
-        clientRequestId: BASE_INPUT.clientRequestId,
-        runtime: RUNTIME,
-        extraHeaders: [["content-type", "application/json"]],
-      },
+  it("reports the dropped names in the build evidence", async () => {
+    const built = await buildClaudeCodeCountTokensRequest(
+      mapCountInput([
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+        ["host", "proxy.internal"],
+      ]),
     );
 
-    expect(input).not.toHaveProperty("extraHeaders");
-    await expect(buildClaudeCodeCountTokensRequest(input)).resolves.toBeDefined();
+    expect(built.evidence.droppedExtraHeaderNames).toEqual(["content-type", "host"]);
+  });
+
+  it("builds when every host header is dropped", async () => {
+    // The all-dropped case used to be special-cased plugin-side by omitting the
+    // key entirely; under the seam the package resolves it to an empty set and
+    // the build still succeeds.
+    const built = await buildClaudeCodeCountTokensRequest(mapCountInput([["content-type", "application/json"]]));
+
+    expect(built.evidence.droppedExtraHeaderNames).toEqual(["content-type"]);
+    expect(headerValues(built.headers, "content-type")).toEqual(["application/json"]);
   });
 });

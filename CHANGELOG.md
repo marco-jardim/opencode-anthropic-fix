@@ -2,6 +2,56 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.6.0] — 2026-08-16
+
+Seam-adoption release. `0.5.0` shipped the count-tokens surface with a plugin-side reimplementation of the package's
+extra-header policy, because the count input did not accept `extraHeaderPolicy`. wire-compat `0.4.0` accepts it. The
+reimplementation and its drift guard are gone; the wire is unchanged.
+
+### Changed
+
+- **`toClaudeCodeCountTokensInput` asks the package for the `dropConflicting` extra-header policy.**
+  `lib/mimicry/wire-compat.mjs` adds `extraHeaderPolicy` to the count pick and sets it to `"dropConflicting"`, exactly
+  as the main turn sets it on the transport in `lib/mimicry/adapter-input.mjs`. Under the package default (`strict`)
+  the first host header the package owns raises `DUPLICATE_HEADER` or `FORBIDDEN_HEADER` and nothing reaches the wire,
+  and the plugin forwards the host header map — the opencode SDK alone sends `content-type` and `accept` — so the
+  policy is what makes a count turn possible at all. It is now resolved package-side, where the ownership lists
+  actually live.
+- **The count wire is byte-identical to `0.5.0`.** The package's native `dropConflicting` computes the same
+  kept/dropped set the plugin's filter computed: same 17 header names and values, same
+  `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01`,
+  same `claude-cli/2.1.233 (external, cli)`, same `x-stainless-package-version: 0.112.1`, same `{model, messages, tools}`
+  body. Verified by capturing a deterministic count build before and after the change and diffing it, and pinned going
+  forward by the golden below.
+- **`@tormentalabs/claude-code-wire-compat` resolves to `0.4.0`** in `package-lock.json`, picked up by `npm update`
+  under the unchanged `latest` specifier. No `package.json` dependency edit; see `docs/shared-package-provenance.md`.
+
+### Added
+
+- **`test/fixtures/golden/outgoing-count.json`** and `test/conformance/golden-outgoing-count.test.mjs` — the
+  count-tokens byte-shape golden, mirroring the existing `/v1/messages` golden: two fresh interceptor runs are diffed
+  to calibrate the generated values, the host-derived Stainless headers are asserted against the live process before
+  being normalized, and everything else is compared literally. The count body has no `metadata.user_id`, so the
+  generated set is only `x-claude-code-session-id` and `x-client-request-id`. This fixture is now the single source of
+  truth for the count wire.
+
+### Removed
+
+- **The three header-ownership mirrors and their drift guard.** `PACKAGE_CANONICAL_HEADER_NAMES` (22 names),
+  `PACKAGE_FORBIDDEN_HEADER_NAMES` (11), `PACKAGE_FORBIDDEN_HEADER_PREFIXES` and `dropConflictingExtraHeaders` are
+  deleted from `lib/mimicry/wire-compat.mjs`. Their reason for existing was that `ClaudeCodeCountTokensInput` was a
+  sixteen-key `Pick` without `extraHeaderPolicy` and `validateCountTokensInput` runs `assertExactKeys`, so passing the
+  key was `INVALID_INPUT` rather than a no-op. `0.4.0` closed that gap, and a mirror that no longer has to exist is
+  pure drift risk. The three tests in `test/conformance/count-tokens-header-policy.test.mjs` that probed the mirrors
+  died with them; the file now pins the seam instead — that the mapper emits the policy, that the installed package
+  still accepts the key (an `assertExactKeys` regression surfaces here as `INVALID_INPUT` rather than as a throwing
+  count turn in production), and the end-to-end behaviour, including the `evidence.droppedExtraHeaderNames` report the
+  package emits under `dropConflicting`.
+- **Three count assertions in `test/conformance/shared-package-parity.test.mjs`** — the emulation-ON URL + body-keys,
+  beta-set/user-agent/stainless-version and no-system/metadata/max_tokens tests were byte-level pins of one request,
+  which is what the new golden is for; keeping both meant recalibrating two places on every package bump. The routing
+  differential and the emulation-OFF legacy-forge test are untouched.
+
 ## [0.5.0] — 2026-08-16
 
 Second-surface release. `0.3.0` moved the `/v1/messages` turn into the shared wire-compat package and left

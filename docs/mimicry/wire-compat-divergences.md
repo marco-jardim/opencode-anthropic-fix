@@ -269,24 +269,32 @@ rather than by `headers.mjs`:
 **Header names.** Unchanged — both constructions emit the same 17 names, verified by diffing
 `buildRequestHeaders` against a count build. Only values move.
 
-### The header-ownership mirrors, and why they exist
+### The count-tokens extra-header policy
 
-`ClaudeCodeCountTokensInput` is a sixteen-key `Pick<ClaudeCodeRequestInput, ...>` and `extraHeaderPolicy` is not one
-of the sixteen. `validateCountTokensInput` runs `assertExactKeys`, so passing it is `INVALID_INPUT` rather than an
-ignored key — the count surface always resolves extra headers under `strict`, where the first host header the package
-owns raises `DUPLICATE_HEADER` or `FORBIDDEN_HEADER` and nothing reaches the wire. The plugin forwards the host header
-map, so without a filter every count turn would throw.
+Under the package default (`strict`) the first host header the package owns raises `DUPLICATE_HEADER` or
+`FORBIDDEN_HEADER` and nothing reaches the wire. The plugin forwards the host header map — the opencode SDK alone
+sends `content-type` and `accept` — so a count turn under `strict` would simply throw.
 
-`dropConflictingExtraHeaders` (`lib/mimicry/wire-compat.mjs`) therefore reproduces the package's `dropConflicting`
-policy plugin-side, against three exported mirrors: `PACKAGE_CANONICAL_HEADER_NAMES` (22 names),
-`PACKAGE_FORBIDDEN_HEADER_NAMES` (11) and `PACKAGE_FORBIDDEN_HEADER_PREFIXES` (`proxy-`, `x-forwarded-`).
+Since wire-compat **0.4.0** the count surface takes `extraHeaderPolicy?: "strict" | "dropConflicting"`, so
+`toClaudeCodeCountTokensInput` (`lib/mimicry/wire-compat.mjs`) sets `extraHeaderPolicy: "dropConflicting"` exactly as
+the main turn sets it on the transport, and the package resolves ownership conflicts itself. Only OWNERSHIP conflicts
+are dropped: header syntax is still validated package-side, and a caller duplicating one of its OWN extra headers
+still raises `DUPLICATE_HEADER`. The names the package dropped come back as `evidence.droppedExtraHeaderNames`
+(the key is absent under `strict`).
 
-A mirror is a liability the moment it stops matching its source, so
-`test/conformance/count-tokens-header-policy.test.mjs` asserts all three against the package's REAL behaviour rather
-than against its source text: every mirrored name is probed one at a time and must produce the expected error code
-(over-broad guard), every header the package emits on a bare count build must be in the canonical mirror (over-narrow
-guard, this is the one that catches a package release ADDING a header), and a header the package does not own must
-still be forwarded.
+**Historical note.** Before 0.4.0 `ClaudeCodeCountTokensInput` was a sixteen-key `Pick<ClaudeCodeRequestInput, ...>`
+that excluded `extraHeaderPolicy`, and `validateCountTokensInput` runs `assertExactKeys`, so passing the key was
+`INVALID_INPUT` rather than an ignored no-op. The plugin therefore carried `dropConflictingExtraHeaders` and three
+exported mirrors of the package's header-ownership lists (`PACKAGE_CANONICAL_HEADER_NAMES`,
+`PACKAGE_FORBIDDEN_HEADER_NAMES`, `PACKAGE_FORBIDDEN_HEADER_PREFIXES`), plus a drift guard asserting each mirror
+against the package's real behaviour. All of it was deleted on the 0.4.0 adoption; the wire is byte-identical, because
+the package's native `dropConflicting` resolves to the same kept/dropped set the mirrors computed.
+
+`test/conformance/count-tokens-header-policy.test.mjs` now pins the seam instead of the mirrors: that the mapper emits
+the policy, that the installed package still ACCEPTS the key (an `assertExactKeys` regression would surface as
+`INVALID_INPUT` here rather than as a throwing count turn in production), and the end-to-end behaviour — an owned
+header is not duplicated, an unowned one is forwarded, a forbidden one is dropped without raising, and the dropped
+names appear in the evidence.
 
 ## Divergences that the package has already closed
 
