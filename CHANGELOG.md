@@ -2,10 +2,14 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
-## [Unreleased]
+## [1.0.0] — 2026-08-16
 
-Phase 2.2 of the wire-compat consolidation. The plugin had TWO request constructions and picked between them per
-request; it now has one, and "signature emulation off" stopped meaning "less mimicry".
+The wire-compat consolidation, complete. The plugin no longer maintains an independent implementation of Claude Code
+protocol composition: headers, body shape, system prefix, beta lists, URL, model queries and protocol constants all
+come from `@tormentalabs/claude-code-wire-compat` through one seam. It had TWO request constructions and picked
+between them per request; it now has one, and "signature emulation off" stopped meaning "less mimicry". `1.0.0`
+because the mimicry surface is no longer this repo's to drift — what remains host-side is host policy by design,
+enumerated in `docs/mimicry/wire-compat-divergences.md`.
 
 ### BREAKING
 
@@ -50,7 +54,37 @@ request; it now has one, and "signature emulation off" stopped meaning "less mim
   request with a DIFFERENT fingerprint on the wire mid-session. It is now a hard error naming the endpoint and the
   defect. Endpoints the package has no surface for (files, models, gateway prefixes) are unaffected.
 
+- **The public model predicate re-exports answer from the package's catalogue.** `isFable5Model`, `isMythos5Model`
+  and `isAdaptiveThinkingModel` (re-exported from `index.mjs`) were regex matches over the model string; they are now
+  the package's catalogue predicates. The catalogue matches model IDENTIFIERS, so inputs the old regexes accepted no
+  longer match: prefix-less fragments such as `"opus-4-7"`, and underscore separators in place of hyphens. Callers
+  passing a full model identifier see no change. This is the intended narrowing — the regexes were a second,
+  divergence-prone model surface.
+
+### Changed
+
+- **All Claude Code protocol composition is sourced from the shared package.** Headers, body shape, system prefix,
+  beta lists, URL, model queries and protocol constants come from
+  `@tormentalabs/claude-code-wire-compat@0.5.0`, consumed exclusively through `lib/mimicry/wire-compat.mjs`. That
+  seam is the only import site (guarded by `test/conformance/package-dependency-policy.test.mjs`) and it BINDS the
+  emulated profile — `isEligibleFor1MContextWire` passes `WIRE_PROFILE` rather than letting the package fall back to
+  its own `DEFAULT_PROFILE`, so eligibility follows the client version being emulated and a package bump cannot move
+  the emulated identity silently.
+
 ### Removed
+
+- **`lib/request-headers.mjs`.** The plugin's own table of Claude Code version literals, user agents, SDK versions and
+  beta-flag sets. Every value it held is now derived from the package's profile; nothing needs hand-editing on a
+  client bump. `test/conformance/request-headers-retired.test.mjs` and
+  `test/conformance/version-literals-retired.test.mjs` keep it from growing back.
+
+- **`lib/mimicry/models.mjs`.** The plugin's model regexes, replaced by the package's catalogue predicates (see
+  BREAKING above). `test/conformance/model-regex-retired.test.mjs` fails on a re-introduced model regex.
+
+- **Claude Code prompt mimicry in `lib/mimicry/system-prompt.mjs`.** Composing the canonical prefix — the attribution
+  header, the identity string, their order and their once-only guarantee — belongs to the package. What stays is the
+  cache-scoping half (`splitSystemCacheScopes`), which depends on plugin-side `cache_policy` and role resolution the
+  package cannot see.
 
 - **The beta latch.** `betaLatchState` and the ~50-line merge block that ran on every request are gone, together with
   the two `/anthropic set` handlers that dirtied it. The latch existed to avoid server-side cache-key churn by never
@@ -60,6 +94,21 @@ request; it now has one, and "signature emulation off" stopped meaning "less mim
   all 15 migration-parity vectors stay byte-identical with no re-seal. The session-rejected-beta eviction
   (`sessionRejectedBetas` -> `_sessionFilteredCustomBetas`) is a separate mechanism, still active, and is what actually
   reaches the wire.
+
+### Added
+
+- **A permanent wire-baseline conformance suite.** `test/conformance/wire-baseline.test.mjs` — 15 sealed vectors
+  pinning the outgoing bytes. It replaces the migration-era plugin-vs-package differential, which became circular the
+  moment the plugin started consuming the package for the same bytes. A fixture diff on a package bump is a wire
+  change to be justified vector by vector, never a routine re-seal; the procedure is in the test's header.
+
+- **Governance guards.** `request-headers-retired`, `model-regex-retired`, `version-literals-retired`, and the
+  import-seam assertions in `package-dependency-policy` — each one fails on the specific way the deleted
+  implementation could grow back.
+
+- **`lib/betas.mjs`.** Host beta policy, separated from the wire. The package owns which betas go out; this module
+  owns the shorthand aliases users type in config and the mapping from them. That vocabulary is a plugin affordance
+  with no wire meaning, which is why it does not live in `lib/mimicry/`.
 
 ### Fixed
 
