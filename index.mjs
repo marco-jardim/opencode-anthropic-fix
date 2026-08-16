@@ -53,7 +53,6 @@ import {
 } from "./lib/retry/overload-loop.mjs";
 import {
   buildRequestHeaders,
-  buildAnthropicBetaHeader,
   parseRequestBodyMetadata,
   extractFileIds,
   stripStainlessHelperMarkers,
@@ -2951,42 +2950,37 @@ export async function AnthropicAuthPlugin({ client }) {
                 // `sessionRejectedBetas` filters the individual betas the API
                 // rejected. That is the mechanism that actually reaches the wire.
                 //
-                // PHASE 3.2 — THIS VALUE NO LONGER REACHES THE WIRE, AND IS KEPT
-                // ANYWAY. Post-latch-removal its single consumer is
-                // `transformRequestBody`, which tests it for
-                // `task-budgets-2026-03-13` to decide whether to preserve or
-                // inject `output_config` (lib/mimicry/request-body.mjs). The
+                // PHASE 4.1 — THE LEGACY BETA FORGE IS GONE FROM THIS PATH. The
+                // whole ~12-param `buildAnthropicBetaHeader` call used to live
+                // here for ONE consumer: `transformRequestBody` tested the
+                // resulting header string for `task-budgets-2026-03-13` to decide
+                // whether to preserve or inject `output_config`
+                // (lib/mimicry/request-body.mjs). Nothing else read it — the
                 // outgoing `anthropic-beta` header is composed by the shared
                 // package on every adapter turn and recomputed from scratch by
-                // `buildRequestHeaders` on every legacy one; neither reads this.
+                // `buildRequestHeaders` on every legacy one.
                 //
-                // IT WAS CONSIDERED FOR DELETION AND DELIBERATELY KEPT. Deriving
-                // the task-budgets signal directly would mean re-deciding, here,
-                // every gate the composer applies to a custom beta: shortcut
-                // resolution, the `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` filter
-                // (task-budgets IS in `EXPERIMENTAL_BETA_FLAGS`), the
-                // signature-emulation gate, and the pathname gate. That is a
-                // second copy of gating logic whose only job is to agree with the
-                // first — precisely the parallel-maintenance divergence the
-                // wire-compat migration exists to delete — bought for a call that
-                // costs well under a millisecond.
-                //
-                // The clean removal is not local: it is for `transformRequestBody`
-                // to take a BOOLEAN task-budgets signal instead of a header
-                // string, sourced from the adapter's own `additionalBetas`.
-                // FLAGGED FOR PHASE 4.1, alongside the rest of the legacy forge.
-                const computedBetaHeader = buildAnthropicBetaHeader(
-                  "",
-                  getSignatureEmulationEnabled(),
-                  _reqModel,
-                  _sessionFilteredCustomBetas,
-                  getEffectiveStrategy(),
-                  requestUrl?.pathname,
-                  _reqHasFileRefs,
-                  _adaptiveOverride,
-                  _tokenEconomy,
-                  _microcompactBetas, // NEW
-                );
+                // It is now a BOOLEAN, derived here from the same gates the
+                // adapter path applies to a custom beta. This MIRRORS
+                // `buildAdditionalBetas` in lib/mimicry/adapter-input.mjs — keep
+                // the two in step:
+                //  (a) signature emulation off ⇒ the plugin forges no Claude Code
+                //      fingerprint at all, so no custom beta reaches the wire;
+                //  (b) `_sessionFilteredCustomBetas` is the same list the adapter
+                //      is handed as `customBetas` (already `customBetasStripped`-
+                //      emptied and `sessionRejectedBetas`-filtered above), and the
+                //      adapter shortcut-expands each entry through
+                //      `BETA_SHORTCUTS` — `resolveBetaShortcut` is that expansion;
+                //  (c) `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` drops every member
+                //      of `EXPERIMENTAL_BETA_FLAGS` from the composed list
+                //      (adapter-input.mjs:490), and `task-budgets-2026-03-13` is a
+                //      member (lib/betas.mjs) — so the flag suppresses it.
+                // There is no pathname gate to mirror: `transformRequestBody` only
+                // runs on the adapter path, i.e. a messages endpoint.
+                const _taskBudgetsActive =
+                  getSignatureEmulationEnabled() &&
+                  !isTruthyEnv(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS) &&
+                  _sessionFilteredCustomBetas.some((b) => resolveBetaShortcut(b) === "task-budgets-2026-03-13");
 
                 // Cache TTL session latching: latch the cache policy at session start
                 // so mid-session toggles don't bust the server-side prompt cache.
@@ -3089,7 +3083,7 @@ export async function AnthropicAuthPlugin({ client }) {
                           ? cacheBreakState.boundaryStability
                           : null,
                       },
-                      computedBetaHeader,
+                      _taskBudgetsActive,
                       config,
                     );
                 logTransformedSystemPrompt(body);
@@ -5910,11 +5904,10 @@ function getAccountIdentifier(account) {
  * @param {{ use1MContext?: boolean }} [adaptiveOverride] - When set, overrides the static hasOneMillionContext() check.
  * @param {boolean} [fastModeActive] - When true, emits FAST_MODE_BETA_FLAG (fast-mode-2026-02-01).
  *   Must be derived structurally from the already-transformed outgoing body (body.includes('"speed":"fast"')).
- *   Only passed from the buildRequestHeaders call site (after body transform). The pre-transform
- *   `computedBetaHeader` call site leaves it undefined, which is correct: at that point the body
- *   transform has not run, so `speed:"fast"` cannot be present yet and the value would be a
- *   guess. That header value no longer reaches the wire in any case — it feeds only the
- *   `task-budgets-2026-03-13` check in transformRequestBody.
+ *   Only passed from the buildRequestHeaders call site (after body transform), which is now the
+ *   ONLY call site: the pre-transform `computedBetaHeader` caller was deleted in Phase 4.1. Its
+ *   sole consumer, the `task-budgets-2026-03-13` check in transformRequestBody, takes a derived
+ *   boolean instead (see `_taskBudgetsActive` in the interceptor).
  * @returns {string}
  */
 // Mirrors CC's Kw(model) effort eligibility: returns false for claude-3-* and the
