@@ -282,3 +282,20 @@ plataforma). Para o caminho que atravessa o plugin real
 6. **Beta latch é inerte no caminho legacy** — só o caminho adapter consome
    `computedBetaHeader`. Simplifica a Phase 2.2: remover o latch do caminho
    de messages não muda o wire legacy.
+
+## 5. QA review da Phase 0.1 — findings e disposição
+
+1. **(major, CORRIGIDO em `00ad7c0`)** Vetor 06 do harness pinava 1M só via
+   `custom_betas`; adicionado vetor 15 exercitando a escalação natural por
+   `resolveAdaptiveContext` (threshold rebaixado a 20k — config de host, não
+   predicado; o literal 150k default não é alvo da migração). Beta
+   `context-1m-2025-08-07` comprovadamente vindo do predicado (posição 3 vs 9).
+2. **(minor, aceito)** `PROMPT_CACHING_SCOPE_BETA` sem teste direto; efeito no
+   wire coberto pelas fixtures do harness. Phase 3.3 o substitui.
+3. **(minor, aceito)** Branches de de-escalação (`index.mjs:5204-5213`) e
+   error-sticky (`:5188-5201`) do adaptive context não cobertos pelo harness
+   (exigem estado multi-turno). São host policy fora do escopo da migração —
+   as phases só tocam os predicados, cobertos pelos vetores 06/15.
+4. Inventário validado por 3 greps independentes (resolveBetaShortcut,
+   hasOneMillionContext, PROMPT_CACHING_SCOPE_BETA/SESSION_ID_FALLBACK):
+   zero divergências. Fixtures sem segredos (authorization `<redacted>`).
