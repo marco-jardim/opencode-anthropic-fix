@@ -7,8 +7,8 @@ body byte-for-byte after normalising genuine per-run nondeterminism.
 
 **The direction of the difference inverted once, and then the ground moved again.** That suite was written when the
 shared package was the incomplete implementation and the plugin was the reference. Since the package's Wave 7 work
-(`v0.1.0-rc.10`) and the max-tokens clamp (`v0.1.0-rc.11`), the package is derived directly from the 2.1.195 client
-binary and is the reference. Since `index.mjs` started routing the first-party `/v1/messages` turn through the adapter,
+(`v0.1.0-rc.10`) and the max-tokens clamp (`v0.1.0-rc.11`), the package is derived directly from a genuine client
+binary — 2.1.195 then, 2.1.233 since the `0.3.0` default profile — and is the reference. Since `index.mjs` started routing the first-party `/v1/messages` turn through the adapter,
 the plugin's production path **is** the package plus plugin-owned policy — so most rows below are no longer "two
 implementations disagree" but "the plugin deliberately steers the package through a seam".
 
@@ -23,11 +23,16 @@ itself a defect: then the fix belongs in the consumer. `stainlessHelper` markers
 
 ## Package version state (read this before running `npm install`)
 
-- Pinned in `package.json` and installed in `node_modules`: **`0.1.0`**, the exact version published to
-  the npm registry (a bare `0.1.0` specifier, not a URL). S8 and S9 shipped in `0.1.0-rc.17` and are
-  therefore present in `0.1.0`.
+- `package.json` specifies the **`latest` dist-tag**, not a version. The resolved version, its
+  registry tarball URL and its `sha512` integrity live in `package-lock.json`, and `npm ci` installs
+  exactly that. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is installed.
+- The wire shape follows from that: the adapter calls the package **without a `profile` argument**, so
+  the plugin inherits the package's `DEFAULT_PROFILE`. `0.1.0` defaulted to `claude-code-2.1.195`;
+  `0.3.0` defaults to `claude-code-2.1.233-sdk-0.112.1`. A package release can therefore move the
+  wire, which is the whole point of the arrangement and the reason the golden suite exists.
+- S8 and S9 shipped in `0.1.0-rc.17` and are present in every release since.
 
-The pin, the lockfile integrity hash and `docs/shared-package-provenance.md` must agree.
+The lockfile and `docs/shared-package-provenance.md` must agree with the policy.
 `test/conformance/package-dependency-policy.test.mjs` fails if they drift, which is what caught this
 document's predecessor: `rc.17` was installed with `--no-save` while the pin still read `rc.16`, so a
 clean `npm install` would have silently downgraded and taken both seams out with it.
@@ -59,8 +64,9 @@ what a package bump does.
 
 ## Outbound divergences
 
-Upstream symbol names and byte offsets refer to the genuine 2.1.195 client binary, as recorded in the package's
-`docs/source-trace.md`.
+Upstream symbol names and byte offsets refer to the genuine client binary the row was traced against — 2.1.195 for
+rows written before the `0.3.0` default-profile move, 2.1.233 after — as recorded in the package's
+`docs/source-trace.md` and, for 2.1.233, in [`../claude-code-2.1.233-analysis.md`](../claude-code-2.1.233-analysis.md).
 
 | #   | Field                                | Plugin emits                                      | Package emits                                     | State                                                                                           |
 | --- | ------------------------------------ | ------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -264,16 +270,31 @@ the code.
 
 ## Syncing a new package version
 
-1. Bump the pin with `npm install --save-exact @tormentalabs/claude-code-wire-compat@<version>`, which writes the bare
-   exact version to `package.json` and the registry artifact URL plus integrity to `package-lock.json`. Then copy the version,
-   artifact URL and the lockfile's new `integrity` hash into the pin table of
-   `docs/shared-package-provenance.md` — `test/conformance/package-dependency-policy.test.mjs` compares the three
-   sources and fails on drift.
-2. Run `npm test`. Failures will concentrate in `test/conformance/shared-package-parity.test.mjs`.
-3. For each failure, measure both sides before deciding anything. Do not assume the plugin is the reference.
-4. A difference that the package fixed becomes a closed row above. A difference the plugin has not caught up with
+The specifier is the `latest` dist-tag, so a sync is a lockfile move, not a `package.json` edit. Do not re-pin an
+exact version to perform a routine sync — that is the emergency-rollback shape (see
+`docs/shared-package-provenance.md`).
+
+1. `npm update @tormentalabs/claude-code-wire-compat`. This rewrites `package-lock.json` only: new version, new
+   registry tarball URL, new `sha512` integrity. **The lockfile diff is the review artifact** — read it before
+   anything else. `docs/shared-package-provenance.md` needs no version edit by design; it documents the policy, and
+   `test/conformance/package-dependency-policy.test.mjs` validates `resolved` against the lock's own `version`.
+2. Check whether the package's `DEFAULT_PROFILE` moved (its CHANGELOG says so, and
+   `node_modules/@tormentalabs/claude-code-wire-compat/src/build-request.ts` is the seam). If it did:
+   - update `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT` in `lib/mimicry/adapter-input.mjs` and
+     `FALLBACK_CLAUDE_CLI_VERSION` in `lib/request-headers.mjs` to match, plus the `CLI_TO_SDK_VERSION` row for the
+     new CLI version. Stale values do not fail closed — they make every request carry a redundant `profileOverride`;
+   - copy the package's analysis doc for the new client version into `docs/claude-code-<version>-analysis.md`, which
+     `scripts/check-invariants.mjs` requires and which is the evidence for the emulation claim.
+3. Run `npm test`. Failures concentrate in `test/conformance/shared-package-parity.test.mjs`,
+   `test/conformance/golden-outgoing.test.mjs` and `test/conformance/wire-compat-input-coverage.test.mjs` (the last
+   one fires when the package declares a new request-input field).
+4. **Review the golden diff by hand, byte by byte.** A default-profile move legitimately changes the user agent,
+   `x-stainless-package-version`, the `anthropic-beta` list and the billing `cc_version`. Anything else changing is a
+   finding, not a golden to regenerate. Regenerating a golden you have not read is how a wire regression ships.
+5. For each remaining failure, measure both sides before deciding anything. Do not assume the plugin is the reference.
+6. A difference that the package fixed becomes a closed row above. A difference the plugin has not caught up with
    becomes an outbound row, plus either a pinning test or a normalisation exclusion with a pinning test.
-5. If the plugin lost a capability to the package's validation, the answer is a new opt-in seam in the package
+7. If the plugin lost a capability to the package's validation, the answer is a new opt-in seam in the package
    (Option A) — unless the capability was itself a defect, in which case fix the plugin and record it under
    "Divergences the plugin closed on its own side".
-6. Re-read the scaling warning above before adding a third exclusion.
+8. Re-read the scaling warning above before adding a third exclusion.

@@ -369,14 +369,15 @@ const GOLDEN_ADAPTER_HEADERS = [
   ["anthropic-version", "2023-06-01"],
   ["authorization", "Bearer test-access"],
   ["content-type", "application/json"],
-  ["user-agent", "claude-cli/2.1.195 (external, cli)"],
+  ["user-agent", "claude-cli/2.1.233 (external, cli)"],
   ["x-app", "cli"],
   ["x-claude-code-session-id", "11111111-1111-4111-8111-111111111111"],
   ["x-client-request-id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
   ["x-stainless-arch", "<machine>"],
   ["x-stainless-lang", "js"],
   ["x-stainless-os", "<machine>"],
-  ["x-stainless-package-version", "0.94.0"],
+  // 2.1.233 bundles @anthropic-ai/sdk 0.112.1 (was 0.94.0 through 2.1.222).
+  ["x-stainless-package-version", "0.112.1"],
   ["x-stainless-retry-count", "0"],
   ["x-stainless-runtime", "node"],
   ["x-stainless-runtime-version", "<machine>"],
@@ -389,7 +390,11 @@ const GOLDEN_ADAPTER_BODY = {
   model: "claude-sonnet-4-5",
   max_tokens: 8000,
   system: [
-    { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.195.325; cc_entrypoint=cli; cch=00000;" },
+    // The `.768` suffix is the fingerprint: unchanged algorithm (salt
+    // `59cf53e54c78` + chars 4/7/20 of the first user message + VERSION,
+    // SHA-256, first three hex chars), different output only because VERSION is
+    // an input and VERSION moved 2.1.195 -> 2.1.233.
+    { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.233.768; cc_entrypoint=cli; cch=00000;" },
     {
       type: "text",
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -778,7 +783,7 @@ describe("legacy request path", () => {
       ["anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14"],
       ["authorization", "Bearer test-access"],
       ["content-type", "application/json"],
-      ["user-agent", "claude-cli/2.1.195 (external, cli)"],
+      ["user-agent", "claude-cli/2.1.233 (external, cli)"],
     ]);
   });
 

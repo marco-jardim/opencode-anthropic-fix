@@ -1,5 +1,19 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
+> **Note on the production wire shape (added at the `0.3.0` dependency bump).**
+> The composition that actually goes on the wire now follows the `DEFAULT_PROFILE`
+> of `@tormentalabs/claude-code-wire-compat`, which is **Claude Code 2.1.233**
+> (`claude-code-2.1.233-sdk-0.112.1`) as of this note. The plugin inherits it by
+> omitting the `profile` argument, so a package release can advance it.
+>
+> **The body of this document remains the verified 2.1.195 decompilation** and is
+> still the right reference for how each header and system-prompt segment is
+> derived. The 195 → 233 deltas are recorded in the package's `CHANGELOG` and in
+> [`claude-code-2.1.233-analysis.md`](claude-code-2.1.233-analysis.md); the ones
+> visible on a default turn are the user agent, `x-stainless-package-version`
+> (`0.94.0` → `0.112.1`), the billing block's `cc_version`, and the removal of
+> `summarize-connector-text-2026-03-13` from the beta registry.
+
 <!-- Last verified against: Claude Code 2.1.195 — DECOMPILED from the real
      linux-x64 native binary (@anthropic-ai/claude-code-linux-x64@2.1.195, Bun-
      embedded JS, carved bundle header "// @bun @bytecode @bun-cjs"). Primary-source

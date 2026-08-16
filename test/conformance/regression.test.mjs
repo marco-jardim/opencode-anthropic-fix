@@ -1230,14 +1230,18 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all required always-on betas for non-Haiku effort-capable model (v2.1.195 set)", async () => {
+  it("contains all required always-on betas for non-Haiku effort-capable model (v2.1.233 set)", async () => {
     // Use opus-4-6: real CC's Kw(model) pushes effort-2025-11-24 for Opus 4.5/4.6/
     // 4.7/4.8 and Sonnet 4.6, and n0d(model) pushes context-management for any
     // first-party non-claude-3 model — so this model carries BOTH.
     const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const beta = headers.get("anthropic-beta");
 
-    // RE doc §15.16 always-on set — synced to v2.1.195
+    // RE doc §15.16 always-on set — synced to v2.1.233. The 2.1.233 beta
+    // registry has 31 effective entries; the only removal against 2.1.195 is
+    // `summarize-connector-text-2026-03-13` (narration summaries), which this
+    // path never emitted anyway. `fast-mode-2026-02-01` stays absent and is now
+    // doubly guaranteed: 2.1.233 also dropped `fast_mode` from opus-4-6.
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
     expect(beta).not.toContain("advanced-tool-use-2025-11-20");
@@ -1566,7 +1570,7 @@ describe("context_management body field — field ⊆ beta invariant", () => {
   });
 });
 
-describe("E2E: Version is 2.1.195", () => {
+describe("E2E: Version is 2.1.233", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1575,17 +1579,17 @@ describe("E2E: Version is 2.1.195", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.195", async () => {
+  it("User-Agent contains 2.1.233", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.195");
+    expect(headers.get("user-agent")).toContain("2.1.233");
   });
 
-  it("billing header contains 2.1.195", async () => {
+  it("billing header contains 2.1.233", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.195");
+    expect(body.system[0].text).toContain("2.1.233");
   });
 });
 

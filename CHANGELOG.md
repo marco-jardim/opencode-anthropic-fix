@@ -2,6 +2,75 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.4.0] — 2026-08-16
+
+Dependency-tracking release. `0.3.0` moved request construction into the shared wire-compat package but pinned it to an
+exact version, which pinned the emulated client too. This release stops pinning both: the plugin now tracks the
+package's `latest` dist-tag and inherits whatever genuine-client profile the package declares as its default. The wire
+moves from Claude Code 2.1.195 to 2.1.233 as a consequence.
+
+### Changed
+
+- **The `@tormentalabs/claude-code-wire-compat` dependency tracks the `latest` dist-tag instead of an exact version.**
+  The specifier in `package.json` was the bare `0.1.0`; it is now the literal `latest`, and the lockfile resolves
+  `0.3.0`. Reproducibility does not depend on the specifier: `package-lock.json` records the resolved version, the
+  registry tarball URL and its `sha512` integrity, and `npm ci` installs exactly that — so moving the tag still
+  requires a reviewed lockfile diff, which is the same review gate an exact pin provided, applied where the bytes
+  actually change. Syncing a new package version is now `npm update @tormentalabs/claude-code-wire-compat`, documented
+  as a runbook in `docs/mimicry/wire-compat-divergences.md`. Two npm behaviours make the obvious commands wrong and are
+  called out there: plain `npm install` does **not** re-resolve a dist-tag that the already-installed version
+  satisfies, and `npm install <pkg>@latest` rewrites the specifier to a `^` range rather than keeping the tag.
+
+- **The production wire now inherits the package's `DEFAULT_PROFILE` — Claude Code 2.1.233 (SDK 0.112.1) today, and
+  whatever is newest at each package release.** The adapter omits the `profile` argument deliberately; that omission
+  _is_ the inheritance mechanism, so a package release that transcribes a newer genuine client reaches the wire without
+  a change to the composition path. The observed wire diff against the goldens is exactly three fields: `user-agent`
+  → `claude-cli/2.1.233 (external, cli)`, `x-stainless-package-version` → `0.112.1` (the client bundles
+  `@anthropic-ai/sdk` 0.112.1, was `0.94.0`), and the billing block's `cc_version` → `2.1.233.<fingerprint>` (the
+  fingerprint algorithm is unchanged — the version is one of its inputs). `anthropic-beta` is **byte-identical** in the
+  request golden: the 2.1.233 registry removes `summarize-connector-text-2026-03-13`, which this plugin never emitted,
+  and its four additions are all inert on a default turn. The removal is deliberate upstream and is **not** re-added
+  through `additionalBetas`. The third-party allowlist gains `mid-conversation-system-2026-04-07`.
+  The baselines that shadow the profile move with it: `FALLBACK_CLAUDE_CLI_VERSION` (`lib/request-headers.mjs`) and
+  `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT` (`lib/mimicry/adapter-input.mjs`) are `2.1.233`, so
+  `resolveProfileOverride` stays silent in the common case instead of attaching a redundant override to every request.
+  `CLI_TO_SDK_VERSION` gains `2.1.233 → 0.112.1` so the legacy path (`count_tokens`, signature emulation off) cannot
+  emit a self-inconsistent fingerprint — a 2.1.233 user agent paired with the 0.94.0 SDK version.
+
+- **The dependency policy test enforces the new specifier rules.** The sanctioned specifier is the literal `latest`
+  (classified as `dist-tag`); an exact semver version remains accepted, because emergency rollback pins one. Semver
+  ranges (`^`, `~`, `>=`, `x`), non-`latest` dist-tags (`next`, `beta`), `file:`/`link:`/git references and untagged
+  URLs are rejected, each with its own reason rather than a catch-all "not exact". Integrity is asserted against the
+  lockfile rather than the specifier: `entry.resolved` must be the registry tarball for the lock's own `entry.version`,
+  with a `sha512` hash and the `GPL-3.0-or-later` licence field. The provenance document is required to document the
+  policy (`latest`, `package-lock.json`, `npm ci`) rather than a literal version, which would otherwise have to be
+  edited in lockstep with every update and would rot.
+  Rolling the wire back is either `OPENCODE_ANTHROPIC_PROFILE_OVERRIDE` or re-pinning an exact version. The override
+  now carries a warning in `docs/emergency-protocol-profile.md` and `docs/shared-package-provenance.md`: it is applied
+  field by field, wholesale per field with no deep merge, over the package's _current_ base profile. An override that
+  carries catalogue or policy data (`supportedModels`, `betaPolicy`, `sdkVersion`) therefore goes stale silently on the
+  next package upgrade — the request stays structurally valid while announcing a new client over old data. The
+  environment variable accepts any permitted-field JSON object by design, so it never fails open in an emergency; the
+  cost is that this correctness is the operator's. Keep emergency overrides to `{userAgent, cliVersion}`.
+
+### Added
+
+- **`docs/claude-code-2.1.233-analysis.md`** — the static-binary analysis backing the 2.1.233 emulation claim, copied
+  with a provenance header from the `claude-code-wire-compat` repository (same `GPL-3.0-or-later` licence, so a
+  licence-clean redistribution rather than a quotation). `scripts/check-invariants.mjs` requires an analysis document
+  matching `FALLBACK_CLAUDE_CLI_VERSION`, which is what keeps the plugin from claiming a client version nobody
+  analysed.
+
+### Known gaps
+
+- **`previousRequestId` and `promptId` are not populated.** A genuine 2.1.233 client emits the billing block's
+  `cc_prev_req` and `cc_prompt_id` segments from the second turn of a conversation onward. The plugin does not capture
+  the `request-id` the server returns, and no host-side prompt UUID reaches the interceptor, so both segments are
+  omitted — a real, observable divergence from turn 2, not a no-op. Synthesising values would be worse than omitting
+  them. Recorded as an explicit deliberate omission with its reason in
+  `test/conformance/wire-compat-input-coverage.test.mjs` and in `docs/mimicry/wire-compat-divergences.md`; threading
+  response ids through the fetch interceptor is a follow-up.
+
 ## [0.3.0] — 2026-08-16
 
 Graduation release. The code is identical to `0.3.0-beta.0`, already published on the `beta` dist-tag; this release

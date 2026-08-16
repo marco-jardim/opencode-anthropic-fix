@@ -9,44 +9,116 @@ Attribution for the dependency and its license lives in [`NOTICE`](../NOTICE). T
 document is enforced by
 [`package-dependency-policy.test.mjs`](../test/conformance/package-dependency-policy.test.mjs).
 
-## Current pin
+## Current specifier
 
-| Field              | Value                                                                                                  |
-| ------------------ | ------------------------------------------------------------------------------------------------------ |
-| Package            | `@tormentalabs/claude-code-wire-compat`                                                                |
-| Version            | `0.1.0`                                                                                                |
-| Origin             | npm registry (`npm install --save-exact @tormentalabs/claude-code-wire-compat@0.1.0`)                  |
-| Artifact           | `https://registry.npmjs.org/@tormentalabs/claude-code-wire-compat/-/claude-code-wire-compat-0.1.0.tgz` |
-| Lockfile integrity | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==`      |
-| License            | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                                                |
+| Field       | Value                                                                   |
+| ----------- | ----------------------------------------------------------------------- |
+| Package     | `@tormentalabs/claude-code-wire-compat`                                 |
+| Specifier   | `latest` (npm dist-tag), in [`package.json`](../package.json)           |
+| Origin      | npm registry                                                            |
+| Resolved by | `package-lock.json` — version, registry tarball URL, `sha512` integrity |
+| License     | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                 |
 
-The specifier lives in [`package.json`](../package.json) as the bare exact version `0.1.0`, and the
-resolved registry artifact plus its integrity hash live in `package-lock.json`. Both must agree; the
-conformance test fails if they drift.
+This table deliberately does **not** name a version. The resolved version lives in one place —
+`package-lock.json` — and duplicating it here would create a second source of truth that rots on the
+first `npm update`. To read the version actually installed:
 
-## Why the pin is an exact registry version
+```bash
+npm ls @tormentalabs/claude-code-wire-compat
+```
 
-Phase 9 of the extraction plan published `0.1.0` to the npm registry, so the plugin no longer depends
-on a GitHub release tarball. The pin is the exact registry version — no `^`, no `~`, no URL — which
-is immutable for a published npm version and is verified by the lockfile integrity hash above.
+## Why the specifier is the `latest` dist-tag
 
-Before publication the only immutable public artifact was the GitHub release tarball for a specific
-release-candidate tag (`v0.1.0-rc.17` was the last such pin, integrity
-`sha512-YQNS02MyM2YWcCT4d/o8FP6605Hv2jXedMGtNgO27sGA0bY8qR3rfMEBdg5GYPQnz+vt+3J0RlLEacnhsrq5sg==`).
-That shape is still accepted by the policy test for rollback purposes, but the `registry` branch of
-the test now governs the live pin.
+The plugin does not compose the wire request itself; it delegates to the package and **omits the
+`profile` argument**, which means it inherits whatever the package declares as its `DEFAULT_PROFILE`.
+That default is the package's statement of "the newest genuine Claude Code client we have analysed
+and transcribed" — `claude-code-2.1.233-sdk-0.112.1` at the time of writing. Tracking `latest` is
+therefore not laziness about versioning; it is the mechanism by which a newly analysed client profile
+reaches this plugin's wire without a code change to the composition path.
 
-The following specifier shapes are forbidden and fail the policy test: `file:` and `link:` paths,
-`git`/`github:` references, branch archives, any URL without a recorded release-candidate tag, and
-semver ranges such as `^0.1.0`. Each of them lets the built wire request change without a reviewed
-dependency bump, which is exactly the failure mode the parity suite cannot catch after the fact.
+Two constants shadow that default and must move with it —
+`PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT` in
+[`adapter-input.mjs`](../lib/mimicry/adapter-input.mjs) and `FALLBACK_CLAUDE_CLI_VERSION` in
+[`request-headers.mjs`](../lib/request-headers.mjs). They exist so `resolveProfileOverride` stays
+silent in the common case; if they lag the package, every request starts carrying a redundant profile
+override. The conformance suite fails loudly when they drift, so this is a caught mistake rather than
+a silent one.
 
-## Verify the pin
+### Where reproducibility actually lives
+
+A dist-tag is mutable, so the immutability guarantee moves to the lockfile:
+
+- `package-lock.json` records the resolved version, the exact registry tarball URL, and its `sha512`
+  integrity hash.
+- `npm ci` installs exactly that, byte for byte. CI uses `npm ci`, never `npm install`.
+- Moving the tag therefore still requires a **reviewed lockfile diff** — the same review gate an
+  exact pin gave, applied at the point where the bytes actually change.
+
+The policy test asserts `resolved` against the lock's own `version` (not against the specifier), plus
+the `sha512` hash and the `GPL-3.0-or-later` licence field.
+
+### What is still forbidden
+
+`file:` and `link:` paths, `git`/`github:` references, branch archives, any URL without a recorded
+release-candidate tag, non-`latest` dist-tags (`next`, `beta`), and semver **ranges** such as
+`^0.3.0`, `~0.3.0` or `0.3.x`.
+
+Ranges deserve a word, since they are also lock-backed. `latest` is a deliberate, greppable statement
+of intent: _track the package, inherit its default profile._ A range says nothing — it silently
+widens what a fresh resolution may pick without anyone having decided that. Emergency rollback is the
+one case that pins an exact version, and it is exact precisely because it is a decision.
+
+## Emergency rollback of the wire shape
+
+Two levers, in increasing order of blast radius. Neither is a runtime switch (see the next section).
+
+1. **Pin an exact version.** If a package release regresses the wire bytes, replace the specifier
+   with the last good exact version and re-lock:
+
+   ```bash
+   npm install --save-exact @tormentalabs/claude-code-wire-compat@0.3.0
+   npm test -- --run test/conformance/shared-package-parity.test.mjs
+   ```
+
+   The policy test accepts an exact semver specifier for exactly this reason. Restore `latest` once
+   the regression is fixed upstream.
+
+2. **Override the profile without changing the package.** If the _profile_ is the problem but the
+   builder is fine, `OPENCODE_ANTHROPIC_PROFILE_OVERRIDE` overrides fields of the profile the
+   package composes against — see
+   [`emergency-protocol-profile.md`](./emergency-protocol-profile.md). This is the cheaper lever when
+   a new default profile turns out to be wrong on the wire: the package still ships the previous
+   profile alongside the new default.
+
+   **Keep such an override to `{userAgent, cliVersion}`.** It is applied field by field, wholesale
+   per field with no deep merge, over the package's _current_ `DEFAULT_PROFILE` — which advances on
+   every package release. An override that also carries catalogue or policy data (`supportedModels`,
+   `betaPolicy`, `sdkVersion`) pins that data to the era it was written in and goes stale silently on
+   the next upgrade: the request stays structurally valid while announcing a new client over old
+   data. The environment variable does not validate field contents by design, so that an emergency is
+   never blocked by a validator — which means the staleness is yours to catch, not the plugin's.
+
+## Historical pins
+
+Kept as a record; none of these is the live policy.
+
+| Period               | Specifier                                   | Note                                                                                              |
+| -------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Pre-publication      | GitHub release tarball, `v0.1.0-rc.17` last | The only immutable public artifact before the package was published to npm                        |
+| Phase 9 → 0.3.0 bump | exact registry version `0.1.0`              | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==` |
+| Current              | `latest` dist-tag                           | Inherits the package's `DEFAULT_PROFILE`; reproducibility via `package-lock.json`                 |
+
+The `0.1.0` era pinned the profile as a side effect: `0.1.0`'s default was `claude-code-2.1.195`, and
+moving to `0.3.0` moved the wire to `claude-code-2.1.233-sdk-0.112.1`. That coupling is the reason
+the specifier policy and the profile policy are documented together.
+
+## Verify the dependency
 
 ```bash
 npm ls @tormentalabs/claude-code-wire-compat
 npm test -- --run test/conformance/package-dependency-policy.test.mjs
 npm test -- --run test/conformance/shared-package-parity.test.mjs
+npm test -- --run test/conformance/golden-outgoing.test.mjs
 ```
 
 Byte-level differences between the plugin's historical construction and the shared package are

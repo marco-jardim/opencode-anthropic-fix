@@ -29,18 +29,37 @@ const releaseTarball =
   /^https:\/\/github\.com\/marco-jardim\/claude-code-wire-compat\/releases\/download\/(v\d+\.\d+\.\d+-rc\.\d+)\/tormentalabs-claude-code-wire-compat-\d+\.\d+\.\d+-rc\.\d+\.tgz$/;
 
 /**
- * A dependency specifier is acceptable only when it names an immutable artifact:
- * an exact registry version, or a tagged release tarball whose release candidate
- * tag is recorded in the provenance documentation. Mutable references such as
- * `file:`, `link:`, git branches, semver ranges, or an untagged URL are rejected
- * because they let the built request change without a reviewed dependency bump.
+ * A dependency specifier is acceptable only when a RESOLVED INSTALL of it is
+ * reproducible and integrity-checked. Two shapes qualify:
+ *
+ *   * the literal `latest` dist-tag — the wire shape of this plugin is the
+ *     package's own `DEFAULT_PROFILE`, so tracking `latest` is how the plugin
+ *     inherits a newer genuine-client profile without a code change. The tag
+ *     itself is mutable, which is precisely why reproducibility is delegated to
+ *     `package-lock.json`: the lock records the resolved version, the registry
+ *     tarball URL, and its `sha512` integrity, and `npm ci` installs exactly
+ *     that. Moving the tag therefore still requires a reviewed lockfile diff.
+ *   * an exact registry version — retained because emergency rollback pins one
+ *     (see docs/shared-package-provenance.md).
+ *
+ * The tagged release tarball remains classified for the historical 0.1.0-rc pins.
+ *
+ * Everything else is rejected. Semver RANGES (`^`, `~`, `>=`) are rejected even
+ * though they too are lock-backed: a range silently widens what a fresh
+ * `npm install` may pick, without naming the intent. `latest` is a deliberate,
+ * greppable statement of "track the package"; `^0.3.0` is an accident waiting to
+ * resolve. Non-`latest` dist-tags (`next`, `beta`) are rejected for the same
+ * reason plus the obvious one: they publish unreviewed prereleases.
  *
  * @param {string} specifier
- * @returns {{ kind: "registry" | "tarball" | "rejected", tag?: string, reason?: string }}
+ * @returns {{ kind: "dist-tag" | "registry" | "tarball" | "rejected", tag?: string, reason?: string }}
  */
 function classifyDependencySpecifier(specifier) {
   if (typeof specifier !== "string" || specifier.length === 0) {
     return { kind: "rejected", reason: "missing specifier" };
+  }
+  if (specifier === "latest") {
+    return { kind: "dist-tag", tag: "latest" };
   }
   if (exactVersion.test(specifier)) {
     return { kind: "registry" };
@@ -55,6 +74,11 @@ function classifyDependencySpecifier(specifier) {
   }
   if (specifier.startsWith("http://") || specifier.startsWith("https://")) {
     return { kind: "rejected", reason: "URL without a recorded release-candidate tag" };
+  }
+  // Bare word: a dist-tag. Only `latest` is sanctioned, and it was accepted
+  // above; anything else here is `next` / `beta` / a one-off publish tag.
+  if (/^[A-Za-z][\w.-]*$/.test(specifier)) {
+    return { kind: "rejected", reason: "dist-tag other than `latest`" };
   }
 
   return { kind: "rejected", reason: "non-exact version range" };
@@ -77,13 +101,24 @@ describe("shared wire package dependency specifier policy", () => {
       reason: "URL without a recorded release-candidate tag",
     },
     { specifier: "^0.1.0", reason: "non-exact version range" },
+    { specifier: "~0.3.0", reason: "non-exact version range" },
+    { specifier: ">=0.3.0", reason: "non-exact version range" },
+    { specifier: "0.3.x", reason: "non-exact version range" },
+    { specifier: "*", reason: "non-exact version range" },
+    { specifier: "next", reason: "dist-tag other than `latest`" },
+    { specifier: "beta", reason: "dist-tag other than `latest`" },
     { specifier: "", reason: "missing specifier" },
   ])("rejects $specifier", ({ specifier, reason }) => {
     expect(classifyDependencySpecifier(specifier)).toEqual({ kind: "rejected", reason });
   });
 
-  it("accepts an exact registry version, which is the Phase 9 target", () => {
+  it("accepts the `latest` dist-tag, which is how the plugin inherits the package's default profile", () => {
+    expect(classifyDependencySpecifier("latest")).toEqual({ kind: "dist-tag", tag: "latest" });
+  });
+
+  it("accepts an exact registry version, which is the emergency-rollback pin", () => {
     expect(classifyDependencySpecifier("0.1.0")).toEqual({ kind: "registry" });
+    expect(classifyDependencySpecifier("0.3.0")).toEqual({ kind: "registry" });
   });
 
   it("accepts the tagged release tarball and reports its tag", () => {
@@ -101,7 +136,7 @@ describe("shared wire package dependency specifier policy", () => {
     expect(classification.kind, `rejected specifier ${specifier}: ${classification.reason}`).not.toBe("rejected");
   });
 
-  it("records a lockfile integrity hash for the pinned artifact", () => {
+  it("records a lockfile integrity hash for the resolved artifact", () => {
     const specifier = manifest.dependencies?.[packageName];
     const entry = lockfile.packages?.[`node_modules/${packageName}`];
 
@@ -110,33 +145,55 @@ describe("shared wire package dependency specifier policy", () => {
     expect(entry.integrity).toMatch(/^sha512-[A-Za-z0-9+/]+={0,2}$/);
     expect(entry.license).toBe(packageLicense);
 
-    // A tarball specifier IS the resolved artifact, so the two must be byte-identical.
-    // A registry specifier is the bare version, and npm resolves it to the registry
-    // tarball URL for that exact version; asserting that URL keeps the lockfile from
-    // silently pointing at a different version or a non-registry mirror.
-    if (classifyDependencySpecifier(specifier).kind === "registry") {
-      expect(entry.version).toBe(specifier);
-      expect(entry.resolved).toBe(
-        `https://registry.npmjs.org/${packageName}/-/claude-code-wire-compat-${specifier}.tgz`,
-      );
+    // The lockfile, not the specifier, is what makes the install reproducible —
+    // that is the whole basis for allowing a `latest` dist-tag. So `resolved` is
+    // checked against the lock's OWN `version`: it must be the registry tarball
+    // for exactly the version the lock claims, which catches a lock pointing at
+    // a different version or at a non-registry mirror.
+    const classification = classifyDependencySpecifier(specifier);
+    if (classification.kind === "tarball") {
+      // A tarball specifier IS the resolved artifact, so the two are byte-identical.
+      expect(entry.resolved).toBe(specifier);
       return;
     }
 
-    expect(entry.resolved).toBe(specifier);
+    expect(entry.resolved).toBe(
+      `https://registry.npmjs.org/${packageName}/-/claude-code-wire-compat-${entry.version}.tgz`,
+    );
+
+    // An exact pin additionally has to agree with the lock; a dist-tag has
+    // nothing to agree with, by construction.
+    if (classification.kind === "registry") {
+      expect(entry.version).toBe(specifier);
+    }
   });
 
-  it("documents the exact pinned tag and integrity hash while the pin is a tarball", () => {
+  it("documents the specifier policy actually in force", () => {
     const specifier = manifest.dependencies?.[packageName];
     const classification = classifyDependencySpecifier(specifier);
+    const entry = lockfile.packages?.[`node_modules/${packageName}`];
 
-    if (classification.kind !== "tarball") {
-      expect(provenance).toContain(lockfile.packages?.[`node_modules/${packageName}`]?.version);
+    if (classification.kind === "tarball") {
+      expect(provenance).toContain(classification.tag);
+      expect(provenance).toContain(entry?.integrity);
+      expect(provenance).toMatch(/npm registry|registry version|from npm/i);
       return;
     }
 
-    expect(provenance).toContain(classification.tag);
-    expect(provenance).toContain(lockfile.packages?.[`node_modules/${packageName}`]?.integrity);
-    expect(provenance).toMatch(/Phase 9[\s\S]{0,400}`0\.1\.0`/);
+    if (classification.kind === "dist-tag") {
+      // Deliberately NOT a literal-version assertion. Requiring the doc to name
+      // the resolved version would re-pin by the back door: the version moves on
+      // every `npm update`, and a doc that has to be edited in lockstep would
+      // either rot or push people back to an exact pin. What must be documented
+      // is the POLICY and where reproducibility actually lives.
+      expect(provenance).toContain("latest");
+      expect(provenance).toContain("package-lock.json");
+      expect(provenance).toMatch(/npm ci/);
+      expect(provenance).toMatch(/npm registry|registry version|from npm/i);
+      return;
+    }
+
+    expect(provenance).toContain(entry?.version);
     expect(provenance).toMatch(/npm registry|registry version|from npm/i);
   });
 });
