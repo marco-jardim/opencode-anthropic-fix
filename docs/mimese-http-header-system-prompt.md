@@ -381,11 +381,11 @@ This version is used by:
 
 Inside `auth.loader().fetch(...)`:
 
-1. transform URL (`transformRequestUrl`)
+1. transform URL (`transformRequestUrl`) — the legacy-path URL, and the URL the eligibility gate reads
 2. select account and resolve token (including refresh when needed)
 3. transform body (`transformRequestBody` in `lib/mimicry/request-body.mjs`) with runtime context
-4. build headers (`buildRequestHeaders` in `lib/mimicry/headers.mjs`)
-5. execute `fetch`
+4. build headers (`buildRequestHeaders` in `lib/mimicry/headers.mjs`), or, on the adapter path, headers + body + URL from the shared package
+5. execute `fetch` (adapter path: against the package's `built.url`, MITM origin override applied)
 
 Important: body transform happens per-attempt/per-account (not only once), so `metadata.user_id` includes the actual `accountId` in use for that attempt.
 
@@ -969,6 +969,10 @@ message prompt caches, so it should only be toggled deliberately.
 ## 8) Related URL shaping
 
 `transformRequestUrl(input)` appends `?beta=true` for `/v1/messages` and `/v1/messages/count_tokens` requests when the query parameter is not already present.
+
+On the adapter path (signature emulation on, eligible request), the effective URL is **not** the transformed one: the plugin adopts `built.url` from the shared package — the endpoint the headers and body were composed for (`https://api.anthropic.com/v1/messages?beta=true`, or `.../v1/messages/count_tokens?beta=true` on the count surface). This keeps URL, headers and body from a single source. The only local override is the MITM origin: when `OPENCODE_MITM_BASE_URL` is set, `applyMitmOriginOverride` rewrites protocol/hostname/port only, preserving the package's path and query.
+
+`transformRequestUrl` still owns the URL on the legacy path — signature emulation off, a non-eligible endpoint, a non-string body, or any request the adapter declined.
 
 ## 9) Compatibility and fallback behavior
 

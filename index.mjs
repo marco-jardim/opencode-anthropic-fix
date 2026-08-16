@@ -3119,13 +3119,15 @@ export async function AnthropicAuthPlugin({ client }) {
                 // body that deliberately carries NO system, metadata or
                 // max_tokens. Legacy path: unchanged, byte for byte.
                 //
-                // The URL deliberately stays whatever transformRequestUrl already
-                // produced. `built.url` is the package's pinned endpoint
+                // The URL comes from the package too: `built.url` is the pinned
+                // endpoint the headers and body were composed for
                 // (`https://api.anthropic.com/v1/messages?beta=true`, or
                 // `.../v1/messages/count_tokens?beta=true` on the count surface),
-                // which would override a custom ANTHROPIC_BASE_URL or proxy
-                // endpoint. transformRequestUrl already appends `?beta=true` to
-                // both endpoints itself, so discarding `built.url` costs nothing.
+                // so adopting it keeps the whole request from one source and
+                // rules out URL/body drift. The only local override left is the
+                // MITM origin (protocol/hostname/port via OPENCODE_MITM_BASE_URL);
+                // path and query always come from the package. transformRequestUrl
+                // still owns the URL on the legacy / emulation-off path.
                 const _adapterSignature = {
                   enabled: getSignatureEmulationEnabled(),
                   claudeCliVersion,
@@ -3136,6 +3138,7 @@ export async function AnthropicAuthPlugin({ client }) {
 
                 let requestHeaders;
                 let adapterBody;
+                let adapterRequestInput;
                 let legacyStrippedBody;
                 if (_useAdapter) {
                   const _adapterResult = buildAdapterTransport({
@@ -3181,6 +3184,14 @@ export async function AnthropicAuthPlugin({ client }) {
                       : await buildWireCompatibleRequest(body, _adapterResult.transport);
                     requestHeaders = built.headers;
                     adapterBody = built.body;
+                    try {
+                      const _adapterUrl = applyMitmOriginOverride(new URL(built.url));
+                      adapterRequestInput =
+                        input instanceof Request ? new Request(_adapterUrl.toString(), input) : _adapterUrl;
+                    } catch (error) {
+                      // Unparsable package URL — fall back to the transformed URL.
+                      debugLog(`adapter url adoption skipped (${error.message}); keeping the transformed url`);
+                    }
                   } else {
                     debugLog(`adapter not applicable (${_adapterResult.reason}); using the legacy request path`);
                   }
@@ -3273,7 +3284,7 @@ export async function AnthropicAuthPlugin({ client }) {
                       debugLog("failed to write outgoing request headers to debug-headers.log", e);
                     }
                   }
-                  response = await fetch(requestInput, {
+                  response = await fetch(adapterRequestInput ?? requestInput, {
                     ...requestInit,
                     body: finalBody,
                     headers: requestHeaders,
@@ -5913,6 +5924,29 @@ async function fetchLatestClaudeCodeVersion(timeoutMs = 1200) {
  * @param {import('./lib/config.mjs').AnthropicAuthConfig} config
  * @returns {number | undefined} Resolved max_tokens value, or undefined for passthrough
  */
+
+/**
+ * Rewrite only the origin (protocol/hostname/port) of a URL when
+ * OPENCODE_MITM_BASE_URL is set, preserving path and query. Used by the adapter
+ * path, which takes its path+query from the shared package's pinned endpoint.
+ * Mutates and returns the given URL; an invalid MITM base is ignored silently.
+ *
+ * @param {URL} url
+ * @returns {URL}
+ */
+function applyMitmOriginOverride(url) {
+  const mitmBase = process.env.OPENCODE_MITM_BASE_URL;
+  if (!mitmBase) return url;
+  try {
+    const mitmUrl = new URL(mitmBase);
+    url.protocol = mitmUrl.protocol;
+    url.hostname = mitmUrl.hostname;
+    url.port = mitmUrl.port;
+  } catch {
+    // Invalid MITM URL — ignore silently
+  }
+  return url;
+}
 
 /**
  * Transform the request URL: add ?beta=true to /v1/messages and /v1/messages/count_tokens.
