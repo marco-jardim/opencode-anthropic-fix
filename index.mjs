@@ -3119,15 +3119,27 @@ export async function AnthropicAuthPlugin({ client }) {
                 // body that deliberately carries NO system, metadata or
                 // max_tokens. Legacy path: unchanged, byte for byte.
                 //
-                // The URL comes from the package too: `built.url` is the pinned
+                // The URL is assembled from BOTH sources: origin from the host,
+                // path and query from the package. `built.url` is the pinned
                 // endpoint the headers and body were composed for
                 // (`https://api.anthropic.com/v1/messages?beta=true`, or
                 // `.../v1/messages/count_tokens?beta=true` on the count surface),
-                // so adopting it keeps the whole request from one source and
-                // rules out URL/body drift. The only local override left is the
-                // MITM origin (protocol/hostname/port via OPENCODE_MITM_BASE_URL);
-                // path and query always come from the package. transformRequestUrl
-                // still owns the URL on the legacy / emulation-off path.
+                // so the package stays the owner of the envelope — canonical path
+                // plus `?beta=true` — and cannot drift from the body it built.
+                // The ORIGIN, though, belongs to whoever the host addressed: a
+                // custom provider baseURL (gateway, LiteLLM, corporate proxy)
+                // arrives on `requestUrl`, and so does OPENCODE_MITM_BASE_URL,
+                // which transformRequestUrl already applied. Taking the package's
+                // origin as well would silently redirect those deployments to
+                // api.anthropic.com.
+                //
+                // No gateway path PREFIX can be lost this way: the `_useAdapter`
+                // gate only admits pathnames in {/v1/messages, /messages,
+                // /v1/messages/count_tokens, /messages/count_tokens}, so a
+                // prefixed endpoint never reaches the adapter in the first place.
+                //
+                // transformRequestUrl still owns the URL outright on the legacy /
+                // emulation-off path.
                 const _adapterSignature = {
                   enabled: getSignatureEmulationEnabled(),
                   claudeCliVersion,
@@ -3185,7 +3197,18 @@ export async function AnthropicAuthPlugin({ client }) {
                     requestHeaders = built.headers;
                     adapterBody = built.body;
                     try {
-                      const _adapterUrl = applyMitmOriginOverride(new URL(built.url));
+                      // Origin from the HOST, path+query from the PACKAGE.
+                      // `requestUrl` already carries the provider's configured
+                      // baseURL and already had OPENCODE_MITM_BASE_URL applied by
+                      // transformRequestUrl, so copying its origin is what keeps a
+                      // gateway / LiteLLM / proxy deployment reachable. With no
+                      // usable `requestUrl` the package's own origin stands.
+                      const _adapterUrl = new URL(built.url);
+                      if (requestUrl) {
+                        _adapterUrl.protocol = requestUrl.protocol;
+                        _adapterUrl.hostname = requestUrl.hostname;
+                        _adapterUrl.port = requestUrl.port;
+                      }
                       adapterRequestInput =
                         input instanceof Request ? new Request(_adapterUrl.toString(), input) : _adapterUrl;
                     } catch (error) {
@@ -5924,29 +5947,6 @@ async function fetchLatestClaudeCodeVersion(timeoutMs = 1200) {
  * @param {import('./lib/config.mjs').AnthropicAuthConfig} config
  * @returns {number | undefined} Resolved max_tokens value, or undefined for passthrough
  */
-
-/**
- * Rewrite only the origin (protocol/hostname/port) of a URL when
- * OPENCODE_MITM_BASE_URL is set, preserving path and query. Used by the adapter
- * path, which takes its path+query from the shared package's pinned endpoint.
- * Mutates and returns the given URL; an invalid MITM base is ignored silently.
- *
- * @param {URL} url
- * @returns {URL}
- */
-function applyMitmOriginOverride(url) {
-  const mitmBase = process.env.OPENCODE_MITM_BASE_URL;
-  if (!mitmBase) return url;
-  try {
-    const mitmUrl = new URL(mitmBase);
-    url.protocol = mitmUrl.protocol;
-    url.hostname = mitmUrl.hostname;
-    url.port = mitmUrl.port;
-  } catch {
-    // Invalid MITM URL — ignore silently
-  }
-  return url;
-}
 
 /**
  * Transform the request URL: add ?beta=true to /v1/messages and /v1/messages/count_tokens.

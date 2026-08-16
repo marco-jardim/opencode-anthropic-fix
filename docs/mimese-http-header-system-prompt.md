@@ -385,7 +385,7 @@ Inside `auth.loader().fetch(...)`:
 2. select account and resolve token (including refresh when needed)
 3. transform body (`transformRequestBody` in `lib/mimicry/request-body.mjs`) with runtime context
 4. build headers (`buildRequestHeaders` in `lib/mimicry/headers.mjs`), or, on the adapter path, headers + body + URL from the shared package
-5. execute `fetch` (adapter path: against the package's `built.url`, MITM origin override applied)
+5. execute `fetch` (adapter path: host origin + the package's path and query)
 
 Important: body transform happens per-attempt/per-account (not only once), so `metadata.user_id` includes the actual `accountId` in use for that attempt.
 
@@ -970,9 +970,18 @@ message prompt caches, so it should only be toggled deliberately.
 
 `transformRequestUrl(input)` appends `?beta=true` for `/v1/messages` and `/v1/messages/count_tokens` requests when the query parameter is not already present.
 
-On the adapter path (signature emulation on, eligible request), the effective URL is **not** the transformed one: the plugin adopts `built.url` from the shared package — the endpoint the headers and body were composed for (`https://api.anthropic.com/v1/messages?beta=true`, or `.../v1/messages/count_tokens?beta=true` on the count surface). This keeps URL, headers and body from a single source. The only local override is the MITM origin: when `OPENCODE_MITM_BASE_URL` is set, `applyMitmOriginOverride` rewrites protocol/hostname/port only, preserving the package's path and query.
+On the adapter path (signature emulation on, eligible request), the effective URL is assembled from **two** sources:
 
-`transformRequestUrl` still owns the URL on the legacy path — signature emulation off, a non-eligible endpoint, a non-string body, or any request the adapter declined.
+| Component                    | Source                                                                                                                              |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `protocol`/`hostname`/`port` | the host's `requestUrl` (the provider's configured baseURL, with `OPENCODE_MITM_BASE_URL` already applied by `transformRequestUrl`) |
+| `pathname` + `search`        | `built.url` from the shared package                                                                                                 |
+
+The package owns the _envelope_ — the canonical path and `?beta=true` — so the URL cannot drift from the headers and body it composed alongside it (`https://api.anthropic.com/v1/messages?beta=true`, or `.../v1/messages/count_tokens?beta=true` on the count surface). The _origin_ stays whatever the host addressed, so a custom provider baseURL (gateway, LiteLLM, corporate proxy) keeps working, and so does the MITM redirect. Taking the package's origin too would silently redirect those deployments to `api.anthropic.com`.
+
+No gateway path _prefix_ can be lost this way: the `_useAdapter` gate only admits pathnames in `{/v1/messages, /messages, /v1/messages/count_tokens, /messages/count_tokens}`, so a prefixed endpoint never reaches the adapter. When `requestUrl` is unusable (unparsable input), the package's own origin stands.
+
+`transformRequestUrl` still owns the URL outright on the legacy path — signature emulation off, a non-eligible endpoint, a non-string body, or any request the adapter declined.
 
 ## 9) Compatibility and fallback behavior
 

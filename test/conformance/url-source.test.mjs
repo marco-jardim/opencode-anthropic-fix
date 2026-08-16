@@ -178,22 +178,35 @@ describe("adapter path takes its URL from the shared package", () => {
     expect(await captureFetchedUrl("/messages")).toBe("https://api.anthropic.com/v1/messages?beta=true");
   });
 
-  // THE DISCRIMINATING PAIR. Every assertion above is satisfied by the OLD
+  // THE DISCRIMINATING CASES. Every assertion above is satisfied by the OLD
   // local derivation too — against the default base the package's endpoint and
   // transformRequestUrl's output are the same string, which is why the parity
-  // harness needed no re-seal. These two are the cases where the two sources
-  // disagree, so they are the only ones that actually fail if the adoption is
-  // reverted. Both are ACCEPTED behaviour changes, not bugs.
+  // harness needed no re-seal. What follows is where the two sources disagree.
+  //
+  // The custom-origin tests above are the OTHER half of the discrimination: they
+  // fail if the adapter ever adopts the package's origin along with its path.
 
-  it("replaces a non-Anthropic host with the package's absolute endpoint", async () => {
-    // Pre-migration this reached the proxy: transformRequestUrl only appended
-    // `?beta=true` and left the origin alone. It no longer does, and that is the
-    // decision -- the plugin never read ANTHROPIC_BASE_URL, so the "custom base
-    // must survive" rationale for discarding built.url was protecting a path
-    // nothing could reach. OPENCODE_MITM_BASE_URL is the supported override, and
-    // it is asserted below.
+  it("keeps the host's origin while taking the package's path and query", async () => {
+    // The origin belongs to whoever the host addressed. A custom provider
+    // baseURL -- gateway, LiteLLM, corporate proxy -- arrives here, and adopting
+    // the package's origin too would silently redirect it to api.anthropic.com
+    // with an OAuth bearer attached. The package still supplies `?beta=true`.
     expect(await captureFetchedUrl("/v1/messages", HOST_BODY, "https://proxy.internal.example")).toBe(
-      "https://api.anthropic.com/v1/messages?beta=true",
+      "https://proxy.internal.example/v1/messages?beta=true",
+    );
+  });
+
+  it("keeps a host origin carrying an explicit port", async () => {
+    expect(await captureFetchedUrl("/v1/messages", HOST_BODY, "http://gateway.internal:4000")).toBe(
+      "http://gateway.internal:4000/v1/messages?beta=true",
+    );
+  });
+
+  it("normalizes the path to the package's canonical one under a custom origin", async () => {
+    // Both halves at once: the host's origin survives AND the package's
+    // `/v1/messages` replaces the host-sent `/messages`.
+    expect(await captureFetchedUrl("/messages", HOST_BODY, "https://proxy.internal.example")).toBe(
+      "https://proxy.internal.example/v1/messages?beta=true",
     );
   });
 
@@ -208,10 +221,23 @@ describe("adapter path takes its URL from the shared package", () => {
   });
 });
 
+// The MITM redirect needs no adapter-specific handling: transformRequestUrl
+// already applied it to `requestUrl`, and the adapter copies `requestUrl`'s
+// origin. One code path serves the custom-baseURL case and the MITM case,
+// which is why the dedicated origin-override helper was deleted.
 describe("OPENCODE_MITM_BASE_URL overrides the origin only", () => {
   it("rewrites protocol, hostname and port but keeps the package's path and query", async () => {
     vi.stubEnv("OPENCODE_MITM_BASE_URL", "http://localhost:9999");
     expect(await captureFetchedUrl("/v1/messages")).toBe("http://localhost:9999/v1/messages?beta=true");
+  });
+
+  it("wins over a custom host origin", async () => {
+    // MITM is a capture/debug redirect: it is applied last by
+    // transformRequestUrl, so it outranks the provider's baseURL.
+    vi.stubEnv("OPENCODE_MITM_BASE_URL", "http://localhost:9999");
+    expect(await captureFetchedUrl("/v1/messages", HOST_BODY, "https://proxy.internal.example")).toBe(
+      "http://localhost:9999/v1/messages?beta=true",
+    );
   });
 
   it("keeps the package's count_tokens path under the MITM origin", async () => {
@@ -247,17 +273,11 @@ describe("legacy path keeps transformRequestUrl as the URL source", () => {
     expect(await captureFetchedUrl("/v1/messages")).toBe("http://localhost:9999/v1/messages?beta=true");
   });
 
-  // The mirror image of the discriminating pair above. With emulation off the
-  // package never runs, so the proxy origin and the extra query parameter both
-  // survive -- exactly as they did before the migration. This is the byte-level
-  // proof that the legacy path was not touched.
-  it("keeps a non-Anthropic host when signature emulation is off", async () => {
-    testPolicy.signature = false;
-    expect(await captureFetchedUrl("/v1/messages", HOST_BODY, "https://proxy.internal.example")).toBe(
-      "https://proxy.internal.example/v1/messages?beta=true",
-    );
-  });
-
+  // The mirror image of the discriminating cases above. With emulation off the
+  // package never runs, so the extra query parameter survives -- exactly as it
+  // did before the migration. This is the byte-level proof that the legacy path
+  // was not touched. (The proxy origin survives on BOTH paths now, so it is no
+  // longer a differential; it is asserted on the adapter side above.)
   it("keeps host-supplied query parameters when signature emulation is off", async () => {
     testPolicy.signature = false;
     expect(await captureFetchedUrl("/v1/messages?beta=true&trace=1")).toBe(
