@@ -814,46 +814,71 @@ describe("legacy request path", () => {
     expect(adapter.body).toContain("x-anthropic-billing-header");
   });
 
-  // Route 2: /v1/messages/count_tokens. index.mjs: "the package pins
-  // `https://api.anthropic.com/v1/messages?beta=true`, so a
-  // /v1/messages/count_tokens turn sent through it would be silently rewritten
-  // to the wrong endpoint." This is the assertion that proves it is not.
-  it("keeps count_tokens on its own endpoint instead of the package's pinned URL", async () => {
+  // PREMISE FLIP — READ BEFORE EDITING THE THREE ASSERTIONS BELOW.
+  //
+  // Until the count-tokens migration these tests asserted the opposite of what
+  // they assert now. Their premise was "the shared package has no count_tokens
+  // surface", so /v1/messages/count_tokens was pinned to the legacy forge on
+  // BOTH the URL and the body, and the package was pinned to never emit
+  // `token-counting-2024-11-01`. That premise is dead: the package exposes
+  // `buildClaudeCodeCountTokensRequest`, with its own pinned
+  // `countTokensEndpoint`, its own `filterCountTokensBetas` composition and its
+  // own body builder. The plugin now routes every count turn through it while
+  // signature emulation is on.
+  //
+  // `_useAdapter` is consequently false on ONE route, not two: signature
+  // emulation off. That is what the fourth test below guards, and it is now the
+  // only genuinely independent count_tokens differential in this file.
+  it("routes count_tokens through the package's own count surface", async () => {
+    testPolicy.signature = true;
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
       HOST_BODY,
       "/v1/messages/count_tokens",
     );
-    const adapter = await buildAdapterRequest(HOST_BODY);
 
+    // The URL is still transformRequestUrl's, NOT `built.url`: index.mjs
+    // discards the package's pinned endpoint so a custom ANTHROPIC_BASE_URL or
+    // proxy survives. Against the default base the two happen to agree, which
+    // is precisely why the body is what proves the routing below.
     expect(String(existing.url)).toBe("https://api.anthropic.com/v1/messages/count_tokens?beta=true");
-    expect(adapter.url).toBe(GOLDEN_ADAPTER_URL);
+    // The package's count body builder emits exactly these three keys. The
+    // legacy forge would have emitted `max_tokens`, `system` and `metadata` too.
+    expect(Object.keys(JSON.parse(existing.body))).toEqual(["model", "messages", "tools"]);
   });
 
-  it("emits the legacy beta set with token-counting-2024-11-01 on count_tokens", async () => {
+  it("emits the package's filtered count beta set, not the legacy one", async () => {
+    testPolicy.signature = true;
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
       HOST_BODY,
       "/v1/messages/count_tokens",
     );
-    const adapter = await buildAdapterRequest(HOST_BODY);
 
-    // Captured. Note the ORDER: `oauth-2025-04-20` leads, because this is the
-    // plugin's own header builder rather than the package's. That is the
-    // fingerprint of the legacy path, and the reason this assertion can still
-    // tell the two implementations apart.
+    // MEASURED from the package, not asserted from first principles. Two things
+    // are load-bearing here:
+    //  * `claude-code-20250219` LEADS. On the legacy forge `oauth-2025-04-20`
+    //    led, so the order alone still tells the two implementations apart;
+    //  * `filterCountTokensBetas` strips everything upstream does not send on a
+    //    count turn — prompt-caching-scope, extended-cache-ttl, web-search,
+    //    advisor-tool, redact-thinking and thinking-token-count are all gone,
+    //    including the ones the plugin pushed in through `additionalBetas`.
+    //    `token-counting-2024-11-01` is appended by the package itself.
     expect(new Headers(existing.headers).get("anthropic-beta")).toBe(
-      "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,web-search-2025-03-05,advisor-tool-2026-03-01,token-counting-2024-11-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13",
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01",
     );
-    // The package has no count_tokens surface, so it never emits this beta.
-    expect(adapter.headers.get("anthropic-beta")).not.toContain("token-counting-2024-11-01");
+    // The full Claude Code header set, not the three-header minimal one.
+    expect(new Headers(existing.headers).get("user-agent")).toBe("claude-cli/2.1.233 (external, cli)");
+    expect(new Headers(existing.headers).get("x-stainless-package-version")).toBe("0.112.1");
   });
 
-  // The body transform runs on BOTH routes — only the header forge and the URL
-  // are legacy here — so count_tokens still carries the forged Claude Code
-  // system prefix. Pinned so a future change that skipped the transform for
-  // count_tokens would be caught.
-  it("still forges the count_tokens body through the shared transform", async () => {
+  // Upstream's count turn carries no system prompt, no metadata and no token
+  // budget: `buildCountTokensBody` emits `{model, messages, tools}` and nothing
+  // else. Adopting the package means adopting that, so the forged Claude Code
+  // system prefix and the correlation `metadata.user_id` the legacy path used to
+  // send on this route are GONE. Pinned as a deliberate wire change.
+  it("emits the package's count body: no system, no metadata, no max_tokens", async () => {
+    testPolicy.signature = true;
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
       HOST_BODY,
@@ -861,21 +886,39 @@ describe("legacy request path", () => {
     );
     const parsed = JSON.parse(existing.body);
 
-    expect(Object.keys(parsed)).toEqual(GOLDEN_ADAPTER_BODY_KEYS);
-    expect(parsed.system.map((block) => block.text)).toEqual(
-      GOLDEN_ADAPTER_BODY.system
-        .map((block) => block.text)
-        .map((text) =>
-          text.startsWith("x-anthropic-billing-header:") ? expect.stringContaining("cc_entrypoint=cli") : text,
-        ),
+    expect(parsed.system).toBeUndefined();
+    expect(parsed.metadata).toBeUndefined();
+    expect(parsed.max_tokens).toBeUndefined();
+    expect(existing.body).not.toContain("x-anthropic-billing-header");
+    expect(parsed.model).toBe(HOST_BODY.model);
+    expect(parsed.messages).toEqual(HOST_BODY.messages);
+    // `tools` is always present, empty when the host sent none, because the
+    // package normalizes the count body's tool list rather than omitting it.
+    expect(parsed.tools).toEqual([]);
+  });
+
+  // The remaining count_tokens differential: emulation off keeps the legacy
+  // forge, headers and body alike.
+  it("keeps count_tokens on the legacy forge when signature emulation is off", async () => {
+    testPolicy.signature = false;
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      HOST_BODY,
+      "/v1/messages/count_tokens",
     );
-    expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-    expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-    expect(JSON.parse(parsed.metadata.user_id)).toEqual({
-      device_id: expect.stringMatching(/^[0-9a-f]{64}$/),
-      account_uuid: expect.any(String),
-      session_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
-    });
+    const parsed = JSON.parse(existing.body);
+
+    expect([...new Headers(existing.headers).keys()].sort()).toEqual([
+      "anthropic-beta",
+      "authorization",
+      "content-type",
+      "user-agent",
+    ]);
+    expect(new Headers(existing.headers).get("anthropic-beta")).toBe(
+      "oauth-2025-04-20,interleaved-thinking-2025-05-14,token-counting-2024-11-01",
+    );
+    // Untouched host body: the legacy path forges nothing with emulation off.
+    expect(Object.keys(parsed)).toEqual(["model", "max_tokens", "system", "messages", "temperature"]);
   });
 });
 

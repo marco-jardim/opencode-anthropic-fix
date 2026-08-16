@@ -3631,6 +3631,9 @@ describe("header handling", () => {
     expect(betaHeader).not.toContain("files-api-2025-04-14");
   });
 
+  // Still true after the count-tokens migration, but emitted by a different
+  // component: the package appends `token-counting-2024-11-01` itself
+  // (`build-request.ts`, count surface) instead of `headers.mjs` adding it.
   it("adds token-counting beta for /v1/messages/count_tokens", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
@@ -3810,11 +3813,14 @@ describe("header handling", () => {
     expect(wireBody.messages.at(-1).content.at(-1).text).toBe("hi");
   });
 
-  it("strips stainless helper markers on the legacy path too (count_tokens)", async () => {
+  it("strips stainless helper markers on the package's count surface (count_tokens)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
-    // /v1/messages/count_tokens never goes through the adapter, so this pins the
-    // legacy half of the strip: the header is still derived, the body is clean.
+    // count_tokens now routes through `buildWireCompatibleCountTokensRequest`
+    // while signature emulation is on, so this pins the strip on the SECOND
+    // package surface: the header is still derived from the markers, and the
+    // body the package emits carries none of them. The legacy half of the strip
+    // is pinned by the emulation-off test below.
     await fetchFn("https://api.anthropic.com/v1/messages/count_tokens", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3845,6 +3851,60 @@ describe("header handling", () => {
     expect(init.body).not.toContain("stainless_helper");
     expect(init.body).not.toContain("legacy-tool-helper");
     expect(init.body).not.toContain("legacy-content-helper");
+    expect(JSON.parse(init.body).messages.at(-1).content.at(-1).text).toBe("hi");
+  });
+
+  it("strips stainless helper markers on the legacy path (signature emulation off)", async () => {
+    // The ONLY route left that still reaches `legacyStrippedBody` in index.mjs.
+    // Kept so the strip stays covered on BOTH construction paths: the package
+    // surfaces above, and the plugin's own forge here.
+    loadConfig.mockReturnValueOnce({
+      ...loadConfig(),
+      signature_emulation: { ...loadConfig().signature_emulation, enabled: false },
+    });
+
+    const plugin = await AnthropicAuthPlugin({ client: makeClient() });
+    const result = await plugin.auth.loader(
+      vi.fn().mockResolvedValue({
+        type: "oauth",
+        refresh: "test-refresh",
+        access: "test-access",
+        expires: Date.now() + 3600_000,
+      }),
+      makeProvider(),
+    );
+
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+    await result.fetch("https://api.anthropic.com/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "hi", stainless_helper: "legacy-content-helper" }],
+          },
+        ],
+        tools: [
+          {
+            name: "read_file",
+            input_schema: { type: "object", properties: {} },
+            stainlessHelper: "legacy-tool-helper",
+          },
+        ],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(init.body).not.toContain("stainlessHelper");
+    expect(init.body).not.toContain("stainless_helper");
+    expect(init.body).not.toContain("legacy-tool-helper");
+    expect(init.body).not.toContain("legacy-content-helper");
+    // The legacy body is otherwise the host's, untouched: `max_tokens` survives
+    // where the package's count surface would have dropped it.
+    expect(JSON.parse(init.body).max_tokens).toBe(1024);
     expect(JSON.parse(init.body).messages.at(-1).content.at(-1).text).toBe("hi");
   });
 

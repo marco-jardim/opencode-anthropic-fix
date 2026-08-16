@@ -247,7 +247,13 @@ describe("shared wire package rollback documentation", () => {
     // The rollback procedure is code-revert only precisely because this import
     // cannot be switched off at runtime. If the import ever becomes conditional,
     // this assertion fails and the documented procedure must be rewritten.
-    expect(adapter).toMatch(/^import \{ buildClaudeCodeRequest \} from "@tormentalabs\/claude-code-wire-compat";$/m);
+    //
+    // BOTH package surfaces are named here. The count-tokens migration added
+    // `buildClaudeCodeCountTokensRequest` to the same statement, so a revert has
+    // two entry points to unwind rather than one.
+    expect(adapter).toMatch(
+      /^import \{ buildClaudeCodeRequest, buildClaudeCodeCountTokensRequest \} from "@tormentalabs\/claude-code-wire-compat";$/m,
+    );
     expect(provenance).toMatch(/static[^\n]*import|import[^\n]*static/i);
   });
 });

@@ -201,10 +201,11 @@ These were the plugin's defect, so under the Option A exception they were fixed 
   (`lib/mimicry/headers.mjs:146`) removes `x_stainless_helper`, `x-stainless-helper`, `stainless_helper`,
   `stainlessHelper` and `_stainless_helper` from tools, messages and nested content blocks. It shares the traversal
   `walkStainlessHelperCarriers` (`headers.mjs:101`) with `buildStainlessHelperHeader` (`:118`) precisely so that what
-  is READ to compute `x-stainless-helper` and what is REMOVED from the body cannot drift apart. Applied on **both**
-  paths: the adapter path strips inside `buildWireCompatibleRequest` (`lib/mimicry/wire-compat.mjs:286`), the legacy
-  path right after `buildRequestHeaders` (`index.mjs:3235`). Before this, the markers went to the API on every
-  request — the API has never known those keys, so the package was right to reject them with `INVALID_INPUT`.
+  is READ to compute `x-stainless-helper` and what is REMOVED from the body cannot drift apart. Applied on **every**
+  path: the adapter path strips inside `buildWireCompatibleRequest`, the count-tokens path inside
+  `buildWireCompatibleCountTokensRequest` (both in `lib/mimicry/wire-compat.mjs`), the legacy path right after
+  `buildRequestHeaders` in `index.mjs`. Before this, the markers went to the API on every request — the API has never
+  known those keys, so the package was right to reject them with `INVALID_INPUT`.
 
 - **`context-hint-2026-04-09` is gone from every path.** The adapter path never emitted it; the legacy path used to
   push the beta in `buildAnthropicBetaHeader` and inject `context_hint: { enabled: true }` in `transformRequestBody`.
@@ -228,6 +229,64 @@ These were the plugin's defect, so under the Option A exception they were fixed 
   `isTitleGenerator` is derived in `index.mjs:3196-3197` from the **pre-transform** body (`_parsedBodyOnce`). By the
   time the transport is built, the title-generator system-prompt swap has already rewritten those blocks, so detecting
   it later would give a false negative and the attribution would be dropped from a turn that must keep it.
+
+## `/v1/messages/count_tokens` now flows through the package
+
+Until this migration the count endpoint was the one route that stayed on the legacy forge even with signature
+emulation on, on the premise that the package had no count surface. It has one:
+`buildClaudeCodeCountTokensRequest`, wrapped by `buildWireCompatibleCountTokensRequest`
+(`lib/mimicry/wire-compat.mjs`). `_useAdapter` in `index.mjs` now covers both endpoints and `_isCountTokens` picks
+the surface; the legacy forge owns count_tokens only when signature emulation is off.
+
+`built.url` is discarded on both surfaces, exactly as before, so the package's pinned
+`https://api.anthropic.com/v1/messages/count_tokens?beta=true` never overrides a custom `ANTHROPIC_BASE_URL`.
+`transformRequestUrl` already appends `?beta=true` to both endpoints, so there is no double application.
+
+### The wire change, measured
+
+This is an ADOPTION of the genuine binary's count request, not a regression. Upstream derives the count beta set from
+the model alone and its count body carries no system prompt, no metadata and no token budget.
+
+**Body.** Six keys become three:
+
+| field         | legacy forge (emulation on)                                                                 | package count surface                   |
+| ------------- | ------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `model`       | present                                                                                     | present, unchanged                      |
+| `max_tokens`  | present                                                                                     | **dropped**                             |
+| `system`      | forged 3-block Claude Code prefix, `system[1]`/`system[2]` carrying `cache_control` markers | **dropped**                             |
+| `messages`    | present                                                                                     | present, unchanged                      |
+| `temperature` | present                                                                                     | **dropped**                             |
+| `metadata`    | `{user_id: JSON{device_id, account_uuid, session_id}}`                                      | **dropped**                             |
+| `tools`       | absent                                                                                      | **added**, `[]` when the host sent none |
+
+**`anthropic-beta`.** `filterCountTokensBetas` strips everything upstream does not send on a count turn, including the
+betas the plugin pushes in through `additionalBetas`. `token-counting-2024-11-01` is still emitted, but by the package
+rather than by `headers.mjs`:
+
+- before: `oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,web-search-2025-03-05,advisor-tool-2026-03-01,token-counting-2024-11-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13`
+- after: `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01`
+
+**Header names.** Unchanged — both constructions emit the same 17 names, verified by diffing
+`buildRequestHeaders` against a count build. Only values move.
+
+### The header-ownership mirrors, and why they exist
+
+`ClaudeCodeCountTokensInput` is a sixteen-key `Pick<ClaudeCodeRequestInput, ...>` and `extraHeaderPolicy` is not one
+of the sixteen. `validateCountTokensInput` runs `assertExactKeys`, so passing it is `INVALID_INPUT` rather than an
+ignored key — the count surface always resolves extra headers under `strict`, where the first host header the package
+owns raises `DUPLICATE_HEADER` or `FORBIDDEN_HEADER` and nothing reaches the wire. The plugin forwards the host header
+map, so without a filter every count turn would throw.
+
+`dropConflictingExtraHeaders` (`lib/mimicry/wire-compat.mjs`) therefore reproduces the package's `dropConflicting`
+policy plugin-side, against three exported mirrors: `PACKAGE_CANONICAL_HEADER_NAMES` (22 names),
+`PACKAGE_FORBIDDEN_HEADER_NAMES` (11) and `PACKAGE_FORBIDDEN_HEADER_PREFIXES` (`proxy-`, `x-forwarded-`).
+
+A mirror is a liability the moment it stops matching its source, so
+`test/conformance/count-tokens-header-policy.test.mjs` asserts all three against the package's REAL behaviour rather
+than against its source text: every mirrored name is probed one at a time and must produce the expected error code
+(over-broad guard), every header the package emits on a bare count build must be in the canonical mirror (over-narrow
+guard, this is the one that catches a package release ADDING a header), and a header the package does not own must
+still be forwarded.
 
 ## Divergences that the package has already closed
 

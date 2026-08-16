@@ -2,6 +2,74 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [0.5.0] — 2026-08-16
+
+Second-surface release. `0.3.0` moved the `/v1/messages` turn into the shared wire-compat package and left
+`/v1/messages/count_tokens` on the plugin's legacy forge, on the premise that the package had no count surface. It has
+one. This release routes count_tokens through it whenever signature emulation is on, which changes the count request
+on the wire — deliberately, and toward the genuine client.
+
+### Changed
+
+- **`/v1/messages/count_tokens` is now built by the package's count surface when signature emulation is on.**
+  `lib/mimicry/wire-compat.mjs` gains `toClaudeCodeCountTokensInput` and `buildWireCompatibleCountTokensRequest`,
+  wrapping `buildClaudeCodeCountTokensRequest`; `_useAdapter` in `index.mjs` now covers both endpoints and
+  `_isCountTokens` selects the surface. The mapper delegates to the existing `toClaudeCodeRequestInput` and picks the
+  sixteen keys `ClaudeCodeCountTokensInput` declares, so the host tolerances that still apply — the dotted→dashed model
+  rewrite, `tools` raising on a malformed value rather than being silently dropped, the stainless-marker strip, the
+  profile-override resolution — stay in one place instead of being forked. No explicit `profile` argument is passed, so
+  the count turn inherits `DEFAULT_PROFILE` exactly like the main turn. **With signature emulation off, count_tokens
+  stays on the legacy path, unchanged byte for byte.**
+
+  The rationale is adoption of the reference shape, not an optimisation. The package's `contracts.d.ts` records that
+  upstream derives the count beta set from the model alone and that the count-tokens body carries no `system`, no
+  `metadata` and no `maxTokens`; the plugin was sending all three. The measured diff, emulation on:
+  - **Body: 6 keys → 3.** `model` and `messages` are unchanged. Dropped: `max_tokens`; `system` (the forged three-block
+    Claude Code prefix, including the `cache_control` markers on `system[1]` and `system[2]`); `temperature`; and
+    `metadata.user_id` (the device/account/session correlation triple). Added: `tools`, `[]` when the host sent none.
+  - **`anthropic-beta`: 11 entries → 5.** `filterCountTokensBetas` strips everything upstream does not send on a count
+    turn, including the betas the plugin pushes in through `additionalBetas`:
+    `prompt-caching-scope-2026-01-05`, `extended-cache-ttl-2025-04-11`, `web-search-2025-03-05`,
+    `advisor-tool-2026-03-01`, `redact-thinking-2026-02-12` and `thinking-token-count-2026-05-13`. The leading beta
+    flips from `oauth-2025-04-20` to `claude-code-20250219` because the package composes the header. What survives is
+    `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01`
+    — `token-counting-2024-11-01` is still emitted, but appended by the package rather than by `lib/mimicry/headers.mjs`.
+  - **Header name set: identical.** Both constructions emit the same 17 names, verified by diffing `buildRequestHeaders`
+    against a real count build; the diff is values-only, and the only value that moves is `anthropic-beta`.
+  - **URL: unchanged.** `built.url` is discarded on both surfaces exactly as before, so the package's pinned
+    `https://api.anthropic.com/v1/messages/count_tokens?beta=true` never overrides a custom `ANTHROPIC_BASE_URL` or
+    proxy endpoint. `transformRequestUrl` already appends `?beta=true` to both endpoints, so there is no double
+    application and that function was not touched.
+
+### Added
+
+- **`test/conformance/count-tokens-header-policy.test.mjs`** — a drift guard for the three header-ownership lists the
+  plugin now mirrors from the package. The mirrors exist because `extraHeaderPolicy` is not one of the sixteen keys
+  `ClaudeCodeCountTokensInput` picks and `validateCountTokensInput` runs `assertExactKeys`, so passing it is
+  `INVALID_INPUT` rather than an ignored key: the count surface always resolves extra headers under `strict`, where the
+  first host header the package owns raises `DUPLICATE_HEADER` or `FORBIDDEN_HEADER` and nothing reaches the wire.
+  Since the plugin forwards the host header map, `dropConflictingExtraHeaders` reproduces the package's
+  `dropConflicting` policy plugin-side against `PACKAGE_CANONICAL_HEADER_NAMES` (22 names),
+  `PACKAGE_FORBIDDEN_HEADER_NAMES` (11) and `PACKAGE_FORBIDDEN_HEADER_PREFIXES` (`proxy-`, `x-forwarded-`).
+  The test asserts all three against the package's **real behaviour** rather than its source text — each name probed
+  individually for the expected error code (the over-broad guard), every header a bare count build emits required to be
+  in the canonical mirror (the over-narrow guard, which is what catches a package release _adding_ a header), and a
+  header the package does not own required to still be forwarded.
+
+- **Legacy-path strip coverage for count_tokens.** The existing `index.test.mjs` case that claimed to pin the legacy
+  half of the stainless-marker strip on this route now exercises the package's count surface instead, so it was renamed
+  to say so and a genuine emulation-off case was added beside it. The strip stays covered on every construction path.
+
+### Known gaps
+
+- **The three header-ownership lists are duplication.** The drift test makes divergence loud rather than silent, but
+  the real fix is the package exposing `extraHeaderPolicy` on the count surface as it already does on the main one.
+  Until then the plugin carries a copy of data it does not own.
+
+- **`temperature` no longer reaches the count body with signature emulation on.** This is correct against the genuine
+  client, which does not send it on a count turn, but it is an observable behaviour change for a host that relied on
+  count_tokens reflecting sampling parameters. Documented rather than gated; emulation off still forwards it.
+
 ## [0.4.0] — 2026-08-16
 
 Dependency-tracking release. `0.3.0` moved request construction into the shared wire-compat package but pinned it to an

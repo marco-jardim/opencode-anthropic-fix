@@ -60,12 +60,18 @@ vi.mock("../../lib/refresh-lock.mjs", () => ({
 // Same harness configuration as the golden-outgoing conformance test: startup
 // version fetch and idle refresh off so the only network call in the run is the
 // request under observation.
+// `signature` is the `_useAdapter` switch in index.mjs. Every test in this file
+// runs with it ON except the emulation-off count_tokens case, which is the only
+// route left where the legacy forge still owns the request.
+const testPolicy = vi.hoisted(() => ({ signature: true }));
+
 vi.mock("../../lib/config.mjs", async (importOriginal) => {
   const original = await importOriginal();
   const makeConfig = () => ({
     ...original.DEFAULT_CONFIG,
     signature_emulation: {
       ...original.DEFAULT_CONFIG.signature_emulation,
+      enabled: testPolicy.signature,
       fetch_claude_code_version_on_startup: false,
     },
     override_model_limits: { ...original.DEFAULT_CONFIG.override_model_limits },
@@ -91,13 +97,23 @@ const wireCompat = vi.hoisted(() => ({
   original: null,
   /** @type {import('vitest').Mock | null} */
   spy: null,
+  /** @type {((body: string | undefined, transport: unknown) => Promise<unknown>) | null} */
+  countOriginal: null,
+  /** Second seam, for the package's count-tokens surface. @type {import('vitest').Mock | null} */
+  countSpy: null,
 }));
 
 vi.mock("../../lib/mimicry/wire-compat.mjs", async (importOriginal) => {
   const original = await importOriginal();
   wireCompat.original = original.buildWireCompatibleRequest;
   wireCompat.spy = vi.fn((...args) => wireCompat.original(...args));
-  return { ...original, buildWireCompatibleRequest: wireCompat.spy };
+  wireCompat.countOriginal = original.buildWireCompatibleCountTokensRequest;
+  wireCompat.countSpy = vi.fn((...args) => wireCompat.countOriginal(...args));
+  return {
+    ...original,
+    buildWireCompatibleRequest: wireCompat.spy,
+    buildWireCompatibleCountTokensRequest: wireCompat.countSpy,
+  };
 });
 
 import { buildClaudeCodeRequest } from "@tormentalabs/claude-code-wire-compat";
@@ -176,7 +192,9 @@ function headerSet(headers) {
 
 describe("the live request path goes through the shared wire package", () => {
   beforeEach(() => {
+    testPolicy.signature = true;
     wireCompat.spy.mockClear();
+    wireCompat.countSpy.mockClear();
     vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
     vi.stubEnv("ANTHROPIC_CUSTOM_HEADERS", "");
     vi.stubEnv("CLAUDE_AGENT_SDK_CLIENT_APP", "");
@@ -278,7 +296,9 @@ describe("the live request path goes through the shared wire package", () => {
 
 describe("the legacy path still owns the requests the package declines", () => {
   beforeEach(() => {
+    testPolicy.signature = true;
     wireCompat.spy.mockClear();
+    wireCompat.countSpy.mockClear();
     vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
     vi.stubEnv("ANTHROPIC_CUSTOM_HEADERS", "");
     vi.stubEnv("OPENCODE_ANTHROPIC_PROFILE_OVERRIDE", "");
@@ -289,10 +309,13 @@ describe("the legacy path still owns the requests the package declines", () => {
     vi.unstubAllEnvs();
   });
 
-  it("does not use the package for /v1/messages/count_tokens", async () => {
-    // The package pins `https://api.anthropic.com/v1/messages?beta=true`, so a
-    // count_tokens turn sent through it would be rewritten to the wrong
-    // endpoint. It must stay on the legacy path.
+  // INVERTED by the count-tokens migration. This used to assert that
+  // count_tokens never reached the package, on the premise that the package
+  // pinned the /v1/messages endpoint and would rewrite the turn to the wrong
+  // one. The package now has a count surface with its own pinned endpoint, and
+  // index.mjs discards `built.url` on both surfaces anyway, so the premise is
+  // gone and the assertion is the other way round.
+  it("uses the package's count surface for /v1/messages/count_tokens", async () => {
     const mockFetch = await driveRequest("https://api.anthropic.com/v1/messages/count_tokens", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -301,8 +324,31 @@ describe("the legacy path still owns the requests the package declines", () => {
 
     const calls = outgoingCallsFor(mockFetch, "/v1/messages/count_tokens");
     expect(calls).toHaveLength(1);
+    expect(wireCompat.countSpy).toHaveBeenCalledTimes(1);
+    // The count surface, and ONLY the count surface: routing a count turn
+    // through the main builder would forge a system prompt and a max_tokens
+    // upstream never sends on this endpoint.
     expect(wireCompat.spy).not.toHaveBeenCalled();
-    // Still a fully-formed authenticated request, just built by the legacy code.
+    // Independent of the spy, so this keeps discriminating even if a refactor
+    // removes the seam: the package's count body carries exactly these keys.
+    expect(Object.keys(JSON.parse(calls[0][1].body))).toEqual(["model", "messages", "tools"]);
+    expect(new Headers(calls[0][1].headers).get("authorization")).toBeTruthy();
+  });
+
+  it("does not use the package for count_tokens when signature emulation is off", async () => {
+    testPolicy.signature = false;
+    const mockFetch = await driveRequest("https://api.anthropic.com/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(FOREGROUND_BODY),
+    });
+
+    const calls = outgoingCallsFor(mockFetch, "/v1/messages/count_tokens");
+    expect(calls).toHaveLength(1);
+    expect(wireCompat.countSpy).not.toHaveBeenCalled();
+    expect(wireCompat.spy).not.toHaveBeenCalled();
+    // The legacy forge leaves the host body alone with emulation off.
+    expect(JSON.parse(calls[0][1].body).max_tokens).toBe(FOREGROUND_BODY.max_tokens);
     expect(new Headers(calls[0][1].headers).get("authorization")).toBeTruthy();
   });
 

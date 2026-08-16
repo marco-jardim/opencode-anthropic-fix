@@ -77,7 +77,7 @@ import {
   SUBAGENT_CC_ANCHOR,
 } from "./lib/mimicry/system-prompt.mjs";
 import { buildAdapterTransport, resolveAdapterEnv } from "./lib/mimicry/adapter-input.mjs";
-import { buildWireCompatibleRequest } from "./lib/mimicry/wire-compat.mjs";
+import { buildWireCompatibleRequest, buildWireCompatibleCountTokensRequest } from "./lib/mimicry/wire-compat.mjs";
 import {
   hasOneMillionContext,
   isEligibleFor1MContext,
@@ -3010,20 +3010,29 @@ export async function AnthropicAuthPlugin({ client }) {
                 //  1. signature emulation on — with it off the plugin emits only
                 //     3 headers and a minimal beta set, while the package always
                 //     emits the full Claude Code set;
-                //  2. the /v1/messages endpoint — the package pins
-                //     `https://api.anthropic.com/v1/messages?beta=true`, so a
-                //     /v1/messages/count_tokens turn sent through it would be
-                //     silently rewritten to the wrong endpoint.
+                //  2. a messages endpoint the package has a surface for. Both
+                //     qualify now: `buildClaudeCodeRequest` for /v1/messages and
+                //     `buildClaudeCodeCountTokensRequest` for
+                //     /v1/messages/count_tokens, each pinning its OWN endpoint.
+                //     The endpoint pin is inert either way — `built.url` is never
+                //     adopted (see the consumption comment below), so the URL on
+                //     the wire stays the one transformRequestUrl produced and a
+                //     custom ANTHROPIC_BASE_URL survives.
                 //
                 // The former first-party check is now structural: the plugin only
                 // speaks to first-party Anthropic, so it is always satisfied.
-                //  3. a JSON body is actually present — the package requires
-                //     `model` and `max_tokens`, so a bodiless request must keep
-                //     using the legacy path rather than throwing INVALID_INPUT.
+                //  3. a JSON body is actually present. The main-turn surface
+                //     requires `model` and `max_tokens`; the count surface
+                //     requires `model` and `messages` and accepts no
+                //     `max_tokens` at all. Either way a bodiless request must
+                //     keep using the legacy path rather than throwing
+                //     INVALID_INPUT.
                 const _adapterPathname = requestUrl?.pathname;
+                const _isCountTokens =
+                  _adapterPathname === "/v1/messages/count_tokens" || _adapterPathname === "/messages/count_tokens";
                 const _useAdapter =
                   getSignatureEmulationEnabled() &&
-                  (_adapterPathname === "/v1/messages" || _adapterPathname === "/messages") &&
+                  (_adapterPathname === "/v1/messages" || _adapterPathname === "/messages" || _isCountTokens) &&
                   typeof requestInit.body === "string" &&
                   requestInit.body.length > 0;
 
@@ -3106,12 +3115,17 @@ export async function AnthropicAuthPlugin({ client }) {
                 //
                 // Adapter path: the shared package composes the headers AND
                 // rebuilds the body (canonical system prefix, metadata, beta
-                // header). Legacy path: unchanged, byte for byte.
+                // header). On the count-tokens surface it composes headers and a
+                // body that deliberately carries NO system, metadata or
+                // max_tokens. Legacy path: unchanged, byte for byte.
                 //
                 // The URL deliberately stays whatever transformRequestUrl already
-                // produced. `built.url` is the package's pinned
-                // `https://api.anthropic.com/v1/messages?beta=true`, which would
-                // override a custom ANTHROPIC_BASE_URL or proxy endpoint.
+                // produced. `built.url` is the package's pinned endpoint
+                // (`https://api.anthropic.com/v1/messages?beta=true`, or
+                // `.../v1/messages/count_tokens?beta=true` on the count surface),
+                // which would override a custom ANTHROPIC_BASE_URL or proxy
+                // endpoint. transformRequestUrl already appends `?beta=true` to
+                // both endpoints itself, so discarding `built.url` costs nothing.
                 const _adapterSignature = {
                   enabled: getSignatureEmulationEnabled(),
                   claudeCliVersion,
@@ -3159,7 +3173,12 @@ export async function AnthropicAuthPlugin({ client }) {
                     nodeVersion: process.version,
                   });
                   if (_adapterResult.applicable) {
-                    const built = await buildWireCompatibleRequest(body, _adapterResult.transport);
+                    // Two package surfaces, one transport: the count-tokens
+                    // builder consumes a strict subset of the same input, so the
+                    // transport object needs no count-specific mode.
+                    const built = _isCountTokens
+                      ? await buildWireCompatibleCountTokensRequest(body, _adapterResult.transport)
+                      : await buildWireCompatibleRequest(body, _adapterResult.transport);
                     requestHeaders = built.headers;
                     adapterBody = built.body;
                   } else {

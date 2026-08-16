@@ -537,6 +537,12 @@ When `signatureEnabled=false`:
 - adds `interleaved-thinking-2025-05-14` (in addition to OAuth beta)
 - adds `token-counting-2024-11-01` for `/v1/messages/count_tokens`
 
+> **`/v1/messages/count_tokens` with `signatureEnabled=true` no longer uses this builder.** That route is composed by
+> the shared package's count surface (`buildClaudeCodeCountTokensRequest`), which derives its own beta set from the
+> model, appends `token-counting-2024-11-01` itself, and emits a body of `{model, messages, tools}` with no `system`,
+> `metadata` or `max_tokens`. The list below therefore describes the `/v1/messages` route and the emulation-off count
+> route. See [`mimicry/wire-compat-divergences.md`](./mimicry/wire-compat-divergences.md) for the measured diff.
+
 When `signatureEnabled=true`, current implementation may add dynamically:
 
 - `claude-code-20250219` (not added for Haiku models)

@@ -199,11 +199,18 @@ through the table above, re-running the full gate after each step.
 
    The construction swap has landed, so it is a distinct rollback step and it is the FIRST one to
    consider. [`index.mjs`](../index.mjs) imports `buildWireCompatibleRequest` and calls it on the
-   live request path for every first-party `/v1/messages` turn with signature emulation on; the
-   legacy `buildRequestHeaders` construction survives beside it only as the fallback for the
-   requests the adapter declines (a non-`/v1/messages` endpoint such as `count_tokens`, a bodiless
-   request, or signature emulation off). Reverting `99f4844` therefore sends every turn back down
-   the legacy path without removing the package:
+   live request path for every first-party `/v1/messages` turn with signature emulation on.
+
+   The package's SECOND surface is consumed too: `buildWireCompatibleCountTokensRequest` wraps
+   `buildClaudeCodeCountTokensRequest`, and every `/v1/messages/count_tokens` turn with signature
+   emulation on is built by it. Both wrappers come from the same static import in
+   [`lib/mimicry/wire-compat.mjs`](../lib/mimicry/wire-compat.mjs), so a revert unwinds two entry
+   points rather than one.
+
+   The legacy `buildRequestHeaders` construction survives beside them only as the fallback for the
+   requests the adapter declines (a bodiless request, or signature emulation off — on either
+   endpoint). Reverting `99f4844` therefore sends every turn back down the legacy path without
+   removing the package:
 
    ```bash
    git revert --no-edit 99f4844
