@@ -2950,6 +2950,31 @@ export async function AnthropicAuthPlugin({ client }) {
                 // composed — `customBetasStripped` empties the custom set, and
                 // `sessionRejectedBetas` filters the individual betas the API
                 // rejected. That is the mechanism that actually reaches the wire.
+                //
+                // PHASE 3.2 — THIS VALUE NO LONGER REACHES THE WIRE, AND IS KEPT
+                // ANYWAY. Post-latch-removal its single consumer is
+                // `transformRequestBody`, which tests it for
+                // `task-budgets-2026-03-13` to decide whether to preserve or
+                // inject `output_config` (lib/mimicry/request-body.mjs). The
+                // outgoing `anthropic-beta` header is composed by the shared
+                // package on every adapter turn and recomputed from scratch by
+                // `buildRequestHeaders` on every legacy one; neither reads this.
+                //
+                // IT WAS CONSIDERED FOR DELETION AND DELIBERATELY KEPT. Deriving
+                // the task-budgets signal directly would mean re-deciding, here,
+                // every gate the composer applies to a custom beta: shortcut
+                // resolution, the `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` filter
+                // (task-budgets IS in `EXPERIMENTAL_BETA_FLAGS`), the
+                // signature-emulation gate, and the pathname gate. That is a
+                // second copy of gating logic whose only job is to agree with the
+                // first — precisely the parallel-maintenance divergence the
+                // wire-compat migration exists to delete — bought for a call that
+                // costs well under a millisecond.
+                //
+                // The clean removal is not local: it is for `transformRequestBody`
+                // to take a BOOLEAN task-budgets signal instead of a header
+                // string, sourced from the adapter's own `additionalBetas`.
+                // FLAGGED FOR PHASE 4.1, alongside the rest of the legacy forge.
                 const computedBetaHeader = buildAnthropicBetaHeader(
                   "",
                   getSignatureEmulationEnabled(),
