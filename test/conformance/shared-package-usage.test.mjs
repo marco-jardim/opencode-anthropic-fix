@@ -164,6 +164,17 @@ function makeSuccessResponse() {
  * @param {RequestInit} init
  */
 async function driveRequest(url, init) {
+  const { fetchFn, mockFetch } = await makeInterceptor();
+  const response = await fetchFn(url, init);
+  await response.text();
+  return mockFetch;
+}
+
+/**
+ * Same interceptor, handed back UNCALLED, for the cases where driving the
+ * request is expected to reject rather than return a response.
+ */
+async function makeInterceptor() {
   const mockFetch = vi.fn(() => Promise.resolve(makeSuccessResponse()));
   vi.stubGlobal("fetch", mockFetch);
   const plugin = await AnthropicAuthPlugin({ client: makeClient() });
@@ -174,10 +185,7 @@ async function driveRequest(url, init) {
     expires: Date.now() + 3_600_000,
   });
   const { fetch: fetchFn } = await plugin.auth.loader(getAuth, makeProvider());
-
-  const response = await fetchFn(url, init);
-  await response.text();
-  return mockFetch;
+  return { fetchFn, mockFetch };
 }
 
 /** @param {import('vitest').Mock} mockFetch @param {string} pathname */
@@ -352,12 +360,93 @@ describe("the legacy path still owns the requests the package declines", () => {
     expect(new Headers(calls[0][1].headers).get("authorization")).toBeTruthy();
   });
 
-  it("does not use the package for a bodiless request", async () => {
-    // The package requires `model` and `max_tokens`; a bodiless request must
-    // fall back rather than throw INVALID_INPUT.
+  // PHASE 2.2 — an endpoint the package has NO surface for is the only thing
+  // left that the adapter declines. It is not a fallback: nothing about the
+  // request is forged into a Claude Code shape, the interceptor just adds auth
+  // and forwards.
+  it("leaves an endpoint outside the package's surfaces on the passthrough path", async () => {
+    const mockFetch = await driveRequest("https://api.anthropic.com/v1/models", {
+      method: "GET",
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(outgoingCallsFor(mockFetch, "/v1/models")).toHaveLength(1);
+    expect(wireCompat.spy).not.toHaveBeenCalled();
+    expect(wireCompat.countSpy).not.toHaveBeenCalled();
+    expect(new Headers(outgoingCallsFor(mockFetch, "/v1/models")[0][1].headers).get("authorization")).toBeTruthy();
+  });
+});
+
+// PHASE 2.2 — THE FALLBACK IS GONE, AND THIS IS WHAT PROVES IT.
+//
+// Before this phase a body the package could not consume (absent, unparsable,
+// not an object) silently routed to the legacy `buildRequestHeaders` forge. The
+// request still went out, with a DIFFERENT fingerprint from every other turn in
+// the same session — the dual-path failure the migration exists to remove. It
+// now raises, and the assertions below pin BOTH halves: the raise, and the fact
+// that nothing reached the wire behind it.
+describe("an unusable body on an adapter endpoint is an error, never a legacy fallback", () => {
+  beforeEach(() => {
+    testPolicy.signature = true;
+    wireCompat.spy.mockClear();
+    wireCompat.countSpy.mockClear();
+    vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+    vi.stubEnv("ANTHROPIC_CUSTOM_HEADERS", "");
+    vi.stubEnv("OPENCODE_ANTHROPIC_PROFILE_OVERRIDE", "");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  const UNUSABLE_BODIES = [
+    { name: "absent", init: {}, message: /no usable body \(undefined\)/ },
+    { name: "empty string", init: { body: "" }, message: /an empty string/ },
+    { name: "unparsable JSON", init: { body: "{not json" }, message: /could not be parsed as JSON/ },
+    { name: "a JSON array", init: { body: "[1,2,3]" }, message: /parsed as an array/ },
+    { name: "JSON null", init: { body: "null" }, message: /parsed as null/ },
+  ];
+
+  for (const endpoint of ["/v1/messages", "/v1/messages/count_tokens"]) {
+    for (const { name, init, message } of UNUSABLE_BODIES) {
+      it(`rejects ${name} on ${endpoint}`, async () => {
+        const { fetchFn, mockFetch } = await makeInterceptor();
+
+        await expect(
+          fetchFn(`https://api.anthropic.com${endpoint}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            ...init,
+          }),
+        ).rejects.toThrow(message);
+
+        // The error names the endpoint, so a user report is self-locating.
+        await expect(
+          fetchFn(`https://api.anthropic.com${endpoint}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            ...init,
+          }),
+        ).rejects.toThrow(endpoint);
+
+        // Nothing went out behind the raise, and the legacy forge did not run.
+        expect(outgoingCallsFor(mockFetch, endpoint)).toHaveLength(0);
+        expect(wireCompat.spy).not.toHaveBeenCalled();
+        expect(wireCompat.countSpy).not.toHaveBeenCalled();
+      });
+    }
+  }
+
+  // The converse, so the rejection is scoped rather than global: with emulation
+  // OFF the same unusable body is not the adapter's problem, and the request
+  // keeps going out on the passthrough path exactly as before.
+  it("does not reject an unparsable body when signature emulation is off", async () => {
+    testPolicy.signature = false;
     const mockFetch = await driveRequest("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
+      body: "{not json",
     });
 
     expect(outgoingCallsFor(mockFetch, "/v1/messages")).toHaveLength(1);

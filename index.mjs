@@ -76,7 +76,13 @@ import {
   CLAUDE_CODE_IDENTITY_STRING,
   SUBAGENT_CC_ANCHOR,
 } from "./lib/mimicry/system-prompt.mjs";
-import { buildAdapterTransport, resolveAdapterEnv } from "./lib/mimicry/adapter-input.mjs";
+import {
+  ADAPTER_COUNT_TOKENS_PATHNAMES,
+  ADAPTER_MESSAGES_PATHNAMES,
+  assertAdapterBodyUsable,
+  buildAdapterTransport,
+  resolveAdapterEnv,
+} from "./lib/mimicry/adapter-input.mjs";
 import { buildWireCompatibleRequest, buildWireCompatibleCountTokensRequest } from "./lib/mimicry/wire-compat.mjs";
 import {
   hasOneMillionContext,
@@ -2578,6 +2584,22 @@ export async function AnthropicAuthPlugin({ client }) {
               // Transform URL once (shared across retries)
               const requestInit = init ?? {};
               const { requestInput, requestUrl } = transformRequestUrl(input);
+
+              // A host may hand us a `Request` carrying the body, with the init
+              // empty — `fetchFn(new Request(url, {body}), {})`. Every body-aware
+              // stage downstream (`_parsedBodyOnce`, `transformRequestBody`, the
+              // adapter, the retry-loop rewrites) reads `requestInit.body` and
+              // would silently see nothing, so the body is lifted onto the init
+              // once, here. `clone()` keeps the original Request readable, which
+              // matters because `requestInput` is still what gets sent when no
+              // adapter URL is adopted.
+              if (requestInit.body == null && input instanceof Request && input.body != null) {
+                try {
+                  requestInit.body = await input.clone().text();
+                } catch (error) {
+                  debugLog(`could not read the body off the host Request: ${error.message}`);
+                }
+              }
               const requestMethod = String(
                 requestInit.method || (requestInput instanceof Request ? requestInput.method : "POST"),
               ).toUpperCase();
@@ -3003,38 +3025,41 @@ export async function AnthropicAuthPlugin({ client }) {
                   config.cache_policy || { ttl: "1h", ttl_supported: true };
 
                 // Single decision point for the whole request: does this turn go
-                // through the shared wire package, or through the legacy
-                // buildRequestHeaders path?
+                // through the shared wire package?
                 //
-                // Two conditions remain now that multi-provider support is gone:
-                //  1. signature emulation on — with it off the plugin emits only
-                //     3 headers and a minimal beta set, while the package always
-                //     emits the full Claude Code set;
-                //  2. a messages endpoint the package has a surface for. Both
-                //     qualify now: `buildClaudeCodeRequest` for /v1/messages and
+                // PHASE 2.2 — THE ADAPTER IS UNCONDITIONAL. Two conditions, and
+                // neither of them is about the body any more:
+                //  1. signature emulation on — with it off the plugin does not
+                //     forge a Claude Code fingerprint at all, so there is
+                //     nothing for the package to build;
+                //  2. a messages endpoint the package has a surface for:
+                //     `buildClaudeCodeRequest` for /v1/messages and
                 //     `buildClaudeCodeCountTokensRequest` for
                 //     /v1/messages/count_tokens, each pinning its OWN endpoint.
-                //     The endpoint pin is inert either way — `built.url` is never
-                //     adopted (see the consumption comment below), so the URL on
-                //     the wire stays the one transformRequestUrl produced and a
-                //     custom ANTHROPIC_BASE_URL survives.
                 //
                 // The former first-party check is now structural: the plugin only
                 // speaks to first-party Anthropic, so it is always satisfied.
-                //  3. a JSON body is actually present. The main-turn surface
-                //     requires `model` and `max_tokens`; the count surface
-                //     requires `model` and `messages` and accepts no
-                //     `max_tokens` at all. Either way a bodiless request must
-                //     keep using the legacy path rather than throwing
-                //     INVALID_INPUT.
+                //
+                // THE BODY IS NO LONGER A ROUTING INPUT. It used to be: a
+                // bodiless or unparsable body silently fell back to the legacy
+                // forge, which put a REQUEST WITH A DIFFERENT FINGERPRINT on the
+                // wire mid-session. That dual path is what this phase removes.
+                // A body the package cannot consume is now a hard error
+                // (`assertAdapterBodyUsable`), never a quiet downgrade.
+                // Endpoints outside the set above still pass through untouched.
                 const _adapterPathname = requestUrl?.pathname;
-                const _isCountTokens =
-                  _adapterPathname === "/v1/messages/count_tokens" || _adapterPathname === "/messages/count_tokens";
+                const _isCountTokens = ADAPTER_COUNT_TOKENS_PATHNAMES.has(_adapterPathname);
                 const _useAdapter =
                   getSignatureEmulationEnabled() &&
-                  (_adapterPathname === "/v1/messages" || _adapterPathname === "/messages" || _isCountTokens) &&
-                  typeof requestInit.body === "string" &&
-                  requestInit.body.length > 0;
+                  (ADAPTER_MESSAGES_PATHNAMES.has(_adapterPathname) || _isCountTokens);
+                if (_useAdapter) {
+                  // Validated against the INCOMING body, before transformRequestBody
+                  // gets a chance to normalize it: the diagnostic has to name what
+                  // the host actually sent. `_parsedBodyOnce` is not usable as the
+                  // signal — the retry paths below null it out after rewriting a
+                  // perfectly valid body.
+                  assertAdapterBodyUsable(requestInit.body, _adapterPathname);
+                }
 
                 const body = transformRequestBody(
                   requestInit.body,
@@ -3216,13 +3241,29 @@ export async function AnthropicAuthPlugin({ client }) {
                       debugLog(`adapter url adoption skipped (${error.message}); keeping the transformed url`);
                     }
                   } else {
-                    debugLog(`adapter not applicable (${_adapterResult.reason}); using the legacy request path`);
+                    // Unreachable by construction, and it must STAY unreachable:
+                    // `buildAdapterTransport` declines on exactly two conditions,
+                    // a non-anthropic provider and signature emulation off, and
+                    // the call site above pins `provider: "anthropic"` while
+                    // `_useAdapter` already required emulation on. Falling back to
+                    // the legacy forge here would silently restore the dual path
+                    // Phase 2.2 removed, so a decline is an error instead.
+                    throw new Error(
+                      `opencode-anthropic-fix: the Claude Code wire adapter declined a request it must handle ` +
+                        `(${_adapterResult.reason}) on ${_adapterPathname}. This is a plugin bug — ` +
+                        `the legacy request path is no longer reachable with signature emulation on.`,
+                    );
                   }
                 }
 
                 if (!requestHeaders) {
-                  // Legacy path, and the fallback whenever the adapter declined:
-                  // a bodiless request, or a transport the translation refused.
+                  // Passthrough construction. Reached only when the adapter did
+                  // not run at all: signature emulation off, or an endpoint the
+                  // package has no surface for (files, models, a gateway-prefixed
+                  // route). With emulation ON on a messages/count_tokens turn the
+                  // adapter always produced headers above, so this is dead code
+                  // for that route by design — `test/conformance/adapter-unconditional.test.mjs`
+                  // is what proves it stays dead.
                   requestHeaders = buildRequestHeaders(
                     input,
                     requestInit,
