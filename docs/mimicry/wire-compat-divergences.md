@@ -203,8 +203,9 @@ These were the plugin's defect, so under the Option A exception they were fixed 
   `walkStainlessHelperCarriers` (`headers.mjs:101`) with `buildStainlessHelperHeader` (`:118`) precisely so that what
   is READ to compute `x-stainless-helper` and what is REMOVED from the body cannot drift apart. Applied on **every**
   path: the adapter path strips inside `buildWireCompatibleRequest`, the count-tokens path inside
-  `buildWireCompatibleCountTokensRequest` (both in `lib/mimicry/wire-compat.mjs`), the legacy path right after
-  `buildRequestHeaders` in `index.mjs`. Before this, the markers went to the API on every request — the API has never
+  `buildWireCompatibleCountTokensRequest` (both in `lib/mimicry/wire-compat.mjs`), and the frozen legacy forge right
+  after `buildRequestHeaders` in `index.mjs` (non-covered endpoints only).
+  Before this, the markers went to the API on every request — the API has never
   known those keys, so the package was right to reject them with `INVALID_INPUT`.
 
 - **`context-hint-2026-04-09` is gone from every path.** The adapter path never emitted it; the legacy path used to
@@ -266,8 +267,11 @@ rather than by `headers.mjs`:
 - before: `oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,context-management-2025-06-27,web-search-2025-03-05,advisor-tool-2026-03-01,token-counting-2024-11-01,redact-thinking-2026-02-12,thinking-token-count-2026-05-13`
 - after: `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01`
 
-**Header names.** Unchanged — both constructions emit the same 17 names, verified by diffing
-`buildRequestHeaders` against a count build. Only values move.
+**Header names.** Unchanged — both constructions emit the same 17 names, verified at migration time by
+diffing `buildRequestHeaders` against a count build. `buildRequestHeaders` is now the frozen compatibility
+forge for endpoints outside the package surface and no longer serves count turns, so that diff is a
+historical measurement, not a live invariant; the count surface's names are pinned by
+`test/conformance/golden-outgoing-count.test.mjs`. Only values move.
 
 ### The count-tokens extra-header policy
 
@@ -347,9 +351,15 @@ exact version to perform a routine sync — that is the emergency-rollback shape
    `test/conformance/package-dependency-policy.test.mjs` validates `resolved` against the lock's own `version`.
 2. Check whether the package's `DEFAULT_PROFILE` moved (its CHANGELOG says so, and
    `node_modules/@tormentalabs/claude-code-wire-compat/src/build-request.ts` is the seam). If it did:
-   - update `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT` in `lib/mimicry/adapter-input.mjs` and
-     `FALLBACK_CLAUDE_CLI_VERSION` in `lib/request-headers.mjs` to match, plus the `CLI_TO_SDK_VERSION` row for the
-     new CLI version. Stale values do not fail closed — they make every request carry a redundant `profileOverride`;
+   - no version literal needs editing. `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT`
+     (`lib/mimicry/adapter-input.mjs:238-239`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
+     they follow the profile the seam binds rather than being re-typed — `test/conformance/version-literals-retired.test.mjs`
+     enforces that. What DOES need a decision is the `WIRE_PROFILE` binding itself: it names an explicit profile
+     export (currently `CLAUDE_CODE_2_1_233_PROFILE`), so moving to a newer client is an intentional one-line change
+     at the seam, not a side effect of the bump. Leaving it behind the package's `DEFAULT_PROFILE` does not fail
+     closed — it makes every request carry a redundant `profileOverride`. (The old
+     `FALLBACK_CLAUDE_CLI_VERSION` / `CLI_TO_SDK_VERSION` literals lived in `lib/request-headers.mjs`, which this
+     migration deleted.)
    - copy the package's analysis doc for the new client version into `docs/claude-code-<version>-analysis.md`, which
      `scripts/check-invariants.mjs` requires and which is the evidence for the emulation claim.
 3. Run `npm test`. Failures concentrate in `test/conformance/shared-package-parity.test.mjs`,
@@ -365,3 +375,32 @@ exact version to perform a routine sync — that is the emergency-rollback shape
    (Option A) — unless the capability was itself a defect, in which case fix the plugin and record it under
    "Divergences the plugin closed on its own side".
 8. Re-read the scaling warning above before adding a third exclusion.
+
+## Where this document stands after the migration
+
+As of the migration's completion the plugin **no longer maintains an independent implementation of Claude Code
+protocol composition**. Headers, body shape, system prefix, beta lists, URL, model queries and protocol constants come
+from `@tormentalabs/claude-code-wire-compat` through the single seam `lib/mimicry/wire-compat.mjs`. This document is
+therefore no longer a ledger of two implementations drifting apart; it is the record of how they were reconciled, plus
+the triage sequence for the next package bump.
+
+What remains divergent is **host policy by design** — deliberate plugin behaviour the package does not model, not
+catch-up work:
+
+- **Emulation off is transparent passthrough plus an auth envelope.** With `signature_emulation` disabled the host's
+  headers travel verbatim (`lib/passthrough-headers.mjs`) minus `x-api-key` / `x-session-affinity`, plus
+  `authorization` and an additive `oauth-2025-04-20`. The URL is untouched. No package composition runs at all,
+  because the point of the mode is that nothing is forged.
+- **Beta UX aliases** (`lib/betas.mjs`). The package owns which betas go on the wire; the host owns the shorthand
+  users type in config and the mapping from it. That vocabulary is a plugin affordance and has no wire meaning.
+- **The cache turn-stability heuristic** (`lib/mimicry/cache.mjs`), and with it the scoping half of
+  `splitSysPromptPrefix` (`splitSystemCacheScopes`). TTL and scope selection depend on plugin-side `cache_policy`
+  config and role resolution the package knows nothing about.
+- **`SESSION_ID_FALLBACK`.** A host invention: the plugin must produce a session identity even when the host gave it
+  none. The real client always has one, so the package has no notion of a fallback.
+- **The frozen legacy forge** (`buildRequestHeaders`, `lib/mimicry/headers.mjs`). A compatibility exception for
+  endpoints the package has no surface for — files, models, gateway-prefixed routes. It is frozen: it is not a second
+  implementation competing for `/v1/messages` traffic, and it does not get new features. See the boundary banner at
+  the top of that file.
+
+Anything else that diverges is a finding.

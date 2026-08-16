@@ -210,12 +210,13 @@ Verified by diffing the linux-x64 native binaries of 2.1.154 and 2.1.159.
 ### 2.1.151–2.1.154 changes (Opus 4.8 launch, 2026-05-28)
 
 - **`claude-opus-4-8`** is a new adaptive-thinking model (successor to 4.7). The
-  plugin detects it via `isOpus48Model()` in `lib/mimicry/models.mjs` and routes
+  plugin detects it via `isOpus48Model()` — re-exported from the shared package
+  through `lib/mimicry/wire-compat.mjs` — and routes
   it identically to 4.6/4.7 for thinking, effort, 1M context, and
   simple-system-prompt eligibility.
 - **Adaptive thinking is mandatory.** Manual `thinking: {type:"enabled",
 budget_tokens:N}` returns a **400** on Opus 4.7 AND 4.8. The plugin's
-  `normalizeThinkingBlock()` in `lib/mimicry/models.mjs` converts any incoming manual thinking to
+  `normalizeThinkingBlock()` in `lib/mimicry/request-body.mjs` converts any incoming manual thinking to
   `{type:"adaptive"}` for these models; top-level `effort` is moved into
   `output_config.effort` (default `high` for Pro/Max).
 - **Fast mode.** Per Anthropic fast-mode docs, `speed:"fast"` (beta
@@ -325,7 +326,10 @@ Primary code references:
 - `lib/mimicry/request-body.mjs`
 - `lib/mimicry/response-stream.mjs`
 - `lib/mimicry/system-prompt.mjs`
-- `lib/mimicry/models.mjs`
+- `lib/mimicry/wire-compat.mjs` (the single seam onto
+  `@tormentalabs/claude-code-wire-compat`: request/count-tokens construction,
+  model-family and capability predicates, `WIRE_PROFILE`, beta registry)
+- `lib/mimicry/adapter-input.mjs`
 - `lib/mimicry/cache.mjs`
 - `lib/mimicry/request-helpers.mjs`
 - `lib/token-economy/transforms.mjs`
@@ -413,8 +417,20 @@ Inside `auth.loader().fetch(...)`:
 1. transform URL (`transformRequestUrl`) — the legacy-path URL, and the URL the eligibility gate reads
 2. select account and resolve token (including refresh when needed)
 3. transform body (`transformRequestBody` in `lib/mimicry/request-body.mjs`) with runtime context
-4. build headers (`buildRequestHeaders` in `lib/mimicry/headers.mjs`), or, on the adapter path, headers + body + URL from the shared package
+4. build headers + body + URL from the shared package via the seam
+   (`buildWireCompatibleRequest` / `buildWireCompatibleCountTokensRequest` in
+   `lib/mimicry/wire-compat.mjs`) — **this is the wire path**; only requests the
+   package has no surface for fall back to the frozen legacy forge
+   (`buildRequestHeaders` in `lib/mimicry/headers.mjs`)
 5. execute `fetch` (adapter path: host origin + the package's path and query)
+
+**Which path runs.** The adapter path covers `/v1/messages` and
+`/v1/messages/count_tokens` with signature emulation on — i.e. every request that
+carries the fingerprint claim. The legacy forge is reachable only for the files and
+models endpoints, gateway-prefixed routes, and requests made with emulation off. It
+is a frozen compatibility exception, not a second implementation competing for the
+same traffic; the boundary banner at the top of `lib/mimicry/headers.mjs` is the
+normative statement of that rule.
 
 Important: body transform happens per-attempt/per-account (not only once), so `metadata.user_id` includes the actual `accountId` in use for that attempt.
 
@@ -442,8 +458,9 @@ sequenceDiagram
         Plugin->>Plugin: transformRequestBody(body, signature, runtime)
         Note over Plugin: inject metadata.user_id + system blocks
 
-        Plugin->>Plugin: buildRequestHeaders(...)
-        Note over Plugin: compose anthropic-beta (includes oauth-2025-04-20)
+        Plugin->>Plugin: buildWireCompatibleRequest(body, transport)
+        Note over Plugin: shared package composes headers + body + anthropic-beta (includes oauth-2025-04-20) + URL
+        Note over Plugin: non-covered endpoints only: frozen legacy buildRequestHeaders(...)
 
         Plugin->>Plugin: syncBodyBetasFromHeader(body, headers)
         Plugin->>API: fetch(url, {headers, body})
@@ -457,7 +474,19 @@ sequenceDiagram
 
 ### 4.1 Headers always applied
 
-`buildRequestHeaders(...)` in `lib/mimicry/headers.mjs` always ensures:
+There are three header constructions, selected in `index.mjs` in this order:
+
+| Construction                                                                     | When                                                        |
+| -------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| shared package, via `buildWireCompatibleRequest` (`lib/mimicry/wire-compat.mjs`) | emulation on, `/v1/messages` or `/v1/messages/count_tokens` |
+| `buildPassthroughHeaders` (`lib/passthrough-headers.mjs`)                        | emulation **off** — host headers verbatim + auth envelope   |
+| `buildRequestHeaders` (`lib/mimicry/headers.mjs`), frozen legacy forge           | emulation on, endpoint outside the package surface          |
+
+With emulation off nothing is forged: the host's header set travels as it arrived,
+minus `x-api-key` and `x-session-affinity`, plus `authorization` and an **additive**
+`oauth-2025-04-20`. No claude-cli user-agent, no substituted beta list.
+
+With emulation on, both remaining constructions ensure:
 
 - `authorization: Bearer <token>`
   - default token: account OAuth access token
@@ -742,12 +771,18 @@ All three values are tracked in `KNOWN_IDENTITY_STRINGS` for deduplication durin
 
 ### 6.4 Cache scoping architecture
 
-`buildSystemPromptBlocks(...)` in `lib/mimicry/system-prompt.mjs` now mirrors the
-real CC's three-path cache scoping strategy (src/utils/api.ts
-`splitSysPromptPrefix()`):
+Cache scoping is **host policy**, and it is the only half of the real CC's
+`splitSysPromptPrefix()` the plugin still implements. Canonical Claude Code system
+prefix COMPOSITION — the attribution header, the identity string, their order and
+their once-only guarantee — is owned by
+`@tormentalabs/claude-code-wire-compat` and reaches the wire through the adapter.
+The host kept the scoping half because TTL/scope selection depends on plugin-side
+config (`cache_policy`) and role resolution the package knows nothing about.
+
+`buildSystemPromptBlocks(...)` in `lib/mimicry/system-prompt.mjs`:
 
 1. Sanitizes and filters all blocks (removes pre-existing billing headers and identity strings)
-2. Delegates to `splitSysPromptPrefix()` which assigns a `cacheScope` to each block
+2. Delegates to `splitSystemCacheScopes()` which assigns a `cacheScope` to each block
 3. Converts scoped blocks to wire format via `getCacheControlForScope()`
 
 #### Cache scope to wire format (`getCacheControlForScope`)
@@ -778,9 +813,9 @@ CC, which derives a single TTL per `querySource`, and prevents the
 subagent delegation. The `ttl: "1h"` values in the tables below are the
 main-thread case; substitute `"5m"` for non-main/subagent requests.
 
-#### Path selection (`splitSysPromptPrefix`)
+#### Path selection (`splitSystemCacheScopes`)
 
-The real CC has 3 code paths. Paths A and C produce identical wire output, so the plugin implements 2 effective paths:
+The real CC's `splitSysPromptPrefix()` has 3 code paths. Paths A and C produce identical wire output, so the plugin's scoping half implements 2 effective paths:
 
 **Path B — Boundary mode** (when `cache_policy.boundary_marker=true` or `CLAUDE_CODE_FORCE_GLOBAL_CACHE=1`):
 
@@ -988,16 +1023,25 @@ When `fast_mode` config is enabled and the model is Opus 4.6, Opus 4.7, or Opus 
 }
 ```
 
-This enables server-side fast-mode processing. The plugin emits `fast-mode-2026-02-01` in `anthropic-beta`
-in lockstep with the body field: both are added together in
-`buildRequestHeaders` (`lib/mimicry/headers.mjs`) after `transformRequestBody`
-(`lib/mimicry/request-body.mjs`)
-has already injected `speed:"fast"`. Detection is structural (`requestBody.includes('"speed":"fast"')`), so the
-header and body cannot drift. The beta is NOT added at the pre-transform `computedBetaHeader` call site, keeping
-the session latch clean. Can be disabled via `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE=1`.
+This enables server-side fast-mode processing. `transformRequestBody`
+(`lib/mimicry/request-body.mjs`) injects `speed:"fast"`; the accompanying
+`fast-mode-2026-02-01` beta is then a property of whichever construction path runs:
 
-Eligibility is `isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model)`
-from `lib/mimicry/models.mjs`.
+- **adapter path** (`/v1/messages`, `/v1/messages/count_tokens`, emulation on) — the
+  `anthropic-beta` list is composed by the shared package from the request input it
+  is handed. The plugin does not push `fast-mode-2026-02-01` through
+  `additionalBetas` (`buildAdditionalBetas` in `lib/mimicry/adapter-input.mjs`).
+- **frozen legacy forge** (endpoints the package has no surface for) —
+  `buildAnthropicBetaHeader` (`lib/mimicry/headers.mjs`) adds the beta in lockstep
+  with the body field, detected structurally from the serialized body
+  (`requestBody.includes('"speed":"fast"')`), so header and body cannot drift.
+
+There is no longer a pre-transform beta call site: `computedBetaHeader` and the
+session beta latch it fed were removed (see §11.6). Can be disabled via
+`OPENCODE_ANTHROPIC_DISABLE_FAST_MODE=1`.
+
+Eligibility is `isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model)`,
+all three re-exported from the shared package through `lib/mimicry/wire-compat.mjs`.
 Sonnet is NOT fast-mode eligible. Note: switching `speed` invalidates system +
 message prompt caches, so it should only be toggled deliberately.
 

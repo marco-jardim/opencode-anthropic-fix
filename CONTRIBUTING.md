@@ -221,24 +221,36 @@ flowchart LR
 
     subgraph Transform
         TB[transformRequestBody]
-        TU[transformRequestUrl]
-        TH[buildRequestHeaders]
+        WC["lib/mimicry/wire-compat.mjs<br/>(seam → @tormentalabs/claude-code-wire-compat)"]
+        TH["buildRequestHeaders<br/>(frozen legacy forge)"]
     end
 
     subgraph Output
         OB["Sanitized body<br/>(OpenCode→Claude Code,<br/>tool name prefixing)"]
-        OU["Modified URL<br/>(?beta=true)"]
+        OW["Wire request<br/>(headers + body + URL,<br/>composed by the package)"]
         OH["OAuth headers<br/>(Bearer token,<br/>anthropic-beta,<br/>user-agent)"]
     end
 
     Body --> TB --> OB
-    URL --> TU --> OU
-    Headers --> TH --> OH
+    OB --> WC --> OW
+    URL --> WC
+    Headers --> WC
+    TB -. "non-covered endpoints only<br/>(files / models / gateway-prefixed)" .-> TH
+    Headers -.-> TH --> OH
 
     subgraph Response
         RS[Response Stream] --> Strip["Strip mcp_ prefixes<br/>from tool names"]
     end
 ```
+
+`lib/mimicry/wire-compat.mjs` is the **single seam** onto
+`@tormentalabs/claude-code-wire-compat` (pinned by
+`test/conformance/package-dependency-policy.test.mjs`), and the adapter path through it is
+THE wire path for `/v1/messages` and `/v1/messages/count_tokens` with signature emulation on.
+`buildRequestHeaders` survives only as a frozen compatibility exception for endpoints the
+package has no surface for — files, models, gateway-prefixed routes — see the boundary banner
+at the top of `lib/mimicry/headers.mjs`. With emulation off neither runs: see
+`lib/passthrough-headers.mjs`.
 
 ### Body Transformations
 
@@ -572,3 +584,35 @@ npx vitest run --reporter=verbose  # Verbose output
 | `lint-staged`                           | Dev        | Runs prettier + eslint on staged files                    |
 
 PKCE code generation for the OAuth flow is implemented locally in `lib/oauth.mjs`. The plugin's two production dependencies are bundled into the dist output by esbuild, so the bundled files have zero external dependencies beyond Node.js built-ins.
+
+### Wire-package bump gate
+
+`@tormentalabs/claude-code-wire-compat` is not an ordinary dependency: it composes the bytes the
+plugin puts on the wire. A version bump is a **wire change until proven otherwise**. Adopting a new
+release goes through this gate, in order, and each step is a stop condition:
+
+1. **Bump through the registry.** `npm update @tormentalabs/claude-code-wire-compat`. The lockfile
+   must resolve the new version from the npm registry with a `resolved` URL and an `integrity`
+   hash — a `file:` or `link:` resolution is a local artifact, not a release, and
+   `test/conformance/package-dependency-policy.test.mjs` fails on it. **The lockfile diff is the
+   first review artifact.**
+2. **Green before you touch anything.** Run the full suite on the bumped lockfile _before_ making a
+   single plugin edit. A failure here is the package's behaviour change speaking, uncontaminated by
+   your own. Editing first destroys that signal.
+3. **`npx vitest run wire-baseline` must pass 16/16 with zero re-seal.** These fixtures are the
+   plugin's byte-level wire contract. Any fixture diff means the package moved the wire, and it
+   must be reviewed **vector by vector** and justified per vector in the commit message before a
+   re-seal is even considered. The re-sealing procedure, and the standing rule that a re-seal is
+   never routine, are documented in the header of
+   `test/conformance/wire-baseline.test.mjs` — read it there rather than reconstructing it.
+
+Known-risk tests to expect on a bump, and what each one actually means:
+
+| Test                                  | Fires when                                                                     |
+| ------------------------------------- | ------------------------------------------------------------------------------ |
+| `canonical-prefix-once.test.mjs`      | The canonical system prefix bytes moved — a byte pin, not a formatting check   |
+| `wire-compat-input-coverage.test.mjs` | The package declared a new request-input field (it parses the shipped `.d.ts`) |
+| `package-dependency-policy.test.mjs`  | The resolution is not a registry release, or `resolved`/`version` disagree     |
+
+`docs/mimicry/wire-compat-divergences.md` carries the longer per-failure triage sequence and the
+`DEFAULT_PROFILE`-moved checklist.
