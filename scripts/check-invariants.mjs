@@ -153,16 +153,20 @@ export function runChecks({ cwd }) {
     }
   }
 
-  const requestHeadersContents = readOptionalFile(
-    path.join(cwd, "lib", "request-headers.mjs"),
-    "lib/request-headers.mjs",
+  // The mimicry baseline lives in the wire package's profile, and the adapter
+  // seam is the only place allowed to name it (see
+  // test/conformance/package-dependency-policy.test.mjs). The profile symbol
+  // encodes the CLI version, so the baseline is readable from the import alone.
+  const wireCompatContents = readOptionalFile(
+    path.join(cwd, "lib", "mimicry", "wire-compat.mjs"),
+    "lib/mimicry/wire-compat.mjs",
     warnings,
     errors,
   );
-  const pluginVersion =
-    requestHeadersContents?.match(/FALLBACK_CLAUDE_CLI_VERSION\s*=\s*["']([\d.]+)["']/)?.[1] ?? null;
-  if (requestHeadersContents !== null && pluginVersion === null) {
-    errors.push("FALLBACK_CLAUDE_CLI_VERSION was not found in lib/request-headers.mjs");
+  const profileSymbol = wireCompatContents?.match(/CLAUDE_CODE_(\d+)_(\d+)_(\d+)_PROFILE/);
+  const pluginVersion = profileSymbol ? profileSymbol.slice(1).join(".") : null;
+  if (wireCompatContents !== null && pluginVersion === null) {
+    errors.push("no CLAUDE_CODE_<x>_<y>_<z>_PROFILE import was found in lib/mimicry/wire-compat.mjs");
   }
 
   if (pluginVersion !== null && newestAnalysisVersion !== null && pluginVersion !== newestAnalysisVersion) {
@@ -220,8 +224,7 @@ function printReport(result) {
     },
     {
       name: "Mimicry baseline",
-      matches: (message) =>
-        /request-headers|FALLBACK_CLAUDE_CLI_VERSION|analysis docs|plugin reports CC|docs directory/.test(message),
+      matches: (message) => /wire-compat|_PROFILE|analysis docs|plugin reports CC|docs directory/.test(message),
     },
     {
       name: "Reverse-engineering baseline",

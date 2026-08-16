@@ -10,12 +10,7 @@ import {
   parseOAuthCallback,
   refreshToken,
 } from "./lib/oauth.mjs";
-import {
-  FALLBACK_CLAUDE_CLI_VERSION,
-  CLAUDE_CODE_NPM_LATEST_URL,
-  CLAUDE_CODE_BUILD_TIME,
-  resolveBetaShortcut,
-} from "./lib/request-headers.mjs";
+import { CLAUDE_CODE_NPM_LATEST_URL, CLAUDE_CODE_BUILD_TIME, resolveBetaShortcut } from "./lib/request-headers.mjs";
 import { loadConfig, loadConfigFresh, saveConfig, getConfigDir } from "./lib/config.mjs";
 import { loadAccounts, saveAccounts, clearAccounts, createDefaultStats } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
@@ -84,7 +79,11 @@ import {
   resolveAdapterEnv,
 } from "./lib/mimicry/adapter-input.mjs";
 import { buildPassthroughHeaders, stripNonApiBodyFields } from "./lib/passthrough-headers.mjs";
-import { buildWireCompatibleRequest, buildWireCompatibleCountTokensRequest } from "./lib/mimicry/wire-compat.mjs";
+import {
+  buildWireCompatibleRequest,
+  buildWireCompatibleCountTokensRequest,
+  WIRE_PROFILE,
+} from "./lib/mimicry/wire-compat.mjs";
 import {
   hasOneMillionContext,
   isEligibleFor1MContext,
@@ -2207,7 +2206,9 @@ export async function AnthropicAuthPlugin({ client }) {
     return config.account_selection_strategy;
   }
 
-  let claudeCliVersion = FALLBACK_CLAUDE_CLI_VERSION;
+  // Baseline CLI version, read from the wire package's profile through the
+  // adapter seam. `fetchLatestClaudeCodeVersion` may raise it at runtime.
+  let claudeCliVersion = WIRE_PROFILE.cliVersion;
   const signatureSessionId = randomUUID();
   const signatureUserId = getOrCreateDeviceId();
   if (shouldFetchClaudeCodeVersion) {
