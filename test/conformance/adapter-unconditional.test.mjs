@@ -292,19 +292,24 @@ describe("the legacy forge is unreachable while signature emulation is on", () =
     expect(legacy.spy).not.toHaveBeenCalled();
   });
 
-  // DISCRIMINATION. If the spy could never fire, every assertion above would be
-  // vacuous. These two make it fire.
-  it("still calls buildRequestHeaders when signature emulation is off", async () => {
+  // Emulation OFF does not reach the legacy forge either — it gets the
+  // passthrough envelope, which composes no mimicry at all. Phase 2.2.2.
+  it("does not call buildRequestHeaders when signature emulation is off", async () => {
     testPolicy.signature = false;
-    await driveRequest("https://api.anthropic.com/v1/messages", {
+    const mockFetch = await driveRequest("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(FOREGROUND_BODY),
     });
 
-    expect(legacy.spy).toHaveBeenCalledTimes(1);
+    const [, init] = outgoingCallsFor(mockFetch, "/v1/messages")[0];
+    expect(new Headers(init.headers).get("user-agent")).toBeNull();
+    expect(legacy.spy).not.toHaveBeenCalled();
   });
 
+  // DISCRIMINATION. If the spy could never fire, every assertion above would be
+  // vacuous. This makes it fire: the one caller of the legacy forge left is an
+  // endpoint the package has no surface for, with emulation ON.
   it("still calls buildRequestHeaders for an endpoint the package has no surface for", async () => {
     await driveRequest("https://api.anthropic.com/v1/models", {
       method: "GET",

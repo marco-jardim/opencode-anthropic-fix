@@ -1,21 +1,19 @@
 {
   "url": "https://api.anthropic.com/v1/messages?beta=true",
   "headers": [
-    ["anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14"],
+    ["anthropic-beta", "oauth-2025-04-20"],
     ["authorization", "<redacted>"],
-    ["content-type", "application/json"],
-    ["user-agent", "claude-cli/2.1.233 (external, cli)"]
+    ["content-type", "application/json"]
   ],
   "body": {
     "model": "claude-sonnet-4-5",
     "max_tokens": 8000,
-    "system": [],
+    "system": "You are a helpful assistant.",
     "messages": [
       {
         "role": "user",
         "content": "Hello"
       }
-    ],
-    "temperature": 1
+    ]
   }
 }

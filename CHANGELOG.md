@@ -2,6 +2,54 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [Unreleased]
+
+Phase 2.2 of the wire-compat consolidation. The plugin had TWO request constructions and picked between them per
+request; it now has one, and "signature emulation off" stopped meaning "less mimicry".
+
+### BREAKING
+
+- **`signature_emulation.enabled: false` is now pure passthrough plus the auth envelope.** It used to be
+  half-mimicry: the plugin forged `user-agent: claude-cli/2.1.233 (external, cli)` on every request (emitted outside
+  the signature gate), and REPLACED the host's `anthropic-beta` with a minimal forged list
+  (`oauth-2025-04-20,interleaved-thinking-2025-05-14`, plus `token-counting-2024-11-01` on count_tokens). Both are
+  gone. What goes out with emulation off is the host's own request, with:
+  - `authorization: Bearer <account token>` — the plugin is an OAuth transport; without this there is no request and
+    no account rotation;
+  - `anthropic-beta` — **additive**, never substitutive: the host's value is preserved verbatim in its own order and
+    `oauth-2025-04-20` is appended only when missing. That beta is a contract of the OAuth token, not a fingerprint —
+    the API rejects an OAuth bearer without it (`docs/claude-code-reverse-engineering.md` §14.2 item 3, §14.3);
+  - `x-api-key` and `x-session-affinity` removed — a competing credential must not travel next to our bearer, and the
+    opencode SDK's affinity hint leaks session identity upstream. Envelope hygiene, not disguise.
+
+  **THE BOUNDARY.** Substituting the host's betas and forging a user-agent are mimicry, so they die with the switch.
+  Keeping the OAuth token usable is transport, so it stays. Headers that are NO LONGER sent with emulation off:
+  `user-agent` (forged), `anthropic-version`, `x-app`, `x-claude-code-session-id`, `x-client-request-id`,
+  `anthropic-dangerous-direct-browser-access`, and the whole `x-stainless-*` family. The new envelope lives in
+  `lib/passthrough-headers.mjs`, deliberately outside `lib/mimicry/`.
+
+- **`transformRequestBody` no longer runs with emulation off.** Its non-gated structural normalizations applied even
+  with the switch off — output cap, `thinking` normalization, `effort` -> `output_config.effort`, system
+  sanitize/compact — which is policy the host never asked for. The body now goes out byte for byte as the host wrote
+  it, with two exceptions, both of which keep the request VALID rather than making it look like Claude Code, and both
+  of which were already applied unconditionally before: the body-level `betas` field (never a first-party field; the
+  API answers "Extra inputs are not permitted") and the host's stainless-helper markers (a host-side signal the API
+  has never known, rejected inside a tool definition). Two side effects of the removal are fixes: the host's `system`
+  prompt used to be EMPTIED with emulation off, and a `temperature: 1` the host never sent used to be injected.
+
+- **Every emulated messages turn goes through the shared package.** With emulation on, `/v1/messages`, `/messages`
+  and both `count_tokens` spellings always use `@tormentalabs/claude-code-wire-compat`. The body stopped being a
+  routing input: a bodiless or unparsable body used to fall back to the legacy `buildRequestHeaders` forge, putting a
+  request with a DIFFERENT fingerprint on the wire mid-session. It is now a hard error naming the endpoint and the
+  defect. Endpoints the package has no surface for (files, models, gateway prefixes) are unaffected.
+
+### Fixed
+
+- **A `Request`-carried body no longer bypasses the plugin.** `fetchFn(new Request(url, {body}), {})` is a supported
+  shape whose body never reached `requestInit.body`, so every body-aware stage — the parse cache, the body transform,
+  the adapter, the retry-loop rewrites — silently saw nothing and the raw host body went on the wire. The interceptor
+  now lifts it onto the init once, at entry.
+
 ## [0.6.0] — 2026-08-16
 
 Seam-adoption release. `0.5.0` shipped the count-tokens surface with a plugin-side reimplementation of the package's

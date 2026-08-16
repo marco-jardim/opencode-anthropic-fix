@@ -519,11 +519,14 @@ const VECTORS = [
     },
   },
   {
-    // Emulation OFF == the LEGACY forge (`_useAdapter` false). This pins today's
-    // half-mimicry: forged claude-cli UA + minimal forged anthropic-beta, and a
-    // 4-header set. See docs/plans/wire-compat-migration-baseline.md §1 — Phase 2.2
-    // redefining OFF as pure passthrough is a BREAKING change and will require an
-    // explicitly justified re-seal of this fixture.
+    // Emulation OFF == PURE PASSTHROUGH plus the auth envelope, since Phase
+    // 2.2.2. Re-sealed exactly once, for that change: the fixture used to pin
+    // the half-mimicry that survived the switch (a forged claude-cli UA, a
+    // forged anthropic-beta REPLACING the host's, a `temperature` the host never
+    // sent, and an emptied `system`). It now pins the host's own request with
+    // `authorization` and an additive `oauth-2025-04-20` — see the module
+    // comment in lib/passthrough-headers.mjs for why those two are transport and
+    // not mimicry.
     name: "09-emulation-off-sonnet",
     url: MESSAGES_URL,
     config: { signatureEmulation: false },

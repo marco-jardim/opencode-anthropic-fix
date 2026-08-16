@@ -83,6 +83,7 @@ import {
   buildAdapterTransport,
   resolveAdapterEnv,
 } from "./lib/mimicry/adapter-input.mjs";
+import { buildPassthroughHeaders, stripNonApiBodyFields } from "./lib/passthrough-headers.mjs";
 import { buildWireCompatibleRequest, buildWireCompatibleCountTokensRequest } from "./lib/mimicry/wire-compat.mjs";
 import {
   hasOneMillionContext,
@@ -3049,9 +3050,13 @@ export async function AnthropicAuthPlugin({ client }) {
                 // Endpoints outside the set above still pass through untouched.
                 const _adapterPathname = requestUrl?.pathname;
                 const _isCountTokens = ADAPTER_COUNT_TOKENS_PATHNAMES.has(_adapterPathname);
+                // Read ONCE per attempt. The config is runtime-mutable
+                // (`/anthropic set`), and a flip between the routing decision,
+                // the body transform and the header construction would emit a
+                // half-emulated request.
+                const _emulationEnabled = getSignatureEmulationEnabled();
                 const _useAdapter =
-                  getSignatureEmulationEnabled() &&
-                  (ADAPTER_MESSAGES_PATHNAMES.has(_adapterPathname) || _isCountTokens);
+                  _emulationEnabled && (ADAPTER_MESSAGES_PATHNAMES.has(_adapterPathname) || _isCountTokens);
                 if (_useAdapter) {
                   // Validated against the INCOMING body, before transformRequestBody
                   // gets a chance to normalize it: the diagnostic has to name what
@@ -3061,48 +3066,58 @@ export async function AnthropicAuthPlugin({ client }) {
                   assertAdapterBodyUsable(requestInit.body, _adapterPathname);
                 }
 
-                const body = transformRequestBody(
-                  requestInit.body,
-                  {
-                    enabled: getSignatureEmulationEnabled(),
-                    claudeCliVersion,
-                    promptCompactionMode: getPromptCompactionMode(),
-                    useAdapter: _useAdapter,
-                    cachePolicy: effectiveCachePolicy,
-                    fastMode: config.fast_mode || false,
-                    // When the account's fast pool is cooling down, suppress
-                    // speed:"fast" so this turn runs at standard speed on the same
-                    // account instead of re-hitting the exhausted fast pool.
-                    fastRateLimited: accountManager.isFastRateLimited(account),
-                    strategy: getEffectiveStrategy(),
-                    toolDeferral: config.token_economy_strategies?.tool_deferral,
-                    toolDescriptionCompaction: config.token_economy_strategies?.tool_description_compaction,
-                    adaptiveToolSet: config.token_economy_strategies?.adaptive_tool_set,
-                    systemPromptTailing: config.token_economy_strategies?.system_prompt_tailing,
-                    systemPromptTailTurns: config.token_economy_strategies?.system_prompt_tail_turns,
-                    systemPromptTailMaxChars: config.token_economy_strategies?.system_prompt_tail_max_chars,
-                  },
-                  {
-                    persistentUserId: signatureUserId,
-                    sessionId: signatureSessionId,
-                    accountId: getAccountIdentifier(account),
-                    turns: sessionMetrics.turns,
-                    usedTools: sessionMetrics.usedTools,
-                    tokenEconomySession,
-                    requestRole: _requestRole,
-                    isSubagent: _isSubagent,
-                    // Adaptive cache-breakpoint placement: pass the per-boundary
-                    // stability snapshot so transformRequestBody can anchor the
-                    // cache_control marker on the most-stable boundary instead of
-                    // the (possibly thrashing) last tool. Only populated once the
-                    // detector is enabled and has a baseline.
-                    cacheBoundaryStability: config.cache_break_detection?.adaptive_breakpoint
-                      ? cacheBreakState.boundaryStability
-                      : null,
-                  },
-                  computedBetaHeader,
-                  config,
-                );
+                // PHASE 2.2 — EMULATION OFF DOES NOT TRANSFORM THE BODY AT ALL.
+                // `transformRequestBody` used to run on every request and apply
+                // its non-gated structural normalizations (output cap, thinking,
+                // effort -> output_config, system sanitize/compact) even with
+                // emulation off. That is policy the host never asked for. The
+                // only exceptions are the fields the first-party API rejects
+                // outright (`betas`, the stainless-helper markers) — see
+                // stripNonApiBodyFields.
+                const body = !_emulationEnabled
+                  ? stripNonApiBodyFields(requestInit.body)
+                  : transformRequestBody(
+                      requestInit.body,
+                      {
+                        enabled: _emulationEnabled,
+                        claudeCliVersion,
+                        promptCompactionMode: getPromptCompactionMode(),
+                        useAdapter: _useAdapter,
+                        cachePolicy: effectiveCachePolicy,
+                        fastMode: config.fast_mode || false,
+                        // When the account's fast pool is cooling down, suppress
+                        // speed:"fast" so this turn runs at standard speed on the same
+                        // account instead of re-hitting the exhausted fast pool.
+                        fastRateLimited: accountManager.isFastRateLimited(account),
+                        strategy: getEffectiveStrategy(),
+                        toolDeferral: config.token_economy_strategies?.tool_deferral,
+                        toolDescriptionCompaction: config.token_economy_strategies?.tool_description_compaction,
+                        adaptiveToolSet: config.token_economy_strategies?.adaptive_tool_set,
+                        systemPromptTailing: config.token_economy_strategies?.system_prompt_tailing,
+                        systemPromptTailTurns: config.token_economy_strategies?.system_prompt_tail_turns,
+                        systemPromptTailMaxChars: config.token_economy_strategies?.system_prompt_tail_max_chars,
+                      },
+                      {
+                        persistentUserId: signatureUserId,
+                        sessionId: signatureSessionId,
+                        accountId: getAccountIdentifier(account),
+                        turns: sessionMetrics.turns,
+                        usedTools: sessionMetrics.usedTools,
+                        tokenEconomySession,
+                        requestRole: _requestRole,
+                        isSubagent: _isSubagent,
+                        // Adaptive cache-breakpoint placement: pass the per-boundary
+                        // stability snapshot so transformRequestBody can anchor the
+                        // cache_control marker on the most-stable boundary instead of
+                        // the (possibly thrashing) last tool. Only populated once the
+                        // detector is enabled and has a baseline.
+                        cacheBoundaryStability: config.cache_break_detection?.adaptive_breakpoint
+                          ? cacheBreakState.boundaryStability
+                          : null,
+                      },
+                      computedBetaHeader,
+                      config,
+                    );
                 logTransformedSystemPrompt(body);
 
                 // Toast on first fast-mode application in session (reset on toggle)
@@ -3256,14 +3271,26 @@ export async function AnthropicAuthPlugin({ client }) {
                   }
                 }
 
+                if (!requestHeaders && !_emulationEnabled) {
+                  // PHASE 2.2 — EMULATION OFF IS PURE PASSTHROUGH PLUS THE AUTH
+                  // ENVELOPE. No mimicry function composes these headers: the
+                  // host's set goes out as it arrived, minus the two credentials
+                  // that must not travel with our bearer, plus `authorization`
+                  // and an ADDITIVE `oauth-2025-04-20`. The forged claude-cli
+                  // user-agent and the substituted beta list — the two mimicry
+                  // vectors that used to survive with emulation off — are gone.
+                  // See lib/passthrough-headers.mjs for why the envelope is not
+                  // mimicry.
+                  requestHeaders = buildPassthroughHeaders(input, requestInit, accessToken);
+                }
+
                 if (!requestHeaders) {
-                  // Passthrough construction. Reached only when the adapter did
-                  // not run at all: signature emulation off, or an endpoint the
-                  // package has no surface for (files, models, a gateway-prefixed
-                  // route). With emulation ON on a messages/count_tokens turn the
-                  // adapter always produced headers above, so this is dead code
-                  // for that route by design — `test/conformance/adapter-unconditional.test.mjs`
-                  // is what proves it stays dead.
+                  // Emulation ON, on an endpoint the package has no surface for
+                  // (files, models, a gateway-prefixed route). Unchanged, and the
+                  // only caller of the legacy forge left: on a messages or
+                  // count_tokens turn the adapter above always produced headers,
+                  // which `test/conformance/adapter-unconditional.test.mjs`
+                  // observes directly.
                   requestHeaders = buildRequestHeaders(
                     input,
                     requestInit,

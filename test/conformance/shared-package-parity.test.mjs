@@ -531,7 +531,7 @@ function normalizeBody(body) {
 // exact string rather than with `toEqual`.
 const ENABLED_THINKING_GOLDEN = '{"budget_tokens":7999,"type":"enabled"}';
 
-async function captureExistingRequest(mockFetch, hostBody, pathname = "/v1/messages") {
+async function captureExistingRequest(mockFetch, hostBody, pathname = "/v1/messages", hostHeaders = {}) {
   vi.stubGlobal("fetch", mockFetch);
   const plugin = await AnthropicAuthPlugin({ client: makeClient() });
   const getAuth = vi.fn().mockResolvedValue({
@@ -543,7 +543,7 @@ async function captureExistingRequest(mockFetch, hostBody, pathname = "/v1/messa
   const { fetch: fetchFn } = await plugin.auth.loader(getAuth, makeProvider());
   const response = await fetchFn(`https://api.anthropic.com${pathname}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...hostHeaders },
     body: JSON.stringify(hostBody),
   });
   await response.text();
@@ -752,13 +752,28 @@ describe("adapter golden wire", () => {
   });
 });
 
-// TRUE DIFFERENTIAL. `_useAdapter` in index.mjs is false on exactly two routes,
-// and on both of them the plugin's LEGACY forge — `buildRequestHeaders` plus the
-// untouched `transformRequestBody` output — is what reaches the wire. These are
-// the only assertions left in this file where the two implementations are
-// genuinely independent, so they are also the only ones that can still catch the
-// routing guard collapsing into the adapter path.
-describe("legacy request path", () => {
+// TRUE DIFFERENTIAL — and, since Phase 2.2, a different differential than it
+// used to be.
+//
+// WHAT CHANGED. `_useAdapter` is false on exactly one condition now: signature
+// emulation off. And with it off the plugin no longer runs a REDUCED forge — it
+// runs NO forge. The old assertions in this block pinned the half-mimicry that
+// survived: a forged `claude-cli/2.1.233` user-agent emitted outside the
+// signature gate, and a minimal `anthropic-beta` that REPLACED whatever the host
+// sent. Both were mimicry with the mimicry switch off, and both are gone.
+//
+// WHAT IS PINNED NOW is the boundary itself, which is the property most likely
+// to erode: with emulation off the outgoing request is the host's request plus
+// the AUTH ENVELOPE (`authorization`, an ADDITIVE `oauth-2025-04-20`, and the
+// removal of `x-api-key`/`x-session-affinity`) and nothing else. The negative
+// assertion below — a named list of headers that must NOT appear — is the part
+// that catches a future "just one more header" regression, because a positive
+// header-set equality can always be satisfied by loosening the expectation.
+//
+// This is still the only genuinely independent construction left in the file,
+// so it is also still what catches the routing guard collapsing into the
+// adapter path.
+describe("emulation-off passthrough envelope", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     stubCleanEnvironment();
@@ -769,49 +784,152 @@ describe("legacy request path", () => {
     vi.unstubAllEnvs();
   });
 
-  // Route 1: signature emulation off. index.mjs: "with it off the plugin emits
-  // only 3 headers and a minimal beta set, while the package always emits the
-  // full Claude Code set."
-  it("emits the minimal legacy header set when signature emulation is off", async () => {
+  // Every header the emulation path forges. None of them may appear on a
+  // request the user asked NOT to be disguised. Listed literally rather than
+  // derived, so adding a forged header to the emulation path cannot silently
+  // extend this list too.
+  const FORBIDDEN_WITH_EMULATION_OFF = [
+    "x-app",
+    "x-claude-code-session-id",
+    "x-client-request-id",
+    "anthropic-dangerous-direct-browser-access",
+    "anthropic-version",
+    "x-stainless-arch",
+    "x-stainless-lang",
+    "x-stainless-os",
+    "x-stainless-package-version",
+    "x-stainless-retry-count",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-stainless-timeout",
+  ];
+
+  it("emits the host's headers plus the auth envelope, and nothing else", async () => {
     testPolicy.signature = false;
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
       HOST_BODY,
     );
+    const headers = new Headers(existing.headers);
 
-    expect([...new Headers(existing.headers).entries()]).toEqual([
-      ["anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14"],
+    // The host sent one header (`content-type`). What comes back is that header,
+    // the bearer, and the OAuth beta the API requires alongside it.
+    expect([...headers.entries()]).toEqual([
+      ["anthropic-beta", "oauth-2025-04-20"],
       ["authorization", "Bearer test-access"],
       ["content-type", "application/json"],
-      ["user-agent", "claude-cli/2.1.233 (external, cli)"],
     ]);
   });
 
-  it("leaves the body unforged when signature emulation is off, unlike the package", async () => {
+  it("forges NONE of the Claude Code headers when signature emulation is off", async () => {
+    testPolicy.signature = false;
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      HOST_BODY,
+    );
+    const headers = new Headers(existing.headers);
+
+    // The negative assertion. Each name is checked individually so a failure
+    // names the header that leaked.
+    for (const name of FORBIDDEN_WITH_EMULATION_OFF) {
+      expect(headers.get(name), `${name} must not be forged with emulation off`).toBeNull();
+    }
+    // The two that used to survive the switch, called out separately because
+    // they are the actual Phase 2.2 breaking change.
+    expect(headers.get("user-agent")).toBeNull();
+    expect(headers.get("anthropic-beta")).not.toContain("interleaved-thinking-2025-05-14");
+
+    // Discrimination: with emulation ON the very same request grows all of them.
+    const adapter = await buildAdapterRequest(HOST_BODY);
+    for (const name of FORBIDDEN_WITH_EMULATION_OFF) {
+      expect(adapter.headers.get(name), `${name} must still be emitted with emulation on`).toBeTruthy();
+    }
+    expect(adapter.headers.get("user-agent")).toMatch(/^claude-cli\//);
+  });
+
+  it("preserves the host's user-agent and appends to the host's beta list", async () => {
+    testPolicy.signature = false;
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      HOST_BODY,
+      "/v1/messages",
+      {
+        "user-agent": "opencode/1.2.3",
+        "anthropic-beta": "prompt-caching-2024-07-31,context-1m-2025-08-07",
+        "x-custom-host-header": "kept",
+      },
+    );
+    const headers = new Headers(existing.headers);
+
+    // Untouched: forging a user-agent is mimicry, and mimicry is off.
+    expect(headers.get("user-agent")).toBe("opencode/1.2.3");
+    expect(headers.get("x-custom-host-header")).toBe("kept");
+    // ADDITIVE, not substitutive: the host's betas survive in their own order
+    // and the OAuth contract beta is appended.
+    expect(headers.get("anthropic-beta")).toBe("prompt-caching-2024-07-31,context-1m-2025-08-07,oauth-2025-04-20");
+  });
+
+  it("does not duplicate oauth-2025-04-20 when the host already sent it", async () => {
+    testPolicy.signature = false;
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      HOST_BODY,
+      "/v1/messages",
+      { "anthropic-beta": "oauth-2025-04-20,prompt-caching-2024-07-31" },
+    );
+
+    expect(new Headers(existing.headers).get("anthropic-beta")).toBe("oauth-2025-04-20,prompt-caching-2024-07-31");
+  });
+
+  it("strips the competing credential and the session-affinity hint", async () => {
+    testPolicy.signature = false;
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      HOST_BODY,
+      "/v1/messages",
+      { "x-api-key": "sk-ant-should-not-travel", "x-session-affinity": "affinity-1" },
+    );
+    const headers = new Headers(existing.headers);
+
+    expect(headers.get("x-api-key")).toBeNull();
+    expect(headers.get("x-session-affinity")).toBeNull();
+    expect(headers.get("authorization")).toBe("Bearer test-access");
+  });
+
+  it("puts the host's body on the wire byte for byte, unlike the package", async () => {
     testPolicy.signature = false;
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
       HOST_BODY,
     );
     const adapter = await buildAdapterRequest(HOST_BODY);
-    const legacyBody = JSON.parse(existing.body);
 
-    expect(legacyBody).toEqual({
-      model: "claude-sonnet-4-5",
-      max_tokens: 8000,
-      system: [{ type: "text", text: "You are a helpful assistant." }],
-      messages: [{ role: "user", content: "Hello" }],
-      temperature: 1,
-    });
-    expect(Object.keys(legacyBody)).toEqual(["model", "max_tokens", "system", "messages", "temperature"]);
+    // BYTE FOR BYTE. Not "deep equals": no re-serialization, no key reordering,
+    // and none of transformRequestBody's structural normalizations (which used
+    // to run here and, among other things, injected `temperature`).
+    expect(existing.body).toBe(JSON.stringify(HOST_BODY));
 
     // The differential itself: no billing prefix, no Claude Code identity block,
     // no `metadata.user_id`, no cache breakpoints — all of which the package
     // adds unconditionally.
-    expect(legacyBody.metadata).toBeUndefined();
+    expect(JSON.parse(existing.body).metadata).toBeUndefined();
     expect(JSON.parse(adapter.body).metadata.user_id).toEqual(expect.any(String));
     expect(existing.body).not.toContain("x-anthropic-billing-header");
     expect(adapter.body).toContain("x-anthropic-billing-header");
+  });
+
+  it("strips the body-level betas field, the one edit left with emulation off", async () => {
+    testPolicy.signature = false;
+    const existing = await captureExistingRequest(
+      vi.fn(() => Promise.resolve(makeSuccessResponse())),
+      { ...HOST_BODY, betas: ["prompt-caching-2024-07-31"] },
+    );
+    const parsed = JSON.parse(existing.body);
+
+    // The field is not part of the first-party API — it answers "Extra inputs
+    // are not permitted" — so forwarding it would break the request outright.
+    expect(parsed.betas).toBeUndefined();
+    expect(Object.keys(parsed)).toEqual(Object.keys(HOST_BODY));
   });
 
   // PREMISE FLIP — READ BEFORE EDITING THE ASSERTION BELOW.
@@ -861,28 +979,24 @@ describe("legacy request path", () => {
     expect(Object.keys(JSON.parse(existing.body))).toEqual(["model", "messages", "tools"]);
   });
 
-  // The remaining count_tokens differential: emulation off keeps the legacy
-  // forge, headers and body alike.
-  it("keeps count_tokens on the legacy forge when signature emulation is off", async () => {
+  // The remaining count_tokens differential: with emulation off the count
+  // endpoint gets the same passthrough envelope as every other route. It used to
+  // receive a THIRD forged beta here (`token-counting-2024-11-01`), which was
+  // endpoint-aware mimicry with mimicry off; the envelope is endpoint-blind now.
+  it("gives count_tokens the same passthrough envelope when signature emulation is off", async () => {
     testPolicy.signature = false;
     const existing = await captureExistingRequest(
       vi.fn(() => Promise.resolve(makeSuccessResponse())),
       HOST_BODY,
       "/v1/messages/count_tokens",
     );
-    const parsed = JSON.parse(existing.body);
+    const headers = new Headers(existing.headers);
 
-    expect([...new Headers(existing.headers).keys()].sort()).toEqual([
-      "anthropic-beta",
-      "authorization",
-      "content-type",
-      "user-agent",
-    ]);
-    expect(new Headers(existing.headers).get("anthropic-beta")).toBe(
-      "oauth-2025-04-20,interleaved-thinking-2025-05-14,token-counting-2024-11-01",
-    );
-    // Untouched host body: the legacy path forges nothing with emulation off.
-    expect(Object.keys(parsed)).toEqual(["model", "max_tokens", "system", "messages", "temperature"]);
+    expect([...headers.keys()].sort()).toEqual(["anthropic-beta", "authorization", "content-type"]);
+    expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
+    expect(headers.get("anthropic-beta")).not.toContain("token-counting-2024-11-01");
+    // Untouched host body: nothing is forged with emulation off, here either.
+    expect(existing.body).toBe(JSON.stringify(HOST_BODY));
   });
 });
 
