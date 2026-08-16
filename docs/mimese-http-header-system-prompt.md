@@ -1003,7 +1003,7 @@ message prompt caches, so it should only be toggled deliberately.
 
 ## 8) Related URL shaping
 
-`transformRequestUrl(input)` appends `?beta=true` for `/v1/messages` and `/v1/messages/count_tokens` requests when the query parameter is not already present.
+`transformRequestUrl(input, emulateSignature)` appends `?beta=true` for `/v1/messages` and `/v1/messages/count_tokens` requests when the query parameter is not already present, normalizing a `/messages` path to `/v1/messages` on the way. Both of those are Claude Code client shape, so **both are gated on signature emulation**: with emulation off the host's URL is passed through verbatim — no `?beta=true`, no path normalization. The `OPENCODE_MITM_BASE_URL` rewrite is not gated and applies in either mode.
 
 On the adapter path (signature emulation on, eligible request), the effective URL is assembled from **two** sources:
 
@@ -1016,7 +1016,7 @@ The package owns the _envelope_ — the canonical path and `?beta=true` — so t
 
 No gateway path _prefix_ can be lost this way: the `_useAdapter` gate only admits pathnames in `{/v1/messages, /messages, /v1/messages/count_tokens, /messages/count_tokens}`, so a prefixed endpoint never reaches the adapter. When `requestUrl` is unusable (unparsable input), the package's own origin stands.
 
-`transformRequestUrl` still owns the URL outright off the adapter path — signature emulation off, or an endpoint the package has no surface for. A non-string body is no longer one of those cases: with emulation on, a messages or count_tokens turn whose body is absent, unparsable or not a JSON object is a hard error (`assertAdapterBodyUsable`), not a fallback.
+`transformRequestUrl` still owns the URL outright off the adapter path — signature emulation off, or an endpoint the package has no surface for. With emulation off, owning it means declining to touch it beyond the MITM rewrite. A non-string body is no longer one of those cases: with emulation on, a messages or count_tokens turn whose body is absent, unparsable or not a JSON object is a hard error (`assertAdapterBodyUsable`), not a fallback.
 
 ## 9) Compatibility and fallback behavior
 

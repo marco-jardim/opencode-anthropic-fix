@@ -28,6 +28,13 @@ request; it now has one, and "signature emulation off" stopped meaning "less mim
   `anthropic-dangerous-direct-browser-access`, and the whole `x-stainless-*` family. The new envelope lives in
   `lib/passthrough-headers.mjs`, deliberately outside `lib/mimicry/`.
 
+- **The request URL is left alone with emulation off.** `transformRequestUrl` reshaped the URL unconditionally: it
+  appended `?beta=true` to the messages and `count_tokens` surfaces, and normalized a `/messages` path to
+  `/v1/messages` on the way. Both are Claude Code client shape — `?beta=true` is the endpoint the genuine client
+  pins, and the path normalization is the same assumption about who is calling — so both now follow the switch. With
+  emulation off the host's URL goes out exactly as the host wrote it, query and path included. `OPENCODE_MITM_BASE_URL`
+  still applies either way: it is a debug and conformance knob the operator asked for, not a disguise.
+
 - **`transformRequestBody` no longer runs with emulation off.** Its non-gated structural normalizations applied even
   with the switch off — output cap, `thinking` normalization, `effort` -> `output_config.effort`, system
   sanitize/compact — which is policy the host never asked for. The body now goes out byte for byte as the host wrote

@@ -597,7 +597,8 @@ The plugin also:
 - Emulates Claude-style request headers and beta flags by default
 - Sanitizes "OpenCode" references to "Claude Code" in system prompts (required by Anthropic's API)
 - In `prompt_compaction="minimal"`, deduplicates repeated/contained system blocks and uses a compact dedicated prompt for internal title-generation requests
-- Adds `?beta=true` to `/v1/messages` and `/v1/messages/count_tokens` requests
+- With signature emulation on, adds `?beta=true` to `/v1/messages` and `/v1/messages/count_tokens` requests (and
+  normalizes a `/messages` path to `/v1/messages`). With it off, the host's URL is sent untouched.
 
 ### Signature emulation
 

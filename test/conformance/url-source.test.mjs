@@ -253,31 +253,43 @@ describe("OPENCODE_MITM_BASE_URL overrides the origin only", () => {
   });
 });
 
-describe("legacy path keeps transformRequestUrl as the URL source", () => {
-  // Emulation off is the route where the package never runs. These pins are the
-  // PRE-migration behaviour, unchanged: they fail if the adapter's URL adoption
-  // ever leaks across the gate.
-  it("appends ?beta=true locally when signature emulation is off", async () => {
+describe("emulation off leaves the host's URL alone", () => {
+  // PHASE 2.2, QA finding 1. These three used to pin the opposite: `?beta=true`
+  // appended locally and `/messages` normalized to `/v1/messages`, both with
+  // emulation OFF. Both are Claude Code SHAPE — `?beta=true` is the endpoint the
+  // genuine client pins, and the path normalization is the same client-shape
+  // assumption — so with the emulation switch off they contradicted the pure
+  // passthrough 2.2.2 established. The URL is now as untouched as the headers
+  // and the body.
+  it("does not append ?beta=true when signature emulation is off", async () => {
     testPolicy.signature = false;
-    expect(await captureFetchedUrl("/v1/messages")).toBe("https://api.anthropic.com/v1/messages?beta=true");
+    expect(await captureFetchedUrl("/v1/messages")).toBe("https://api.anthropic.com/v1/messages");
   });
 
-  it("normalizes /messages to /v1/messages locally when signature emulation is off", async () => {
+  it("does not normalize /messages to /v1/messages when signature emulation is off", async () => {
     testPolicy.signature = false;
-    expect(await captureFetchedUrl("/messages")).toBe("https://api.anthropic.com/v1/messages?beta=true");
+    expect(await captureFetchedUrl("/messages")).toBe("https://api.anthropic.com/messages");
   });
 
-  it("applies the MITM origin through transformRequestUrl when signature emulation is off", async () => {
+  it("does not append ?beta=true to count_tokens either when signature emulation is off", async () => {
+    testPolicy.signature = false;
+    expect(await captureFetchedUrl("/v1/messages/count_tokens")).toBe(
+      "https://api.anthropic.com/v1/messages/count_tokens",
+    );
+  });
+
+  // The ONE rewrite that survives the switch: the MITM redirect is a debug and
+  // conformance knob the operator set deliberately, not a disguise. Note the
+  // absent `?beta=true` — the origin moves, the endpoint does not.
+  it("still applies the MITM origin when signature emulation is off", async () => {
     testPolicy.signature = false;
     vi.stubEnv("OPENCODE_MITM_BASE_URL", "http://localhost:9999");
-    expect(await captureFetchedUrl("/v1/messages")).toBe("http://localhost:9999/v1/messages?beta=true");
+    expect(await captureFetchedUrl("/v1/messages")).toBe("http://localhost:9999/v1/messages");
   });
 
-  // The mirror image of the discriminating cases above. With emulation off the
-  // package never runs, so the extra query parameter survives -- exactly as it
-  // did before the migration. This is the byte-level proof that the legacy path
-  // was not touched. (The proxy origin survives on BOTH paths now, so it is no
-  // longer a differential; it is asserted on the adapter side above.)
+  // The discriminator against the adapter path, which REPLACES the host's query
+  // with the package's own `?beta=true`. Here every host-supplied parameter
+  // survives untouched, which is what "the host's URL" means.
   it("keeps host-supplied query parameters when signature emulation is off", async () => {
     testPolicy.signature = false;
     expect(await captureFetchedUrl("/v1/messages?beta=true&trace=1")).toBe(

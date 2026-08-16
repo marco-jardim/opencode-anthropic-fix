@@ -2569,7 +2569,10 @@ export async function AnthropicAuthPlugin({ client }) {
 
               // Transform URL once (shared across retries)
               const requestInit = init ?? {};
-              const { requestInput, requestUrl } = transformRequestUrl(input);
+              // The emulation flag decides whether the URL may be reshaped at
+              // all (`?beta=true`, `/messages` -> `/v1/messages`). Read here,
+              // live, because `/anthropic set` can flip it between requests.
+              const { requestInput, requestUrl } = transformRequestUrl(input, getSignatureEmulationEnabled());
 
               // A host may hand us a `Request` carrying the body, with the init
               // empty — `fetchFn(new Request(url, {body}), {})`. Every body-aware
@@ -5969,13 +5972,20 @@ async function fetchLatestClaudeCodeVersion(timeoutMs = 1200) {
  */
 
 /**
- * Transform the request URL: add ?beta=true to /v1/messages and /v1/messages/count_tokens.
- * Preserves behaviors F1-F3.
+ * Transform the request URL: add ?beta=true to /v1/messages and
+ * /v1/messages/count_tokens, normalizing a `/messages` path to `/v1/messages`
+ * on the way. Preserves behaviors F1-F3.
+ *
+ * Both of those are CLAUDE CODE SHAPE, so both are gated on `emulateSignature`.
+ * The `OPENCODE_MITM_BASE_URL` rewrite is not, and applies either way.
  *
  * @param {any} input
+ * @param {boolean} [emulateSignature] Whether signature emulation is on for this
+ *   request. Read at the call site rather than here: the config is
+ *   runtime-mutable and this function lives outside the plugin closure.
  * @returns {{requestInput: any, requestUrl: URL | null}}
  */
-function transformRequestUrl(input) {
+function transformRequestUrl(input, emulateSignature = true) {
   let requestInput = input;
   let requestUrl = null;
   try {
@@ -5988,7 +5998,14 @@ function transformRequestUrl(input) {
     requestUrl = null;
   }
 
-  if (requestUrl && !requestUrl.searchParams.has("beta")) {
+  // PHASE 2.2 (QA finding 1) — THE URL REWRITE IS MIMICRY, SO IT IS GATED.
+  // `?beta=true` is the endpoint the genuine Claude Code client pins, and
+  // normalizing `/messages` to `/v1/messages` is the same kind of client-shape
+  // assumption. With signature emulation off the plugin forges nothing, and
+  // that has to include the URL: the host's URL goes out exactly as the host
+  // wrote it. The MITM rewrite below stays unconditional — it is a debug and
+  // conformance knob the operator asked for, not a disguise.
+  if (emulateSignature && requestUrl && !requestUrl.searchParams.has("beta")) {
     const p = requestUrl.pathname;
     // SDK may send to /messages (base URL includes /v1) or /v1/messages (base URL is root)
     const isMessages =

@@ -1,5 +1,5 @@
 {
-  "url": "https://api.anthropic.com/v1/messages?beta=true",
+  "url": "https://api.anthropic.com/v1/messages",
   "headers": [
     ["anthropic-beta", "oauth-2025-04-20"],
     ["authorization", "<redacted>"],
