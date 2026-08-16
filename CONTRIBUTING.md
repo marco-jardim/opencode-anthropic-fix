@@ -256,12 +256,20 @@ flowchart LR
 
 ### Header Transformations
 
-| Step             | What                                               | Why                            |
-| ---------------- | -------------------------------------------------- | ------------------------------ |
-| Authorization    | `Bearer <access_token>`                            | OAuth authentication           |
-| Beta headers     | `oauth-2025-04-20,interleaved-thinking-2025-05-14` | Required beta features         |
-| User agent       | `claude-cli/2.1.2 (external, cli)`                 | Identifies as Claude CLI       |
-| Remove x-api-key | Delete if present                                  | OAuth uses Bearer, not API key |
+With signature emulation ON, the headers are composed by the shared wire package (see
+`lib/mimicry/adapter-input.mjs` and `docs/mimese-http-header-system-prompt.md`). The table below is the AUTH ENVELOPE —
+the part the plugin owns on every path, emulation on or off:
+
+| Step                      | What                                   | Why                                                               |
+| ------------------------- | -------------------------------------- | ----------------------------------------------------------------- |
+| Authorization             | `Bearer <access_token>`                | OAuth authentication                                              |
+| Beta header               | append `oauth-2025-04-20` when missing | Contract of the OAuth token — the API rejects a bearer without it |
+| Remove x-api-key          | Delete if present                      | A competing credential must not travel with our bearer            |
+| Remove x-session-affinity | Delete if present                      | opencode SDK routing hint; leaks session identity upstream        |
+
+With emulation OFF that envelope is ALL the plugin does: no forged user-agent, no substituted beta list, no body
+transform. It is built by `lib/passthrough-headers.mjs`, deliberately outside `lib/mimicry/` — see the module comment
+there for the boundary rule, and `README.md#signature-emulation` for the user-facing description.
 
 ### Response Transformations
 

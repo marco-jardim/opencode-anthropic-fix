@@ -599,7 +599,33 @@ The plugin also:
 - In `prompt_compaction="minimal"`, deduplicates repeated/contained system blocks and uses a compact dedicated prompt for internal title-generation requests
 - Adds `?beta=true` to `/v1/messages` and `/v1/messages/count_tokens` requests
 
-When signature emulation is disabled (`signature_emulation.enabled=false`), the plugin falls back to legacy behavior including the Claude Code system prompt prefix.
+### Signature emulation
+
+`signature_emulation.enabled` is a strictly binary switch — there is no half-way mode.
+
+**On (default):** every `/v1/messages` and `/v1/messages/count_tokens` turn is built by the shared
+`@tormentalabs/claude-code-wire-compat` package: full Claude Code header set, beta list, identity/billing system
+blocks and `metadata.user_id`.
+
+**Off: pure passthrough plus the auth envelope.** The plugin forges nothing. Your request goes out as your client wrote
+it — same `user-agent`, same headers, same body bytes — with only three changes, all of which belong to the OAuth
+transport rather than to the disguise:
+
+- `authorization: Bearer <account token>` — without it there is no request and no account rotation;
+- `anthropic-beta` — **additive**: your value is preserved verbatim and `oauth-2025-04-20` is appended only when
+  missing, because the API rejects an OAuth bearer that does not carry it;
+- `x-api-key` and `x-session-affinity` are removed — a second credential must not travel next to your bearer, and the
+  affinity hint leaks session identity upstream.
+
+The body is not transformed either. Two fields are stripped because the API rejects them outright: the body-level
+`betas` field and any stainless-helper markers your client attached.
+
+> **Changed in the unreleased version.** Emulation-off used to still forge a `claude-cli` user-agent and REPLACE your
+> `anthropic-beta` with a minimal list, and it ran structural body normalizations (which also emptied your `system`
+> prompt and injected a `temperature` you never sent). All of that is gone. See the CHANGELOG.
+
+The system-prompt side is unchanged: with emulation off the plugin uses the legacy system transform path, including
+the Claude Code system prompt prefix.
 
 ## Files
 

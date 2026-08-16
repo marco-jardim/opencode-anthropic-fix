@@ -360,7 +360,36 @@ Environment overrides (in `lib/config.mjs`):
   - `minimal` => compact long system instruction blocks (default)
   - `off` => disable compaction
 
-When `signature_emulation.enabled=false`, the plugin falls back to legacy system-prompt transform behavior (Claude Code prefix via `experimental.chat.system.transform`) and does not apply the full header/system mimicry block documented below.
+### 1.1) What `enabled: false` means (Phase 2.2.2 onwards)
+
+**Off means OFF — pure passthrough plus the auth envelope.** No mimicry function composes the request: it is built by
+`lib/passthrough-headers.mjs`, which lives outside `lib/mimicry/` on purpose. The outgoing request is the host's own
+request, with exactly three modifications:
+
+| Modification                                      | Why it is transport, not mimicry                                                                                                                                                                                                                                           |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `authorization: Bearer <account token>`           | The plugin _is_ an OAuth transport. Without it there is no request and no account rotation.                                                                                                                                                                                |
+| `anthropic-beta`: **additive** `oauth-2025-04-20` | The host's value is preserved verbatim, in its own order; the OAuth beta is appended only when missing. It is a contract of the OAuth token, not a fingerprint — the API rejects a bearer without it (see [RE §14.2 item 3, §14.3](./claude-code-reverse-engineering.md)). |
+| `x-api-key` and `x-session-affinity` removed      | A competing credential must not travel next to our bearer; the opencode SDK's affinity hint leaks session identity upstream. Envelope hygiene.                                                                                                                             |
+
+Everything else is untouched, `user-agent` above all. Headers that are **not** sent with emulation off:
+the forged `claude-cli` user-agent, `anthropic-version`, `x-app`, `x-claude-code-session-id`, `x-client-request-id`,
+`anthropic-dangerous-direct-browser-access`, and the whole `x-stainless-*` family.
+
+The body is not transformed either — `transformRequestBody` does not run. Two strips remain, because they keep the
+request _valid_ rather than making it look like Claude Code: the body-level `betas` field (never a first-party field;
+the API answers "Extra inputs are not permitted") and the host's stainless-helper markers (a host-side signal the API
+has never known, rejected inside a tool definition).
+
+BEFORE Phase 2.2.2 this switch produced HALF-mimicry: a forged `claude-cli/2.1.233 (external, cli)` user-agent, an
+`anthropic-beta` that REPLACED the host's, and `transformRequestBody`'s non-gated normalizations (which also emptied
+the host's `system` and injected a `temperature` the host never sent). Pinned by
+`test/conformance/shared-package-parity.test.mjs` ("emulation-off passthrough envelope") and migration-parity
+vector 09.
+
+The system-prompt side is unchanged: with emulation off the plugin uses the legacy system-prompt transform path
+(Claude Code prefix via `experimental.chat.system.transform`) and applies none of the header/system mimicry documented
+below.
 
 ## 2) Claude CLI version used in signature behavior
 
@@ -532,10 +561,16 @@ Function in `lib/mimicry/headers.mjs`:
 - accepts `strategy` (`"sticky"`, `"round-robin"`, `"hybrid"`) to conditionally exclude stateful betas
 - applies endpoint/content-aware betas using `requestPath` and `hasFileReferences`
 
-When `signatureEnabled=false`:
+When `signatureEnabled=false`: **this builder is no longer reached from the interceptor.** As of Phase 2.2.2 a request
+with signature emulation off is built by `lib/passthrough-headers.mjs` and never by a mimicry function, so the
+`signatureEnabled=false` branch below survives only for direct callers and tests. What the wire actually gets is the
+host's `anthropic-beta` verbatim with `oauth-2025-04-20` appended when missing — see §1 and
+[README](../README.md#signature-emulation).
 
-- adds `interleaved-thinking-2025-05-14` (in addition to OAuth beta)
-- adds `token-counting-2024-11-01` for `/v1/messages/count_tokens`
+The dead branch, for reference:
+
+- added `interleaved-thinking-2025-05-14` (in addition to OAuth beta)
+- added `token-counting-2024-11-01` for `/v1/messages/count_tokens`
 
 > **`/v1/messages/count_tokens` with `signatureEnabled=true` no longer uses this builder.** That route is composed by
 > the shared package's count surface (`buildClaudeCodeCountTokensRequest`), which derives its own beta set from the
@@ -981,12 +1016,12 @@ The package owns the _envelope_ — the canonical path and `?beta=true` — so t
 
 No gateway path _prefix_ can be lost this way: the `_useAdapter` gate only admits pathnames in `{/v1/messages, /messages, /v1/messages/count_tokens, /messages/count_tokens}`, so a prefixed endpoint never reaches the adapter. When `requestUrl` is unusable (unparsable input), the package's own origin stands.
 
-`transformRequestUrl` still owns the URL outright on the legacy path — signature emulation off, a non-eligible endpoint, a non-string body, or any request the adapter declined.
+`transformRequestUrl` still owns the URL outright off the adapter path — signature emulation off, or an endpoint the package has no surface for. A non-string body is no longer one of those cases: with emulation on, a messages or count_tokens turn whose body is absent, unparsable or not a JSON object is a hard error (`assertAdapterBodyUsable`), not a fallback.
 
 ## 9) Compatibility and fallback behavior
 
 - Mimicry is enabled by default (config default)
-- If disabled, plugin keeps auth/rotation behavior and uses legacy system transform path
+- If disabled, the plugin keeps auth/rotation behavior and forges nothing: pure passthrough plus the auth envelope (see §1.1), and the legacy system transform path
 - JSON parse failures in body transform do not break requests (original body is preserved)
 - IO failures while persisting `persistentUserId` do not break requests (runtime UUID remains usable)
 - NPM version fetch failure does not break startup (fallback version is used)
