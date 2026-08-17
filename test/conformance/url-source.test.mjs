@@ -115,6 +115,36 @@ function makeSuccessResponse() {
 }
 
 /**
+ * The URL of a recorded `fetch` call. The interceptor forwards a `Request` when
+ * the host handed it one and a URL/string otherwise; `String(request)` is
+ * "[object Request]", hence the branch.
+ * @param {unknown} input
+ */
+function callUrl(input) {
+  return input instanceof Request ? input.url : String(input);
+}
+
+/**
+ * Keep only the API calls, dropping non-API traffic the plugin may emit around
+ * the request under test — today that is the preconnect warm-up HEAD to the bare
+ * origin (`index.mjs`), which has an empty path and carries no assertable URL.
+ *
+ * This is the second of two layers, and both are needed. The config mocks in
+ * this file disable `preconnect` so the warm-up never fires; that is what stops
+ * it from consuming a queued mock response, which filtering here cannot undo.
+ * This filter is the belt to that suspenders: it keeps the helper honest if any
+ * other stray non-API call ever lands ahead of the real one.
+ * @param {import('vitest').Mock} mockFetch
+ */
+function apiCalls(mockFetch) {
+  return mockFetch.mock.calls.filter(([input, init]) => {
+    const method = String(init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    if (method === "HEAD") return false;
+    return new URL(callUrl(input)).pathname !== "/";
+  });
+}
+
+/**
  * Drive one request through the real interceptor and return the URL the plugin
  * handed to `fetch`. `requestPath` is what the HOST sends; the plugin decides
  * what actually goes on the wire, which is the whole point of the assertions.
@@ -137,8 +167,9 @@ async function captureFetchedUrl(requestPath, hostBody = HOST_BODY, origin = "ht
   });
   await response.text();
 
-  expect(mockFetch).toHaveBeenCalled();
-  return String(mockFetch.mock.calls[0][0]);
+  const calls = apiCalls(mockFetch);
+  expect(calls.length).toBeGreaterThan(0);
+  return callUrl(calls[0][0]);
 }
 
 function stubCleanEnvironment() {
