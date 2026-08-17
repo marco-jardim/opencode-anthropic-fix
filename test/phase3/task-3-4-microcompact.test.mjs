@@ -41,17 +41,9 @@ describe("Task 3.4 — Microcompact", () => {
   // T3.4.5 removed: it pinned buildMicrocompactBetas, which was deleted as dead
   // code (its only consumer, computedBetaHeader, went away in the wire-compat
   // migration). Remaining T3.4.x numbering is intentionally left unchanged.
-
-  // T3.4.6: microcompact betas are injected into beta header
-  it("T3.4.6: betas are injected into header when active", () => {
-    const baseBetas = ["oauth-2025-04-20", "claude-code-20250219"];
-    const microcompactBetas = ["clear_tool_uses_20250919", "clear_thinking_20251015"];
-    for (const mb of microcompactBetas) {
-      if (!baseBetas.includes(mb)) baseBetas.push(mb);
-    }
-    expect(baseBetas).toContain("clear_tool_uses_20250919");
-    expect(baseBetas).toContain("clear_thinking_20251015");
-  });
+  // T3.4.6 removed: it was tautological (asserted on a locally built array,
+  // never importing production code) and described header injection that no
+  // longer exists — microcompact no longer contributes betas to the wire.
 
   // T3.4.7: microcompact state transitions
   it("T3.4.7: state transitions active/inactive", () => {
