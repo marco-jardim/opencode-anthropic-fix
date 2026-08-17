@@ -65,6 +65,10 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
     custom_betas: [...testPolicy.customBetas],
     idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
     adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
+    // Without this the fire-and-forget preconnect HEAD lands in the fetch mock as
+    // an extra call and consumes a queued response, which only shows up on hosts
+    // where no proxy/mTLS env var short-circuits `isProxyOrMtlsEnvironment()`.
+    preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
     token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: false },
   });
 

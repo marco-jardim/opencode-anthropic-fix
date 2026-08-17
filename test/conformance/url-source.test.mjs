@@ -64,6 +64,10 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
     },
     idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
     adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
+    // Without this the fire-and-forget preconnect HEAD to the bare API origin is
+    // recorded as the first fetch call, so the URL assertions below would read
+    // `https://api.anthropic.com` instead of the request the plugin actually made.
+    preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
   });
 
   return {
