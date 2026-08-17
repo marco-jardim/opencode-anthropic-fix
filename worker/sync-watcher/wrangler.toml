@@ -2,8 +2,13 @@ name = "sync-watcher"
 main = "src/index.mjs"
 compatibility_date = "2025-09-01"
 
+# Cron disabled. The watcher's patcher (src/delivery.mjs) regex-rewrites the
+# FALLBACK_CLAUDE_CLI_VERSION and CLI_TO_SDK_VERSION literals in index.mjs. The
+# wire-compat migration removed those literals from this repo — they live in
+# @tormentalabs/claude-code-wire-compat now — so scheduled runs match nothing and
+# open silent no-op PRs. Re-enable once the patcher is re-pointed at the package.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = []
 
 [[kv_namespaces]]
 binding = "UPSTREAM_KV"

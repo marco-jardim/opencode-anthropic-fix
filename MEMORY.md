@@ -88,3 +88,10 @@ single seam. Decisions taken along the way, and what each one closes off:
    today, so the regex replacements will silently match nothing and the watcher will
    open PRs that change no version. Stale, and out of this migration's scope — the
    watcher is a separate subproject with its own deploy and needs its own update.
+
+   **Resolved by disable.** The cron trigger in `worker/sync-watcher/wrangler.toml`
+   is now `crons = []`, so the watcher no longer wakes up to open no-op PRs. This
+   defuses the symptom, not the cause: the patcher still targets deleted literals.
+   Re-pointing it at `@tormentalabs/claude-code-wire-compat` (and re-enabling the
+   cron) remains open work. The trigger also lives in Cloudflare's server-side
+   state — the repo change only takes effect after a `wrangler deploy`.
