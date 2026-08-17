@@ -32,7 +32,7 @@ import {
   maybeApplySessionToolResultDedupe,
   applyContextHintCompaction,
 } from "./lib/token-economy/transforms.mjs";
-import { shouldMicrocompact, buildMicrocompactBetas } from "./lib/token-economy/microcompact.mjs";
+import { shouldMicrocompact } from "./lib/token-economy/microcompact.mjs";
 import { redactSecrets, redactString } from "./lib/redact.mjs";
 import {
   createTransformedSSEStream,
@@ -2898,14 +2898,12 @@ export async function AnthropicAuthPlugin({ client }) {
                 const _baseTE = config.token_economy || {};
                 const _tokenEconomy = { ..._baseTE, __requestRole: _requestRole };
 
-                // Microcompact: inject clear betas at high context utilization
-                let _microcompactBetas = null;
+                // Microcompact: track high context utilization (state + toast only)
                 if (requestInit.body) {
                   const estimatedTokens = _parsedBodyOnce
                     ? estimatePromptTokensFromParsed(_parsedBodyOnce)
                     : estimatePromptTokens(requestInit.body);
                   if (shouldMicrocompact(estimatedTokens, config)) {
-                    _microcompactBetas = buildMicrocompactBetas();
                     if (!microcompactState.active) {
                       microcompactState.active = true;
                       microcompactState.lastActivatedTurn = sessionMetrics.turns;

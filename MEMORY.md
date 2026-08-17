@@ -74,6 +74,14 @@ single seam. Decisions taken along the way, and what each one closes off:
    it. Do not "fix" it by reconnecting it blindly — first establish whether the real
    client emits those betas at all.
 
+   **Resolved by removal.** `_microcompactBetas` and `buildMicrocompactBetas`
+   (`lib/token-economy/microcompact.mjs`) are deleted, along with their tests. The
+   live half stays: `shouldMicrocompact`, the `microcompactState` toggle and the
+   activation toast. Nothing on the wire changed — wire-baseline is unmoved — which
+   is the point: the value had not reached the wire since the migration. If the real
+   client turns out to emit `clear_tool_uses_*` / `clear_thinking_*`, that is a new
+   decision routed through the adapter input, not a revert of this deletion.
+
 2. **The `max_tokens 40000 → 32000` golden pin was retired with the tautological
    differential.** The clamp branch it covered is not unguarded: wire-baseline
    vector 06 pins the same `min()` clamp (`64000 → 32000`). Noted so nobody reads the

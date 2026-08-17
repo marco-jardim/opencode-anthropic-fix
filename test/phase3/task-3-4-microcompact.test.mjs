@@ -38,13 +38,9 @@ describe("Task 3.4 — Microcompact", () => {
     expect(180_000 >= threshold).toBe(true);
   });
 
-  // T3.4.5: buildMicrocompactBetas returns expected betas
-  it("T3.4.5: buildMicrocompactBetas returns correct beta flags", () => {
-    const betas = ["clear_tool_uses_20250919", "clear_thinking_20251015"];
-    expect(betas).toHaveLength(2);
-    expect(betas).toContain("clear_tool_uses_20250919");
-    expect(betas).toContain("clear_thinking_20251015");
-  });
+  // T3.4.5 removed: it pinned buildMicrocompactBetas, which was deleted as dead
+  // code (its only consumer, computedBetaHeader, went away in the wire-compat
+  // migration). Remaining T3.4.x numbering is intentionally left unchanged.
 
   // T3.4.6: microcompact betas are injected into beta header
   it("T3.4.6: betas are injected into header when active", () => {
