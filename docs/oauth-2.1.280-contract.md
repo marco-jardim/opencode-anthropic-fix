@@ -277,6 +277,21 @@ set order is invariant under any gating.
 §13.8 records neither the default state of `PLUGINS_SCOPE_REGISTERED` nor the
 contents of "the allowed list".
 
+**What §13.8 does _not_ fix is the order _among_ the extensions**
+(`[unattested-order]`). It attests the extension names and their gating
+conditions; it does not say whether `user:plugins` precedes or follows the
+project scopes when both gates fire, nor whether `user:projects:read` precedes
+`user:projects:write`. This plugin chooses base → `user:plugins` → `read` →
+`write`, so with both gates on it emits:
+
+```
+user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins user:projects:read user:projects:write
+```
+
+That eight-scope string is wire-visible and is this plugin's assumption, not a
+transcription. It is recorded as divergence **D13** and is reachable only by
+explicit opt-in.
+
 **What this plugin emits by default:** the base set only. `user:plugins` requires
 `oauth.plugins_scope: true`; the project scopes require an explicit
 `oauth.project_scopes` entry. Both default off, which makes the default emitted
@@ -420,6 +435,7 @@ either way. A row with no justification is a defect, not a divergence. The
 | D9  | Conditional scopes default **off**                                                         | §4.2. The genuine default is unattested; defaulting on would add an unforced fingerprint. Default-off also keeps the emitted scope string unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | permanent until new evidence |
 | D10 | `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` / `_SCOPES` / `_CLIENT_ID` headless login                | §5.2. Local capability, unattested in §13.8. `_CLIENT_ID` changes a wire value by the user's explicit choice.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | permanent — local feature    |
 | D11 | Federated credentials renewed by re-exchange rather than by `refresh_token`                | §6.1. Design choice under uncertainty; the re-exchange path is attested, the alternative is unattested in both directions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | superseded by D12            |
+| D13 | Order among the conditional scope extensions, and the space-join that serialises them      | §4.2. §13.8 attests the extension names and their gating conditions, not their relative position; it attests the base arrays, not their serialisation into a `scope` parameter. This plugin chooses base → `user:plugins` → `user:projects:read` → `user:projects:write`, space-joined. Both choices are wire-visible. They are reachable only by explicit opt-in, so the default emitted string is unaffected, and the chosen order matches the order §13.8 itself enumerates the extensions in — the weakest available basis, recorded as a choice rather than dressed up as a measurement.                                                                                                   | permanent until new evidence |
 | D12 | **The OIDC federation grant is not implemented.** No JWT-bearer request is ever emitted.   | Deliberate scope decision. Federation is a distinct authentication surface for service accounts and CI, not an enhancement of the interactive flow, and this plugin's users authenticate interactively. Implementing an unused grant would add a maintained code path, a second credential lifecycle, and a set of constants with no consumer — cost with no delivered value. §2.4 and §3's federation constants are recorded here so the grant can be added correctly later; they are absent from `lib/oauth-constants.mjs` by design, enforced by a test that fails if any `OIDC_*` export appears. Consequence: drift row 10 of the parity plan is **not** closed, and is not claimed to be. | permanent — scope            |
 
 ---
@@ -453,6 +469,26 @@ This is pre-existing behaviour, not something the parity work introduced, and it
 is not a wire-fingerprint issue — it is a security gap. It is recorded here
 rather than fixed in place because fixing it changes the CLI's login control flow,
 which no wave of this plan owns.
+
+### 7.3) Known product gap: enabling a scope gate does not re-issue a token
+
+`hasRequiredScopes()` checks the five-scope **base** set only. Turning on
+`oauth.plugins_scope` — or adding an `oauth.project_scopes` entry — therefore
+does **not** invalidate a token that was issued without the extension, and the
+user is not prompted to re-authenticate. The knob appears inert until the next
+voluntary login.
+
+This is deliberate. Making the extensions "required" would mark every stored
+token as insufficient the moment the key is set, forcing a re-login on users who
+flipped a knob they may not have understood. The alternative — silently keeping a
+token that lacks the requested scope — is at least non-destructive, and the
+authorize URL does carry the extension the next time the user logs in.
+
+Related: the `oauth.*` config namespace is **file-only**. `/anthropic set`
+carries an explicit per-key allowlist and has never had a branch for any `oauth`
+key, including the pre-existing `revoke_on_logout`. All four keys
+(`sdk_token_useragent`, `revoke_on_logout`, `plugins_scope`, `project_scopes`)
+are set by editing `anthropic-auth.json` directly.
 
 ## 8) Change control
 
