@@ -990,6 +990,21 @@ describe("auth commands", () => {
     }
   });
 
+  it("cmdLogin reports a rejected OAuth endpoint without an unhandled rejection", async () => {
+    loadAccounts.mockResolvedValue(null);
+    vi.mocked(authorize).mockRejectedValueOnce(new Error("CLAUDE_CODE_CUSTOM_OAUTH_URL is not an approved endpoint."));
+    const restoreTTY = setStdinTTY(true);
+    try {
+      await expect(cmdLogin()).resolves.toBe(1);
+      expect(authorize).toHaveBeenCalledWith("max");
+      expect(output.errorText()).toContain("CLAUDE_CODE_CUSTOM_OAUTH_URL");
+      expect(exchange).not.toHaveBeenCalled();
+      expect(saveAccounts).not.toHaveBeenCalled();
+    } finally {
+      restoreTTY();
+    }
+  });
+
   it("cmdLogin adds a new account via OAuth", async () => {
     loadAccounts.mockResolvedValue(null);
     const restoreTTY = setStdinTTY(true);

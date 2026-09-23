@@ -309,7 +309,19 @@ function openBrowser(url) {
  * @returns {Promise<{refresh: string, access: string, expires: number, email?: string} | null>}
  */
 async function runOAuthFlow() {
-  const { url, verifier } = await authorize("max");
+  /** @type {{url: string, verifier: string}} */
+  let authorization;
+  try {
+    // `authorize()` rejects on a configuration problem before it does any work —
+    // an unapproved CLAUDE_CODE_CUSTOM_OAUTH_URL, or an approved one this plugin
+    // cannot honour. Those messages are written for the operator, so print them
+    // as an error rather than letting the promise reject into a stack trace.
+    authorization = await authorize("max");
+  } catch (err) {
+    console.error(c.red(`Error: ${err?.message ?? err}`));
+    return null;
+  }
+  const { url, verifier } = authorization;
 
   console.log("");
   console.log(c.bold("Opening browser for Anthropic OAuth login..."));

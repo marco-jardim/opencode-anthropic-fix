@@ -112,15 +112,39 @@ it("guard: ignored refresh options never reach the wire", async () => {
   await refreshToken("refresh-token", {
     scopes: ["user:profile", "user:inference"],
     sdkTokenUserAgent: false,
+    // clientId is honoured for headless accounts, not ignored; pin only its empty-string fallback.
     clientId: "",
   });
-  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+  const [, init] = mockFetch.mock.calls[0];
+  const body = JSON.parse(init.body);
   expect(body).toEqual({
     grant_type: "refresh_token",
     refresh_token: "refresh-token",
     client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
   });
   expect("scope" in body).toBe(false);
+  expect(init.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+});
+
+it("guard: a supplied clientId is honoured, and only in client_id", async () => {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
+  });
+  await refreshToken("refresh-token", { clientId: "custom-client-id" });
+  const [, init] = mockFetch.mock.calls[0];
+  const body = JSON.parse(init.body);
+  expect(body).toEqual({
+    grant_type: "refresh_token",
+    refresh_token: "refresh-token",
+    client_id: "custom-client-id",
+  });
+  expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id"]);
+  expect(init.headers).toEqual({
+    "Content-Type": "application/json",
+    "anthropic-beta": "oauth-2025-04-20",
+    "User-Agent": "anthropic-sdk-typescript/0.112.1 userOAuthProvider",
+  });
 });
 
 it("guard: the token endpoint host is never changed", async () => {
@@ -134,6 +158,35 @@ it("guard: the token endpoint host is never changed", async () => {
 });
 
 describe("meta", () => {
+  it("meta: the assertion checker rejects empty blocks and string or comment decoys", () => {
+    const fixture = `
+      /* "empty" */
+      const titles = ["empty"];
+      it("asserted", () => { expect(true).toBe(true); });
+      // "empty"
+      it("empty", () => {});
+        it("following", () => { expect(true).toBe(true); });
+    `;
+    const blocks = blocksWithAssertions(fixture);
+    expect(blocks.get("asserted")).toBe(true);
+    expect(blocks.get("empty")).toBe(false);
+    for (const boundary of ["test", "it.skip", "it.each", "describe"]) {
+      const decoys = `
+        it("decoy", () => {
+          // expect(true).toBe(true);
+          /* expect(true).toBe(true); */
+          const text = "expect(";
+          const template = \`expect(\`;
+        });
+          ${boundary}("following", () => { expect(true).toBe(true); });
+      `;
+      expect(blocksWithAssertions(decoys).get("decoy"), boundary).toBe(false);
+    }
+    expect(blocksWithAssertions('\nit.skip("not a plain it", () => { expect(true); });').has("not a plain it")).toBe(
+      false,
+    );
+  });
+
   it("meta: every attested contract §2 row has exactly one assertion", () => {
     const contractSource = readFileSync(new URL("../../docs/oauth-2.1.280-contract.md", import.meta.url), "utf8");
     const testSource = readFileSync(new URL("./oauth-wire-parity.test.mjs", import.meta.url), "utf8");
@@ -171,13 +224,12 @@ describe("meta", () => {
       `contract §2.3 Header 3`,
       `contract §2.3 Body keys`,
     ]);
+    const blocks = blocksWithAssertions(testSource);
     for (const id of ids) {
       expect(testSource.split(`"${id}"`).length - 1, id).toBe(1);
       // A title that maps to an empty body maps to nothing.
-      const titledBlock = testSource.slice(testSource.indexOf(`"${id}"`));
-      const nextTest = titledBlock.search(/\n(?: {2})?it\(/);
-      const block = nextTest === -1 ? titledBlock : titledBlock.slice(0, nextTest);
-      expect(block, id).toContain("expect(");
+      expect(blocks.has(id), id).toBe(true);
+      expect(blocks.get(id), id).toBe(true);
     }
   });
 
@@ -189,3 +241,28 @@ describe("meta", () => {
     expect(normalized).toContain("exempt from the §8 conformance meta-test");
   });
 });
+
+function blocksWithAssertions(source) {
+  const literals = [];
+  // Tokenize strings together with comments so URL slashes are not mistaken for comments.
+  // Replace string contents with inert tokens, retaining only their titles for lookup.
+  const stripped = source.replace(
+    /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
+    (token) => {
+      if (token.startsWith("/")) return token.replace(/[^\r\n]/g, " ");
+      literals.push(token.slice(1, -1));
+      return `"${literals.length - 1}"`;
+    },
+  );
+  const boundary = /\n\s*(?:it|test|describe)(?:\.\w+)*\s*\(/g;
+  const working = `\n${stripped}`;
+  const openers = [...working.matchAll(boundary)];
+  const blocks = working.split(boundary).slice(1);
+  const assertions = new Map();
+  for (const [index, block] of blocks.entries()) {
+    if (!/^\s*it\s*\($/.test(openers[index][0])) continue;
+    const title = block.match(/^\s*["'`](.+?)["'`]/);
+    if (title) assertions.set(literals[Number(title[1])], /\bexpect\s*\(/.test(block));
+  }
+  return assertions;
+}
