@@ -57,6 +57,11 @@ it("contract §2.3 Header 1", async () => {
   await refreshToken("refresh-token");
   const [, init] = mockFetch.mock.calls[0];
   expect(init.headers["Content-Type"]).toBe("application/json");
+  // Closed-set check: legal ONLY because `init` is the object this code builds
+  // and hands to fetch. It must never be applied to a wire capture — §13.8
+  // enumerates what it found, not a closed set, so asserting absence there would
+  // pin an artefact of the evidence rather than the client.
+  expect(Object.keys(init.headers)).toEqual(["Content-Type", "anthropic-beta", "User-Agent"]);
 });
 
 it("contract §2.3 Header 2", async () => {
@@ -90,19 +95,62 @@ it("contract §2.3 Body keys", async () => {
   expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id"]);
   expect(body.grant_type).toBe("refresh_token");
   expect("scope" in body).toBe(false);
+  expect(init.body).toBe(
+    JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: "refresh-token",
+      client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    }),
+  );
+});
+
+it("guard: ignored refresh options never reach the wire", async () => {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
+  });
+  await refreshToken("refresh-token", {
+    scopes: ["user:profile", "user:inference"],
+    sdkTokenUserAgent: false,
+    clientId: "",
+  });
+  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+  expect(body).toEqual({
+    grant_type: "refresh_token",
+    refresh_token: "refresh-token",
+    client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+  });
+  expect("scope" in body).toBe(false);
+});
+
+it("guard: the token endpoint host is never changed", async () => {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
+  });
+  await refreshToken("refresh-token");
+  // Divergence D6: the SDK path is relative and BASE_API_URL is a different host.
+  expect(mockFetch.mock.calls[0][0]).toBe("https://platform.claude.com/v1/oauth/token");
 });
 
 describe("meta", () => {
   it("meta: every attested contract §2 row has exactly one assertion", () => {
     const contractSource = readFileSync(new URL("../../docs/oauth-2.1.280-contract.md", import.meta.url), "utf8");
     const testSource = readFileSync(new URL("./oauth-wire-parity.test.mjs", import.meta.url), "utf8");
+    const exemptSections = new Set();
+    for (const match of contractSource.matchAll(/^###\s+(2\.\d+)\)[^\n]*\n([\s\S]*?)(?=^#{1,3}\s|(?![\s\S]))/gm)) {
+      if (/meta-test/i.test(match[2]) && /\b(?:exempt|excluded)\b/i.test(match[2])) {
+        exemptSections.add(match[1]);
+      }
+    }
+    expect(exemptSections).toEqual(new Set(["2.2", "2.4"]));
     const ids = [];
     let section = null;
     for (const line of contractSource.split(/\r?\n/)) {
       if (/^#{1,3}\s/.test(line)) {
         section = line.match(/^###\s+(2\.\d+)\)/)?.[1] ?? null;
       }
-      if (!section || section === "2.2" || section === "2.4") continue;
+      if (!section || exemptSections.has(section)) continue;
       const row = line.match(/^\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*$/);
       if (!row) continue;
       const field = row[1].trim();
@@ -125,6 +173,11 @@ describe("meta", () => {
     ]);
     for (const id of ids) {
       expect(testSource.split(`"${id}"`).length - 1, id).toBe(1);
+      // A title that maps to an empty body maps to nothing.
+      const titledBlock = testSource.slice(testSource.indexOf(`"${id}"`));
+      const nextTest = titledBlock.search(/\n(?: {2})?it\(/);
+      const block = nextTest === -1 ? titledBlock : titledBlock.slice(0, nextTest);
+      expect(block, id).toContain("expect(");
     }
   });
 
