@@ -7,8 +7,8 @@
  *
  * Auth Commands:
  *   login             Add a new account via browser OAuth flow
- *   logout <N>        Revoke tokens and remove account N
- *   logout --all      Revoke all tokens and clear all accounts
+ *   logout <N>        Remove account N (discards its tokens)
+ *   logout --all      Remove all accounts (discards their tokens)
  *   reauth <N>        Re-authenticate account N with fresh OAuth tokens
  *   refresh <N>       Attempt token refresh (no browser needed)
  *
@@ -412,7 +412,28 @@ export async function cmdLogin() {
 }
 
 /**
- * Logout: revoke tokens and remove an account, or all accounts.
+ * Turn a `revoke()` outcome into a line that says what actually happened.
+ *
+ * Three outcomes, three messages. Collapsing "we did not try" and "we tried and
+ * it failed" into one line tells a user who opted into server-side revocation
+ * that their token was merely discarded locally, when in fact it is still live
+ * on the server. That is the one thing this function exists to prevent.
+ *
+ * @param {{ attempted: boolean, ok: boolean, status?: number, error?: string }} outcome
+ * @returns {string}
+ * @see docs/oauth-2.1.280-contract.md §7 divergence D1
+ */
+export function describeRevokeOutcome(outcome) {
+  if (!outcome?.attempted) {
+    return "Token discarded locally (server-side revocation is off; set oauth.revoke_on_logout to enable).";
+  }
+  if (outcome.ok) return "Token revoked server-side.";
+  const detail = outcome.status ? `HTTP ${outcome.status}` : outcome.error || "unknown error";
+  return `Server-side revocation failed (${detail}). Token removed locally; it may still be valid.`;
+}
+
+/**
+ * Logout: discard tokens and remove an account, or all accounts.
  * @param {string} arg - Account number
  * @param {object} [opts]
  * @param {boolean} [opts.force] Skip confirmation prompt
@@ -467,8 +488,8 @@ export async function cmdLogout(arg, opts = {}) {
   // Server-side revocation is opt-in (oauth.revoke_on_logout, default off): the
   // genuine client has no revoke endpoint. Report what actually happened rather
   // than implying a network call that was never made.
-  const revoked = await revoke(stored.accounts[idx].refreshToken);
-  console.log(c.dim(revoked ? "Token revoked server-side." : "Token discarded locally."));
+  const outcome = await revoke(stored.accounts[idx].refreshToken);
+  console.log(c.dim(describeRevokeOutcome(outcome)));
 
   // Remove the account
   stored.accounts.splice(idx, 1);
@@ -489,7 +510,7 @@ export async function cmdLogout(arg, opts = {}) {
 }
 
 /**
- * Logout all accounts: revoke all tokens and clear storage.
+ * Logout all accounts: discard all tokens and clear storage.
  * @param {object} [opts]
  * @param {boolean} [opts.force] Skip confirmation prompt
  * @returns {Promise<number>} exit code
@@ -525,12 +546,24 @@ async function cmdLogoutAll(opts = {}) {
 
   // Server-side revocation is opt-in (oauth.revoke_on_logout, default off).
   const results = await Promise.allSettled(stored.accounts.map((acc) => revoke(acc.refreshToken)));
-  const revokedCount = results.filter((r) => r.status === "fulfilled" && r.value === true).length;
+  const outcomes = results.map((r) => (r.status === "fulfilled" ? r.value : { attempted: true, ok: false }));
+  const attempted = outcomes.filter((o) => o?.attempted === true).length;
+  const revokedCount = outcomes.filter((o) => o?.ok === true).length;
 
-  if (revokedCount > 0) {
+  if (attempted === 0) {
+    // Nothing was sent. Say so, and say how to change it.
+    console.log(c.dim(`Discarded ${count} token(s) locally (server-side revocation is off).`));
+    console.log(c.dim("Enable it with: oauth.revoke_on_logout = true"));
+  } else if (revokedCount === attempted) {
     console.log(c.dim(`Revoked ${revokedCount} of ${count} token(s) server-side.`));
   } else {
-    console.log(c.dim(`Discarded ${count} token(s) locally.`));
+    // Partial or total failure must not be reported as a clean local discard.
+    console.log(
+      c.yellow(
+        `Revoked ${revokedCount} of ${attempted} token(s) server-side; ` +
+          `${attempted - revokedCount} revocation(s) failed. Tokens removed locally anyway.`,
+      ),
+    );
   }
 
   // Write explicit empty state so running plugin instances reconcile immediately.
@@ -1574,8 +1607,8 @@ ${c.dim("Usage:")}
 
 ${c.dim("Auth Commands:")}
   ${pad(c.cyan("login"), 22)}Add a new account via browser OAuth flow
-  ${pad(c.cyan("logout") + " <N>", 22)}Revoke tokens and remove account N
-  ${pad(c.cyan("logout") + " --all", 22)}Revoke all tokens and clear all accounts
+  ${pad(c.cyan("logout") + " <N>", 22)}Remove account N (discards its tokens)
+  ${pad(c.cyan("logout") + " --all", 22)}Remove all accounts (discards their tokens)
   ${pad(c.cyan("reauth") + " <N>", 22)}Re-authenticate account N with fresh tokens
   ${pad(c.cyan("refresh") + " <N>", 22)}Attempt token refresh (no browser needed)
 
@@ -1602,7 +1635,7 @@ ${c.dim("Options:")}
 
 ${c.dim("Examples:")}
   ${bin} login             ${c.dim("# Add a new account via browser")}
-  ${bin} logout 2          ${c.dim("# Revoke tokens & remove account 2")}
+  ${bin} logout 2          ${c.dim("# Remove account 2 & discard its tokens")}
   ${bin} logout --all      ${c.dim("# Logout all accounts")}
   ${bin} reauth 1          ${c.dim("# Re-authenticate account 1")}
   ${bin} refresh 1         ${c.dim("# Quick token refresh for account 1")}

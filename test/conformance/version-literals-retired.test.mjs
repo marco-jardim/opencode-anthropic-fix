@@ -143,17 +143,11 @@ const ALLOWED_USER_AGENT_LITERALS = {
  * @type {Record<string, number>}
  */
 const ALLOWED_VERSION_LITERALS = {
-  // Two occurrences of `2.1.280`, both inside the user-facing deprecation
-  // warning for `oauth.sdk_token_useragent`: one naming the analysed Claude Code
-  // release, one in the path `docs/oauth-2.1.280-contract.md`.
-  //
-  // This is NOT the emulated wire version and must not track the profile. The
-  // OAuth contract is pinned to the release it was transcribed from; if the
-  // profile advanced to 2.1.300 while the OAuth evidence was still 2.1.280,
-  // interpolating the profile here would make the warning cite a document that
-  // does not exist and claim evidence nobody gathered. The version is part of
-  // the document's identity, not a moving target.
-  "lib/config.mjs": 2,
+  // EMPTY BY DESIGN. Restored to empty after QA-1: the OAuth deprecation warning
+  // that briefly needed two `2.1.280` literals was reworded to name neither the
+  // release nor the contract document's filename. A count-based allowance would
+  // have let a later edit swap a doc reference for a real wire literal without
+  // this guard noticing, which is precisely the failure it exists to catch.
 };
 
 /** @param {string} source @param {RegExp} pattern @returns {number} */

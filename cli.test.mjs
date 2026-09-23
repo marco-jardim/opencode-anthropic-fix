@@ -1882,3 +1882,25 @@ describe("cmdResetStats", () => {
     expect(code).toBe(1);
   });
 });
+
+import { describeRevokeOutcome } from "./cli.mjs";
+
+describe("describeRevokeOutcome", () => {
+  it("describes local discard and names the opt-in setting when skipped", () => {
+    const message = describeRevokeOutcome({ attempted: false, ok: false });
+    expect(message).toContain("discarded locally");
+    expect(message).toContain("oauth.revoke_on_logout");
+  });
+
+  it("describes successful server-side revocation", () => {
+    expect(describeRevokeOutcome({ attempted: true, ok: true, status: 200 })).toContain("revoked server-side");
+  });
+
+  it("describes HTTP and network failures without claiming revocation", () => {
+    const message = describeRevokeOutcome({ attempted: true, ok: false, status: 401 });
+    expect(message).toContain("failed");
+    expect(message).toContain("HTTP 401");
+    expect(message).not.toMatch(/revoked/i);
+    expect(describeRevokeOutcome({ attempted: true, ok: false, error: "network down" })).toContain("network down");
+  });
+});
