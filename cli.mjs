@@ -150,7 +150,13 @@ function rpad(str, width) {
  */
 export async function refreshAccessToken(account) {
   try {
-    const json = await refreshToken(account.refreshToken, { signal: AbortSignal.timeout(5000) });
+    // `clientId` is undefined for every normal account, which means "use the
+    // default". Only a CLAUDE_CODE_OAUTH_CLIENT_ID-seeded env account carries one
+    // (contract §5.2, divergence D10).
+    const json = await refreshToken(account.refreshToken, {
+      signal: AbortSignal.timeout(5000),
+      clientId: account.clientId,
+    });
     account.access = json.access_token;
     account.expires = Date.now() + json.expires_in * 1000;
     if (json.refresh_token) account.refreshToken = json.refresh_token;

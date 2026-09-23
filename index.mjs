@@ -6255,7 +6255,13 @@ async function refreshAccountToken(account, client, _source = "foreground", { on
       return account.access;
     }
 
-    const json = await refreshToken(account.refreshToken, { signal: AbortSignal.timeout(15_000) });
+    // `clientId` is undefined for every normal account, which means "use the
+    // default". Only a CLAUDE_CODE_OAUTH_CLIENT_ID-seeded env account carries one
+    // (contract §5.2, divergence D10).
+    const json = await refreshToken(account.refreshToken, {
+      signal: AbortSignal.timeout(15_000),
+      clientId: account.clientId,
+    });
 
     account.access = json.access_token;
     account.expires = Date.now() + json.expires_in * 1000;
