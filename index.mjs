@@ -44,7 +44,12 @@ import { isTruthyEnv } from "./lib/env.mjs";
 import { sessionMetrics, createInitialSessionMetrics, getAverageCacheHitRate } from "./lib/session-metrics.mjs";
 import { repairOrphanedToolUseBlocks } from "./lib/mimicry/request-helpers.mjs";
 import { resolveCacheTtl, shouldPlaceToolBreakpoint, updateBoundaryStability } from "./lib/mimicry/cache.mjs";
-import { SERVICE_WIDE_MAX_RETRIES, CONSECUTIVE_529_FALLBACK_THRESHOLD } from "./lib/tuning.mjs";
+import {
+  SERVICE_WIDE_MAX_RETRIES,
+  CONSECUTIVE_529_FALLBACK_THRESHOLD,
+  FOREGROUND_REFRESH_EXPIRY_BUFFER_MS,
+} from "./lib/tuning.mjs";
+import { isTokenExpired, isTokenUsable } from "./lib/account-state.mjs";
 import {
   computeServiceRetrySleepMs,
   selectFallbackModel,
@@ -1424,7 +1429,7 @@ export async function AnthropicAuthPlugin({ client }) {
        */
       async function getFilesAuth(acct) {
         let tok = acct.access;
-        if (!tok || !acct.expires || acct.expires < Date.now()) {
+        if (!tok || isTokenExpired(acct.expires)) {
           tok = await refreshAccountTokenSingleFlight(acct);
         }
         return {
@@ -2284,7 +2289,7 @@ export async function AnthropicAuthPlugin({ client }) {
           // Ignore idle failure here; foreground path handles refresh decisions.
         }
 
-        if (account.access && account.expires && account.expires > Date.now()) {
+        if (account.access && isTokenUsable(account.expires)) {
           return account.access;
         }
       } else {
@@ -2397,7 +2402,7 @@ export async function AnthropicAuthPlugin({ client }) {
     const excluded = new Set([activeAccount.index]);
     const candidates = accountManager
       .getEnabledAccounts(excluded)
-      .filter((acc) => !acc.expires || acc.expires <= now + getIdleRefreshWindowMs())
+      .filter((acc) => isTokenExpired(acc.expires, getIdleRefreshWindowMs(), now))
       .filter((acc) => {
         const last = idleRefreshLastAttempt.get(acc.id) ?? 0;
         return now - last >= getIdleRefreshMinIntervalMs();
@@ -2738,7 +2743,7 @@ export async function AnthropicAuthPlugin({ client }) {
                 let accessToken;
                 // Per-account token refresh
                 // Refresh 5 minutes before expiry to avoid mid-request token expiration (RE doc §1.10)
-                if (!account.access || !account.expires || account.expires < Date.now() + 300_000) {
+                if (!account.access || isTokenExpired(account.expires, FOREGROUND_REFRESH_EXPIRY_BUFFER_MS)) {
                   const attemptedRefreshToken = account.refreshToken;
                   try {
                     accessToken = await refreshAccountTokenSingleFlight(account);
@@ -4525,7 +4530,7 @@ export async function AnthropicAuthPlugin({ client }) {
 
       const getAccessToken = async () => {
         let tok = account.access;
-        if (!tok || !account.expires || account.expires < Date.now()) {
+        if (!tok || isTokenExpired(account.expires)) {
           tok = await refreshAccountTokenSingleFlight(account);
         }
         if (!tok) throw new Error("no access token available for Haiku call");
@@ -6168,7 +6173,7 @@ function applyDiskAuthIfFresher(account, diskAuth, options = {}) {
   const diskTokenUpdatedAt = diskAuth.tokenUpdatedAt || 0;
   const memTokenUpdatedAt = account.tokenUpdatedAt || 0;
   const diskHasDifferentAuth = diskAuth.refreshToken !== account.refreshToken || diskAuth.access !== account.access;
-  const memAuthExpired = !account.expires || account.expires <= Date.now();
+  const memAuthExpired = isTokenExpired(account.expires);
   const allowExpiredFallback = options.allowExpiredFallback === true;
   if (diskTokenUpdatedAt <= memTokenUpdatedAt && !(allowExpiredFallback && diskHasDifferentAuth && memAuthExpired)) {
     return false;
@@ -6204,7 +6209,7 @@ async function refreshAccountToken(account, client, _source = "foreground", { on
     // Accept CC credential if:
     //   - expiresAt is in the future (normal case), OR
     //   - expiresAt is 0/missing (CC didn't provide expiry — trust the token, let API 401 if stale)
-    if (match && (match.expiresAt === 0 || match.expiresAt > Date.now())) {
+    if (match && (match.expiresAt === 0 || isTokenUsable(match.expiresAt))) {
       account.access = match.accessToken;
       account.expires = match.expiresAt || Date.now() + 3600_000; // default 1h if unknown
       markTokenStateUpdated(account);
@@ -6240,7 +6245,7 @@ async function refreshAccountToken(account, client, _source = "foreground", { on
   if (!lock.acquired) {
     const diskAuth = await readDiskAccountAuth(account.id);
     const adopted = applyDiskAuthIfFresher(account, diskAuth, { allowExpiredFallback: true });
-    if (adopted && account.access && account.expires && account.expires > Date.now()) {
+    if (adopted && account.access && isTokenUsable(account.expires)) {
       return account.access;
     }
     throw new Error("Refresh lock busy");
@@ -6251,7 +6256,7 @@ async function refreshAccountToken(account, client, _source = "foreground", { on
     const adopted = applyDiskAuthIfFresher(account, diskAuthBeforeRefresh);
     // Apply fresher disk tokens for both foreground and idle paths — prevents an
     // unnecessary HTTP refresh when another process already rotated the token.
-    if (adopted && account.access && account.expires && account.expires > Date.now()) {
+    if (adopted && account.access && isTokenUsable(account.expires)) {
       return account.access;
     }
 

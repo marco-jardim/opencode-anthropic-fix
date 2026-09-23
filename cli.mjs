@@ -31,7 +31,7 @@
 import { loadAccounts, saveAccounts, getStoragePath, createDefaultStats } from "./lib/storage.mjs";
 import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES } from "./lib/config.mjs";
 import { authorize, exchange, refreshToken, revoke } from "./lib/oauth.mjs";
-import { adjustActiveIndexAfterRemoval } from "./lib/account-state.mjs";
+import { adjustActiveIndexAfterRemoval, isTokenExpired } from "./lib/account-state.mjs";
 import { warnOnEphemeralTokenRotation } from "./lib/accounts.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { writeFile } from "node:fs/promises";
@@ -202,7 +202,7 @@ export async function ensureTokenAndFetchUsage(account) {
   let token = account.access;
   let tokenRefreshed = false;
 
-  if (!token || !account.expires || account.expires < Date.now()) {
+  if (!token || isTokenExpired(account.expires)) {
     token = await refreshAccessToken(account);
     tokenRefreshed = !!token;
     if (!token) return { usage: null, tokenRefreshed: false };
