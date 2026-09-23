@@ -453,7 +453,7 @@ export async function cmdLogout(arg, opts = {}) {
     const rl = createInterface({ input: stdin, output: stdout });
     try {
       const answer = await rl.question(
-        `Logout account #${n} (${label})? This will revoke tokens and remove the account. [y/N]: `,
+        `Logout account #${n} (${label})? This will discard its tokens and remove the account. [y/N]: `,
       );
       if (answer.trim().toLowerCase() !== "y") {
         console.log(c.dim("Cancelled."));
@@ -464,13 +464,11 @@ export async function cmdLogout(arg, opts = {}) {
     }
   }
 
-  // Attempt token revocation (best-effort)
+  // Server-side revocation is opt-in (oauth.revoke_on_logout, default off): the
+  // genuine client has no revoke endpoint. Report what actually happened rather
+  // than implying a network call that was never made.
   const revoked = await revoke(stored.accounts[idx].refreshToken);
-  if (revoked) {
-    console.log(c.dim("Token revoked server-side."));
-  } else {
-    console.log(c.dim("Token revocation skipped (server may not support it)."));
-  }
+  console.log(c.dim(revoked ? "Token revoked server-side." : "Token discarded locally."));
 
   // Remove the account
   stored.accounts.splice(idx, 1);
@@ -514,7 +512,7 @@ async function cmdLogoutAll(opts = {}) {
     const rl = createInterface({ input: stdin, output: stdout });
     try {
       const answer = await rl.question(
-        `Logout all ${count} account(s)? This will revoke tokens and remove all accounts. [y/N]: `,
+        `Logout all ${count} account(s)? This will discard their tokens and remove all accounts. [y/N]: `,
       );
       if (answer.trim().toLowerCase() !== "y") {
         console.log(c.dim("Cancelled."));
@@ -525,12 +523,14 @@ async function cmdLogoutAll(opts = {}) {
     }
   }
 
-  // Attempt token revocation for each account (best-effort, in parallel)
+  // Server-side revocation is opt-in (oauth.revoke_on_logout, default off).
   const results = await Promise.allSettled(stored.accounts.map((acc) => revoke(acc.refreshToken)));
   const revokedCount = results.filter((r) => r.status === "fulfilled" && r.value === true).length;
 
   if (revokedCount > 0) {
     console.log(c.dim(`Revoked ${revokedCount} of ${count} token(s) server-side.`));
+  } else {
+    console.log(c.dim(`Discarded ${count} token(s) locally.`));
   }
 
   // Write explicit empty state so running plugin instances reconcile immediately.

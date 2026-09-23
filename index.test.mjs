@@ -327,7 +327,7 @@ describe("plugin lifecycle", () => {
 
     // Step 1: authorize() — returns URL + callback
     const authResult = await method.authorize();
-    expect(authResult.url).toContain("claude.ai/oauth/authorize");
+    expect(authResult.url).toContain("claude.com/cai/oauth/authorize");
     expect(authResult.method).toBe("code");
 
     // Step 2: callback() — user pastes the code
@@ -584,7 +584,7 @@ describe("slash commands", () => {
     let text = await runAnthropic("login");
     expect(text).toContain("Anthropic OAuth");
     expect(text).toContain("Started login flow");
-    expect(text).toContain("claude.ai/oauth/authorize");
+    expect(text).toContain("claude.com/cai/oauth/authorize");
 
     // Extract the state from the authorize URL to pass back in the completion
     const stateMatch = text.match(/[?&]state=([^&\s]+)/);
@@ -1726,7 +1726,7 @@ describe("fetch interceptor — token refresh", () => {
     const [refreshUrl, refreshInit] = mockFetch.mock.calls[0];
     expect(refreshUrl).toBe("https://platform.claude.com/v1/oauth/token");
     expect(JSON.parse(refreshInit.body).grant_type).toBe("refresh_token");
-    expect(refreshInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.94.0 userOAuthProvider");
+    expect(refreshInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
 
     // Second call should use the fresh token
     const [, apiInit] = mockFetch.mock.calls[1];
@@ -2987,7 +2987,7 @@ describe("OAuth exchange failure", () => {
 
     expect(credentials.type).toBe("failed");
     const [, exchangeInit] = mockFetch.mock.calls[0];
-    expect(exchangeInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.94.0 userOAuthProvider");
+    expect(exchangeInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
     // saveAccounts should NOT have been called
     expect(saveAccounts).not.toHaveBeenCalled();
   });
@@ -3077,7 +3077,7 @@ describe("auth menu actions", () => {
     expect(clearAccounts).toHaveBeenCalled();
 
     // Should proceed to OAuth (URL should be the authorize URL, not about:blank)
-    expect(authResult.url).toContain("claude.ai/oauth/authorize");
+    expect(authResult.url).toContain("claude.com/cai/oauth/authorize");
     expect(authResult.method).toBe("code");
 
     // Simulate completing the OAuth flow

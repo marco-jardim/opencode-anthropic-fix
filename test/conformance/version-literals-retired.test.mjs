@@ -136,14 +136,25 @@ const ALLOWED_USER_AGENT_LITERALS = {
 /**
  * Files allowed to keep a `2.1.<NN>` version literal, with the reason.
  *
- * EMPTY BY DESIGN. The emulated version has exactly one source — the profile —
- * and every production consumer reads it through the seam. An entry here means
- * a module re-typed the version and must justify why the profile could not
- * answer.
+ * The emulated version has exactly one source — the profile — and every
+ * production consumer reads it through the seam. An entry here means a module
+ * re-typed the version and must justify why the profile could not answer.
  *
  * @type {Record<string, number>}
  */
-const ALLOWED_VERSION_LITERALS = {};
+const ALLOWED_VERSION_LITERALS = {
+  // Two occurrences of `2.1.280`, both inside the user-facing deprecation
+  // warning for `oauth.sdk_token_useragent`: one naming the analysed Claude Code
+  // release, one in the path `docs/oauth-2.1.280-contract.md`.
+  //
+  // This is NOT the emulated wire version and must not track the profile. The
+  // OAuth contract is pinned to the release it was transcribed from; if the
+  // profile advanced to 2.1.300 while the OAuth evidence was still 2.1.280,
+  // interpolating the profile here would make the warning cite a document that
+  // does not exist and claim evidence nobody gathered. The version is part of
+  // the document's identity, not a moving target.
+  "lib/config.mjs": 2,
+};
 
 /** @param {string} source @param {RegExp} pattern @returns {number} */
 function countMatches(source, pattern) {
@@ -195,7 +206,15 @@ describe("Claude Code version literals are retired from production code", () => 
   });
 
   it("keeps no `2.1.<NN>` version literal anywhere in production code", () => {
-    expect(scanProductionContexts(CC_VERSION_LITERAL)).toEqual({});
+    // Report the offending LINES for anything outside the allowlist, so a
+    // failure names what to delete rather than just counting it. Allowlisted
+    // files still have their COUNT pinned below, so a second literal sneaking
+    // into an already-listed file is still a failure.
+    const contexts = scanProductionContexts(CC_VERSION_LITERAL);
+    const unlisted = Object.fromEntries(
+      Object.entries(contexts).filter(([file]) => !(file in ALLOWED_VERSION_LITERALS)),
+    );
+    expect(unlisted).toEqual({});
     expect(scanProduction(CC_VERSION_LITERAL)).toEqual(ALLOWED_VERSION_LITERALS);
   });
 
