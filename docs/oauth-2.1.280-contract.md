@@ -1,20 +1,31 @@
 # Claude Code 2.1.280 OAuth Wire Contract
 
-This document is the contract for every OAuth request this plugin emits. It
-records what the genuine Claude Code `2.1.280` client does, what it deliberately
-does **not** do, and where this plugin knowingly diverges.
+This document is the **target** contract for every OAuth request this plugin
+emits. It records what the genuine Claude Code `2.1.280` client is attested to
+do, what it is attested **not** to do, and where this plugin knowingly diverges.
+Until every wave of the parity plan has landed, §7 lists the divergences that are
+still open; the plugin's current behaviour is therefore §2 **plus** §7, not §2
+alone.
 
 **Sole evidence base:** section 13.8 (`OAuth constants, verbatim`) of
 `D:\git\claude-code-wire-compat\docs\protocol\versions\claude-code-2.1.280-analysis.md`,
-lines 950–1021. That section records byte offsets into the carved `2.1.280`
-win32-x64 bundle.
+lines 950–1021. That section records byte offsets into a carved `2.1.280` bundle.
+§13.8 does not state the bundle's platform, so this document does not claim one.
 
-**Rule of this document:** a value with a byte offset is transcribed from the
-bundle. A value without one is **not** attested by §13.8 and is marked
-`[unattested]`. An `[unattested]` value is either pre-existing plugin behaviour
-or a necessary inference, and it is called out so that a future maintainer can
-tell a measured constant from a chosen one. Nothing here may be interpolated
-from an older release or from another platform's build.
+## Attestation vocabulary
+
+Three levels, and the level is always stated:
+
+| Marking              | Meaning                                                                                      |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| _offset_             | §13.8 gives a byte offset for this exact value. Strongest.                                   |
+| _prose_              | §13.8 asserts the value in prose inside an offset-bearing paragraph, without its own offset. |
+| `[unattested]`       | §13.8 does not record it. Pre-existing plugin behaviour or a necessary inference.            |
+| `[unattested-order]` | The constituent values are attested; their **order** is taken from the analysis prose only.  |
+| `[unattested-bind]`  | The **string** is attested; which request uses it is not.                                    |
+
+An `[unattested]` value is not a defect — an unmarked one is. Nothing here may be
+interpolated from an older release or from another platform's build.
 
 Companion document: [`mimese-http-header-system-prompt.md`](./mimese-http-header-system-prompt.md)
 covers `/v1/messages` traffic. This document covers the OAuth token layer only.
@@ -23,112 +34,162 @@ covers `/v1/messages` traffic. This document covers the OAuth token layer only.
 
 ## 1) Endpoints
 
-Endpoint block, byte `4655440`.
+Endpoint block, byte `4655440`. Every string in this table is offset-attested.
+The "Used by" column is **plugin-side inference**, not evidence: §13.8 records
+the constants, not their consumers.
 
-| Constant                  | Value                                                           | Offset    | Used by                        |
-| ------------------------- | --------------------------------------------------------------- | --------- | ------------------------------ |
-| `BASE_API_URL`            | `https://api.anthropic.com`                                     | `4655440` | API key creation               |
-| `CONSOLE_AUTHORIZE_URL`   | `https://platform.claude.com/oauth/authorize`                   | `4655440` | console (`org:create_api_key`) |
-| `CLAUDE_AI_AUTHORIZE_URL` | `https://claude.com/cai/oauth/authorize`                        | `4655440` | consumer max/inference login   |
-| `CLAUDE_AI_ORIGIN`        | `https://claude.ai`                                             | `4655440` | origin only — not an endpoint  |
-| `TOKEN_URL`               | `https://platform.claude.com/v1/oauth/token`                    | `4655440` | exchange, refresh, federation  |
-| `API_KEY_URL`             | `https://api.anthropic.com/api/oauth/claude_cli/create_api_key` | `4655440` | console API-key mint           |
-| `MCP_PROXY_PATH`          | `/v1/toolbox/shttp/mcp/{server_id}`                             | `4655440` | not used by this plugin        |
+| Constant                  | Value                                                           | Offset    | Used by (inferred)                           |
+| ------------------------- | --------------------------------------------------------------- | --------- | -------------------------------------------- |
+| `BASE_API_URL`            | `https://api.anthropic.com`                                     | `4655440` | unknown — `API_KEY_URL` is absolute          |
+| `CONSOLE_AUTHORIZE_URL`   | `https://platform.claude.com/oauth/authorize`                   | `4655440` | console (`org:create_api_key`)               |
+| `CLAUDE_AI_AUTHORIZE_URL` | `https://claude.com/cai/oauth/authorize`                        | `4655440` | consumer max/inference login                 |
+| `CLAUDE_AI_ORIGIN`        | `https://claude.ai`                                             | `4655440` | origin value — no consumer in §13.8          |
+| `TOKEN_URL`               | `https://platform.claude.com/v1/oauth/token`                    | `4655440` | exchange, refresh, federation — but see §2.6 |
+| `API_KEY_URL`             | `https://api.anthropic.com/api/oauth/claude_cli/create_api_key` | `4655440` | not used by this plugin                      |
+| `MCP_PROXY_PATH`          | `/v1/toolbox/shttp/mcp/{server_id}`                             | `4655440` | not used by this plugin                      |
 
 `CLAUDE_AI_AUTHORIZE_URL` is the load-bearing row. The interactive consumer
 authorisation page lives on **`claude.com/cai/`**, not on `claude.ai`.
 `CLAUDE_AI_ORIGIN` remains `https://claude.ai` and is a **distinct value**; the
 two must never be collapsed into one constant.
 
-### 1.1) Values this plugin uses that §13.8 does not attest
+### 1.1) Values this plugin uses that §13.8 does not offset-attest
 
-| Constant             | Value                                             | Status         | Note                                                              |
-| -------------------- | ------------------------------------------------- | -------------- | ----------------------------------------------------------------- |
-| `OAUTH_REDIRECT_URI` | `https://platform.claude.com/oauth/code/callback` | `[unattested]` | Pre-existing plugin value. §13.8 records no redirect URI.         |
-| `CLIENT_ID`          | `9d1c250a-e61b-44d9-88ed-5944d1962f5e`            | attested       | §13.8 states it is "unchanged" at this value; no discrete offset. |
+| Constant             | Value                                             | Status         | Note                                                                                    |
+| -------------------- | ------------------------------------------------- | -------------- | --------------------------------------------------------------------------------------- |
+| `OAUTH_REDIRECT_URI` | `https://platform.claude.com/oauth/code/callback` | `[unattested]` | Pre-existing plugin value. §13.8 records no redirect URI.                               |
+| `CLIENT_ID`          | `9d1c250a-e61b-44d9-88ed-5944d1962f5e`            | _prose_        | Asserted "unchanged" inside the scopes paragraph at byte `4654950`; no discrete offset. |
 
 ---
 
 ## 2) Request fingerprints
 
-Each row below is a contract row. Section 5.2 of the parity plan requires exactly
-one conformance assertion per row, enforced by a meta-test.
+Each row below is a contract row. The conformance meta-test (§8) requires exactly
+one assertion per **attested** row. `[unattested]` rows are excluded from that
+requirement by construction: pinning a guess as if it were a measurement is the
+failure mode this vocabulary exists to prevent.
 
 ### 2.1) `authorize` — interactive authorisation URL
 
-| Field            | Value                                                                                                             |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Method           | none — a URL handed to a browser, not an HTTP request this client makes                                           |
-| URL (consumer)   | `https://claude.com/cai/oauth/authorize`                                                                          |
-| URL (console)    | `https://platform.claude.com/oauth/authorize`                                                                     |
-| Query parameters | `code`, `client_id`, `response_type`, `redirect_uri`, `scope`, `code_challenge`, `code_challenge_method`, `state` |
-| PKCE             | `S256`, verifier = 32 random bytes base64url                                                                      |
+| Field            | Value                                                                                                             | Status         |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- | -------------- |
+| Method           | none — a URL handed to a browser, not an HTTP request this client makes                                           | —              |
+| URL (consumer)   | `https://claude.com/cai/oauth/authorize`                                                                          | _offset_       |
+| URL (console)    | `https://platform.claude.com/oauth/authorize`                                                                     | _offset_       |
+| Query parameters | `code`, `client_id`, `response_type`, `redirect_uri`, `scope`, `code_challenge`, `code_challenge_method`, `state` | `[unattested]` |
+| PKCE             | `S256`, verifier = 32 random bytes base64url                                                                      | `[unattested]` |
 
-**Attestation:** the two URLs are attested at byte `4655440`. The query parameter
-**set and order** are `[unattested]` — §13.8 records no authorize query string.
-They are pre-existing plugin behaviour and are preserved unchanged, because a
-change without evidence would be a guess.
+**Attestation:** only the two URLs are attested (byte `4655440`). §13.8 records
+no authorize query string and no PKCE material whatsoever. The query parameter
+set, its order, and the PKCE parameters are pre-existing plugin behaviour and are
+preserved unchanged, because changing them without evidence would be a guess
+dressed as a fix.
 
 ### 2.2) `exchange` — authorization-code grant
 
-| Field     | Value                                                                                                 |
-| --------- | ----------------------------------------------------------------------------------------------------- |
-| Method    | `POST`                                                                                                |
-| URL       | `https://platform.claude.com/v1/oauth/token`                                                          |
-| Header 1  | `Content-Type: application/json`                                                                      |
-| Header 2  | `anthropic-beta: oauth-2025-04-20`                                                                    |
-| Header 3  | `User-Agent: anthropic-sdk-typescript/0.112.1 userOAuthProvider`                                      |
-| Body keys | `grant_type`, `code`, `redirect_uri`, `client_id`, `code_verifier`, and `state` **only when present** |
+| Field     | Value                                                                                                 | Status              |
+| --------- | ----------------------------------------------------------------------------------------------------- | ------------------- |
+| Method    | `POST`                                                                                                | `[unattested]`      |
+| URL       | `https://platform.claude.com/v1/oauth/token`                                                          | `[unattested-bind]` |
+| Header 1  | `Content-Type: application/json`                                                                      | `[unattested]`      |
+| Header 2  | `anthropic-beta: oauth-2025-04-20`                                                                    | `[unattested]`      |
+| Header 3  | `User-Agent: anthropic-sdk-typescript/0.112.1 userOAuthProvider`                                      | `[unattested]`      |
+| Body keys | `grant_type`, `code`, `redirect_uri`, `client_id`, `code_verifier`, and `state` **only when present** | `[unattested]`      |
 
-**Attestation:** the URL and the three header names/values are attested at bytes
-`4655440`, `4418342` and `4429828`. §13.8 describes the header set for the
-**refresh** request; the exchange request is `[unattested]` as a body shape and
-inherits the same header triple because both grants run through the same
-`userOAuthProvider` in the same SDK. The body key set is pre-existing plugin
-behaviour.
+**Attestation — read this before citing the row.** §13.8's SDK constant block at
+byte `4418342` enumerates exactly two grant types, `refresh_token` and
+`urn:ietf:params:oauth:grant-type:jwt-bearer`. **There is no `authorization_code`
+constant anywhere in §13.8, and no offset locates the code-exchange call site.**
+The header triple above is therefore an **assumption**: that the exchange runs
+through the same `userOAuthProvider` as the refresh. That assumption is not
+supported by §13.8 and byte `4429828` — which records the **refresh** site — must
+not be cited as attesting it.
+
+The assumption is nonetheless the one this plugin implements, for a reason worth
+stating: if the exchange does run through the same provider, emitting the same
+triple is parity; if it does not, emitting the same triple is still closer to any
+plausible genuine shape than the axios fingerprint it replaces. This row is
+excluded from the §8 meta-test until an offset for the exchange call site exists.
 
 ### 2.3) `refresh` — refresh-token grant
 
-| Field     | Value                                                                |
-| --------- | -------------------------------------------------------------------- |
-| Method    | `POST`                                                               |
-| URL       | `https://platform.claude.com/v1/oauth/token`                         |
-| Header 1  | `Content-Type: application/json`                                     |
-| Header 2  | `anthropic-beta: oauth-2025-04-20`                                   |
-| Header 3  | `User-Agent: anthropic-sdk-typescript/0.112.1 userOAuthProvider`     |
-| Body keys | `grant_type`, `refresh_token`, `client_id` — **exactly these three** |
+| Field     | Value                                                                | Status              |
+| --------- | -------------------------------------------------------------------- | ------------------- |
+| Method    | `POST`                                                               | _prose_ (`4429828`) |
+| URL       | `https://platform.claude.com/v1/oauth/token`                         | `[unattested-bind]` |
+| Header 1  | `Content-Type: application/json`                                     | _offset_            |
+| Header 2  | `anthropic-beta: oauth-2025-04-20`                                   | _offset_            |
+| Header 3  | `User-Agent: anthropic-sdk-typescript/0.112.1 userOAuthProvider`     | _offset_            |
+| Body keys | `grant_type`, `refresh_token`, `client_id` — **exactly these three** | _offset_            |
 
-**The refresh body has no `scope` key.** This is stated explicitly at byte
-`4429828`: the body is `{ grant_type, refresh_token, client_id }`, "**no `scope`
-field**". Emitting `scope` on refresh is a positive fingerprint: no genuine
-`2.1.280` client sends it.
+**The refresh body has no `scope` key.** Stated explicitly at byte `4429828`: the
+body is `{ grant_type, refresh_token, client_id }`, "**no `scope` field**".
+Emitting `scope` on refresh is a positive fingerprint: no genuine `2.1.280`
+client sends it.
 
 ### 2.4) `federation` — OIDC JWT-bearer grant
 
 Byte `4427476`.
 
-| Field        | Value                                                                                                              |
-| ------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Method       | `POST`                                                                                                             |
-| URL          | `https://platform.claude.com/v1/oauth/token`                                                                       |
-| Header 1     | `Content-Type: application/json`                                                                                   |
-| Header 2     | `anthropic-beta: oauth-2025-04-20,oidc-federation-2026-04-01`                                                      |
-| Header 3     | `User-Agent: anthropic-sdk-typescript/0.112.1 oidcFederationProvider`                                              |
-| Body (req'd) | `grant_type` = `urn:ietf:params:oauth:grant-type:jwt-bearer`, `assertion`, `federation_rule_id`, `organization_id` |
-| Body (opt.)  | `service_account_id`, `workspace_id` — emitted **only when supplied**, never as `undefined`                        |
+| Field        | Value                                                                                                              | Status              |
+| ------------ | ------------------------------------------------------------------------------------------------------------------ | ------------------- |
+| Method       | `POST`                                                                                                             | _prose_ (`4427476`) |
+| URL          | `https://platform.claude.com/v1/oauth/token`                                                                       | `[unattested-bind]` |
+| Header 1     | `Content-Type: application/json`                                                                                   | `[unattested]`      |
+| Header 2     | `anthropic-beta: oauth-2025-04-20,oidc-federation-2026-04-01`                                                      | _offset_            |
+| Header 3     | `User-Agent: anthropic-sdk-typescript/0.112.1 oidcFederationProvider`                                              | _offset_            |
+| Body (req'd) | `grant_type` = `urn:ietf:params:oauth:grant-type:jwt-bearer`, `assertion`, `federation_rule_id`, `organization_id` | _offset_            |
+| Body (opt.)  | `service_account_id`, `workspace_id` — present **only when supplied**                                              | _offset_            |
+
+`Content-Type` is marked `[unattested]` deliberately: §13.8's federation
+paragraph lists the body, `anthropic-beta` and `User-Agent`, and **does not list
+a `Content-Type`**. The plugin sends `application/json` because the body is JSON,
+which is an inference, not a measurement.
 
 The `anthropic-beta` value is a **single comma-joined string with no space**
 between the two beta names.
 
+§13.8 marks `service_account_id` and `workspace_id` optional (`?`). The
+implementation builds them with conditional spreads so the keys are absent rather
+than present-and-null; JSON cannot serialise `undefined` in any case, so the
+requirement is about key **presence**, not about a literal `undefined`.
+
 ### 2.5) Header ordering
 
-§13.8 lists the refresh headers in the order `Content-Type`, `anthropic-beta`,
-`User-Agent`, and the federation headers in the same relative order. This
-document adopts that as the canonical emission order. **Status:
-`[unattested-order]`** — the listing order in the analysis prose is strong
-evidence but is not an independent byte-level proof of serialisation order. The
-implementation builds the header object literal in this order and never sorts it,
-so the emitted order is deterministic and matches the evidence.
+**Status: `[unattested-order]` for both requests.**
+
+- Refresh (`4429828`): §13.8 lists `Content-Type`, `anthropic-beta`,
+  `User-Agent`, in that prose order.
+- Federation (`4427476`): §13.8 lists only `anthropic-beta` then `User-Agent`.
+  `Content-Type` is not listed at this site at all, so no order is attested for
+  it; the implementation places it first to match the refresh shape.
+
+Prose listing order is **not** proof of serialisation order. This document adopts
+it as the canonical emission order because a deterministic order chosen from the
+evidence beats an accidental one, not because the evidence proves it. The
+implementation builds each header object literal in the stated order and never
+sorts it, so the emitted order is at least stable and reviewable.
+
+### 2.6) Host binding is not attested
+
+§13.8 records **two different things** that both look like the token endpoint:
+
+- an application-level absolute `TOKEN_URL` = `https://platform.claude.com/v1/oauth/token`
+  at byte `4655440`, and
+- an SDK-level **relative** `path` = `/v1/oauth/token` at byte `4418342`.
+
+A relative path implies the SDK composes `<base> + path`, and §13.8 never states
+what that `<base>` is. The only base constant it records is
+`BASE_API_URL` = `https://api.anthropic.com`, which is a **different host**. The
+host is wire-visible via SNI and the `Host` header, so this is not a cosmetic
+gap.
+
+**Resolution:** the plugin keeps `https://platform.claude.com/v1/oauth/token`,
+the absolute string §13.8 actually attests, and marks the binding
+`[unattested-bind]` in §2.2–§2.4. Switching the host to `api.anthropic.com` on
+the strength of a relative path and an unrelated base constant would be exactly
+the kind of interpolation this document forbids. Closing this gap requires a new
+offset locating the provider's base-URL configuration.
 
 ---
 
@@ -136,21 +197,37 @@ so the emitted order is deterministic and matches the evidence.
 
 Byte `4418342`, with the version string at byte `4407908`.
 
-| Constant                  | Value                                                     | Offset    |
-| ------------------------- | --------------------------------------------------------- | --------- |
-| SDK version               | `0.112.1`                                                 | `4407908` |
-| User-Agent (interactive)  | `anthropic-sdk-typescript/0.112.1 userOAuthProvider`      | `4429828` |
-| User-Agent (federation)   | `anthropic-sdk-typescript/0.112.1 oidcFederationProvider` | `4427476` |
-| `grant_type` (refresh)    | `refresh_token`                                           | `4418342` |
-| `grant_type` (federation) | `urn:ietf:params:oauth:grant-type:jwt-bearer`             | `4418342` |
-| Token path                | `/v1/oauth/token`                                         | `4418342` |
-| Beta (oauth)              | `oauth-2025-04-20`                                        | `4418342` |
-| Beta (federation)         | `oidc-federation-2026-04-01`                              | `4418342` |
-| Expiry skew (seconds)     | `30`                                                      | `4418342` |
-| Assertion size limit      | `1048576` guard, `16384` **enforced**                     | `4418342` |
+| Constant                            | Value                                                     | Offset    |
+| ----------------------------------- | --------------------------------------------------------- | --------- |
+| SDK version                         | `0.112.1`                                                 | `4407908` |
+| User-Agent (userOAuthProvider)      | `anthropic-sdk-typescript/0.112.1 userOAuthProvider`      | `4429828` |
+| User-Agent (oidcFederationProvider) | `anthropic-sdk-typescript/0.112.1 oidcFederationProvider` | `4427476` |
+| `grant_type` (refresh)              | `refresh_token`                                           | `4418342` |
+| `grant_type` (federation)           | `urn:ietf:params:oauth:grant-type:jwt-bearer`             | `4418342` |
+| Token path (relative — see §2.6)    | `/v1/oauth/token`                                         | `4418342` |
+| Beta (oauth)                        | `oauth-2025-04-20`                                        | `4418342` |
+| Beta (federation)                   | `oidc-federation-2026-04-01`                              | `4418342` |
+| Expiry skew (seconds)               | `30`                                                      | `4418342` |
+| Assertion size limit                | `1048576` guard, `16384` **enforced**                     | `4418342` |
+
+The `userOAuthProvider` user-agent is attested at the **refresh** site
+(`4429828`), which is non-interactive. It is labelled by provider name rather
+than by "interactive" so that no reader infers it was measured on the
+authorization-code exchange — it was not (§2.2).
 
 `0.112.1` is the same `var ne = "0.112.1"` that feeds
-`X-Stainless-Package-Version`, and it is the only such declaration in the dump.
+`X-Stainless-Package-Version`, and §13.8 calls it the only **such** declaration
+in the dump — that is, the only SDK-version declaration. The dump necessarily
+contains other version strings, `2.1.280` among them.
+
+### 3.1) `X-Stainless-*` headers on token requests: `[unattested]`
+
+The sentence above attests that an `X-Stainless-Package-Version` header exists
+somewhere in the bundle and is fed by `0.112.1`. §13.8 does **not** say whether
+token requests carry it or any other `X-Stainless-*` header. The header tables in
+§2.3 and §2.4 are therefore **lower bounds**, not closed sets: they record the
+headers §13.8 lists, and the conformance suite asserts the **presence and values
+of those headers**, never the **absence** of headers §13.8 is silent about.
 
 The SDK appends `oauth-2025-04-20` to `anthropic-beta` on **every** request when
 a token cache is present and no API key is set (byte `4541482`).
@@ -168,19 +245,36 @@ Byte `4654950`.
 | console   | `org:create_api_key`, `user:profile`                                                                  |
 | claude.ai | `user:profile`, `user:inference`, `user:sessions:claude_code`, `user:mcp_servers`, `user:file_upload` |
 
-**Order is wire-visible.** The list is space-joined into the `scope` query
-parameter, so re-ordering or sorting changes the emitted bytes.
+**Array order is offset-attested** at `4654950`. The **serialisation** — a
+space-join into a `scope` query parameter — is `[unattested]`, for the same
+reason the authorize query string is (§2.1): §13.8 records the arrays, not the
+URL they end up in. The plugin space-joins, which is the OAuth 2.0 norm and is
+what it already did before this contract existed.
+
+Given that serialisation, array order is wire-visible, so the implementation
+preserves it and never sorts.
 
 ### 4.2) Conditional extensions
 
-| Scope                 | Gating condition                                                   |
-| --------------------- | ------------------------------------------------------------------ |
-| `user:plugins`        | **appended** when the `PLUGINS_SCOPE_REGISTERED` gate is on        |
-| `user:projects:read`  | appended only when **requested** _and_ present in the allowed list |
-| `user:projects:write` | appended only when **requested** _and_ present in the allowed list |
+| Scope                 | Gating condition                                                   | Genuine-client default |
+| --------------------- | ------------------------------------------------------------------ | ---------------------- |
+| `user:plugins`        | **appended** when the `PLUGINS_SCOPE_REGISTERED` gate is on        | `[unattested]`         |
+| `user:projects:read`  | appended only when **requested** _and_ present in the allowed list | `[unattested]`         |
+| `user:projects:write` | appended only when **requested** _and_ present in the allowed list | `[unattested]`         |
 
-Both extensions are **appended**, never inserted into the base set. The base set
-order is therefore invariant under any gating.
+Both extensions are **appended**, never inserted into the base set, so the base
+set order is invariant under any gating.
+
+§13.8 records neither the default state of `PLUGINS_SCOPE_REGISTERED` nor the
+contents of "the allowed list".
+
+**What this plugin emits by default:** the base set only. `user:plugins` requires
+`oauth.plugins_scope: true`; the project scopes require an explicit
+`oauth.project_scopes` entry. Both default off, which makes the default emitted
+scope string byte-identical to the pre-contract one. Because the genuine
+client's default is unattested, defaulting these **on** would be an unforced
+fingerprint risk; defaulting them **off** is the conservative choice and is
+recorded as such in §7.
 
 ---
 
@@ -197,31 +291,50 @@ order is therefore invariant under any gating.
 
 ### 5.1) `CLAUDE_CODE_CUSTOM_OAUTH_URL` allowlist
 
-Exactly three entries, byte `4657393`, in bundle order:
+Exactly three entries, byte `4657393`. The order below is the order the analysis
+prose lists them in; §13.8 does not attest a bundle ordering, and nothing in the
+implementation depends on the order.
 
 1. `https://beacon.claude-ai.staging.ant.dev`
 2. `https://claude.fedstart.com`
 3. `https://claude-staging.fedstart.com`
 
-Any other value throws, with this exact message:
+Any non-approved value throws, with this exact message:
 
 ```text
 CLAUDE_CODE_CUSTOM_OAUTH_URL is not an approved endpoint.
 ```
 
-Comparison is **exact string equality** against the configured value. The
-implementation must not normalise, lowercase, strip a trailing slash, or parse
-and re-serialise the URL: every one of those widens the allowlist beyond what the
-genuine client accepts, turning a security control into a suggestion.
+**Comparison semantics are `[unattested]`.** §13.8 says the value is "validated
+against a three-entry allowlist … and otherwise throws"; it does not say whether
+the check is equality, prefix, or origin matching. This plugin uses **exact
+string equality** and does not normalise, lowercase, strip a trailing slash, or
+parse and re-serialise the URL. That is the **narrowest** reading of the
+evidence: every relaxation would admit values the genuine client might reject,
+and a security control that is wrong in the permissive direction is worse than
+one that is wrong in the strict direction.
+
+Whether an unset or empty value short-circuits validation is also `[unattested]`.
+This plugin treats absent, empty and whitespace-only as "not configured" and
+performs no validation, because throwing on an unset variable would break every
+login that does not use the feature.
 
 ### 5.2) Headless-login variables — attestation status
 
 `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_OAUTH_SCOPES` and
 `CLAUDE_CODE_OAUTH_CLIENT_ID` are **`[unattested]`**: §13.8 does not record them.
-They are carried in the parity plan as a headless-login surface. They are
-implemented as a **local capability**, not as a parity claim, and are therefore
-also listed in §7 (Divergences). No request they produce differs in shape from
-the attested refresh fingerprint in §2.3.
+They are a **local capability**, not a parity claim, and are recorded as such in
+§7.
+
+Two consequences, because "same shape" is not "same bytes":
+
+- `CLAUDE_CODE_OAUTH_SCOPES` is consumed **only** at authorize time and when
+  seeding an env account's recorded scope list. It never reaches a refresh body:
+  that would contradict §2.3 and §6.2.
+- `CLAUDE_CODE_OAUTH_CLIENT_ID` changes a **wire value** (`client_id`) in the
+  token body. A request made with it is not byte-identical to a genuine one. That
+  is the point of the variable and is the user's explicit choice, but it is a
+  divergence and is listed in §7 rather than waved through.
 
 ---
 
@@ -229,48 +342,87 @@ the attested refresh fingerprint in §2.3.
 
 This section is the reason this document exists. An absence is as load-bearing as
 a presence, and it is the thing a future maintainer will otherwise helpfully
-re-add.
+re-add. Each claim is scoped to what §13.8 actually supports.
 
-1. **It does not revoke tokens.** `/v1/oauth/revoke` **appears nowhere in the
-   2.1.280 bundle** (§13.8, closing paragraph). Any `POST` to a revoke endpoint
-   is a request no genuine client emits and is therefore a positive fingerprint.
+1. **It does not have a `/v1/oauth/revoke` endpoint.** That literal path
+   **appears nowhere in the 2.1.280 bundle** (§13.8, closing paragraph), and the
+   analysis concludes "the genuine client does not revoke". Scoped precisely:
+   the evidence is the absence of that literal, so a `POST` to it is a request no
+   genuine client emits. §13.8 does not enumerate every path the client might
+   use, so this is not a claim that no revocation mechanism of any kind exists.
 2. **It does not send `scope` on refresh.** The refresh body is exactly
    `{ grant_type, refresh_token, client_id }` (byte `4429828`).
-3. **It does not use axios.** The OAuth token client is the Anthropic TS SDK's
-   native-`fetch` `userOAuthProvider`. There is no `axios/` User-Agent and no
-   axios `Accept: application/json, text/plain, */*` header anywhere in the
-   `2.1.280` OAuth path.
-4. **It does not send SDK version `0.94.0`.** `0.112.1` is the only version
+3. **Its attested OAuth user-agents are SDK user-agents, not `axios/…`.** Stated
+   as a positive, which is all the evidence supports: at byte `4429828` the
+   refresh sends `User-Agent: anthropic-sdk-typescript/0.112.1 userOAuthProvider`
+   and at byte `4427476` the federation exchange sends
+   `…/0.112.1 oidcFederationProvider`. §13.8 lists **no `Accept` header** at
+   either site. It does not name a transport, so "does not use axios" is not
+   something this document can assert; what it can assert is that the two
+   attested sites do not send an `axios/…` user-agent and that this plugin's
+   `axios/1.13.6` + `Accept: application/json, text/plain, */*` pair matches
+   nothing in §13.8. The exchange site is not covered at all (§2.2).
+4. **It does not send SDK version `0.94.0`.** `0.112.1` is the only SDK-version
    declaration in the dump (byte `4407908`).
 5. **It does not authorise on `claude.ai/oauth/authorize`.** The consumer
-   authorisation page is `https://claude.com/cai/oauth/authorize`.
+   authorisation page is `https://claude.com/cai/oauth/authorize` (byte
+   `4655440`).
 6. **It does not accept an arbitrary `CLAUDE_CODE_CUSTOM_OAUTH_URL`.** Three
-   values are approved; everything else throws.
-7. **It does not refresh a federated credential with the `refresh_token`
-   grant.** Federation is a separate, non-interactive grant; a federated
-   credential is renewed by re-running the JWT-bearer exchange.
+   values are approved; everything else throws (byte `4657393`).
+
+### 6.1) Federated-credential renewal is `[unattested]`
+
+§13.8 describes federation as "a separate, non-interactive path for service
+accounts and CI" and records its request shape. It records **nothing** about the
+federation token response: not whether it contains a `refresh_token`, not how
+renewal happens. Any claim that a federated credential "cannot" be refreshed with
+the `refresh_token` grant would be an invention.
+
+**What this plugin does, and why:** it renews a federated credential by re-running
+the JWT-bearer exchange, and never routes one into `refreshToken()`. This is a
+**design choice under uncertainty**, not a parity claim. The justification is that
+re-exchange is known to work — it is the attested way to obtain a federated token
+— whereas sending a federation-issued token to the `refresh_token` grant is
+unattested in both directions. Recorded in §7.
 
 ---
 
 ## 7) Divergences this plugin knowingly keeps
 
-Each row is a deliberate, justified departure from §6. A row with no
-justification is a defect, not a divergence.
+Each row is a deliberate, justified departure, or a behaviour that is not attested
+either way. A row with no justification is a defect, not a divergence. The
+"Status" column tracks which are still open.
 
-| #   | Divergence                 | Justification |
-| --- | -------------------------- | ------------- |
-|     | _(populated by Waves 1–5)_ |               |
+| #   | Divergence                                                                                 | Justification                                                                                                                                                  | Status                       |
+| --- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| D1  | `POST /v1/oauth/revoke` on logout                                                          | Contradicts §6.1. Becomes opt-in and off-by-default rather than being deleted, so users relying on the security affordance keep it by explicit choice.         | open — closes Wave 1         |
+| D2  | `User-Agent: axios/1.13.6` + `Accept: application/json, text/plain, */*` on token requests | Matches nothing in §13.8 (§6.3). The code path is removed; the config key survives as inert so existing config files keep loading.                             | open — closes Wave 1         |
+| D3  | SDK version `0.94.0` in the OAuth user-agent                                               | Contradicts §6.4.                                                                                                                                              | open — closes Wave 1         |
+| D4  | Authorize host `https://claude.ai/oauth/authorize`                                         | Contradicts §6.5.                                                                                                                                              | open — closes Wave 1         |
+| D5  | `scope` key in the refresh body                                                            | Contradicts §6.2.                                                                                                                                              | open — closes Wave 1         |
+| D6  | Token-endpoint host kept at `platform.claude.com` despite the unresolved base/path split   | §2.6. The absolute string is attested; the SDK's base is not. Keeping the attested string is the narrower error.                                               | permanent until new evidence |
+| D7  | `Content-Type: application/json` on the federation request                                 | §2.4. Not listed at byte `4427476`; inferred from the JSON body.                                                                                               | permanent until new evidence |
+| D8  | Exchange request reuses the refresh header triple                                          | §2.2. No `authorization_code` grant or call site exists in §13.8. Closest plausible shape, explicitly marked as an assumption and excluded from the meta-test. | permanent until new evidence |
+| D9  | Conditional scopes default **off**                                                         | §4.2. The genuine default is unattested; defaulting on would add an unforced fingerprint. Default-off also keeps the emitted scope string unchanged.           | permanent until new evidence |
+| D10 | `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` / `_SCOPES` / `_CLIENT_ID` headless login                | §5.2. Local capability, unattested in §13.8. `_CLIENT_ID` changes a wire value by the user's explicit choice.                                                  | permanent — local feature    |
+| D11 | Federated credentials renewed by re-exchange rather than by `refresh_token`                | §6.1. Design choice under uncertainty; the re-exchange path is attested, the alternative is unattested in both directions.                                     | permanent until new evidence |
 
 ---
 
 ## 8) Change control
 
-- Every constant in §1–§5 is pinned by a literal assertion in
+- Every **attested** constant in §1–§5 is pinned by a literal assertion in
   `lib/oauth-constants.test.mjs`. A test that compares an import to itself proves
   nothing; the test re-writes the literal.
-- Every row of §2 maps to exactly one assertion in
+- Every **attested** row of §2 maps to exactly one assertion in
   `test/conformance/oauth-wire-parity.test.mjs`, enforced by a meta-test that
-  fails when a row gains no assertion.
-- Changing any value here requires a matching byte offset in a
-  `claude-code-wire-compat` analysis document. A value without an offset is
-  marked `[unattested]` and stays marked.
+  fails when such a row gains no assertion. Rows marked `[unattested]`,
+  `[unattested-bind]` or `[unattested-order]` are deliberately exempt: pinning an
+  assumption as a measurement is how a guess becomes folklore.
+- Header assertions check **presence and value** of the attested headers. They do
+  not assert the absence of unlisted headers, because §13.8 is not a closed set
+  (§3.1).
+- Changing an attested value requires a matching byte offset in a
+  `claude-code-wire-compat` analysis document. Changing an `[unattested]` value
+  requires either a new offset — which promotes it out of `[unattested]` — or a
+  justified row in §7.
