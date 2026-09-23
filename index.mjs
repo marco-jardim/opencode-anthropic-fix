@@ -3,7 +3,7 @@ import { stdin, stdout } from "node:process";
 import { randomBytes, randomUUID, createHash as createHashCrypto } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { AccountManager, RATE_LIMIT_KEY_FAST } from "./lib/accounts.mjs";
+import { AccountManager, RATE_LIMIT_KEY_FAST, warnOnEphemeralTokenRotation } from "./lib/accounts.mjs";
 import {
   authorize as oauthAuthorize,
   exchange as oauthExchange,
@@ -6265,6 +6265,7 @@ async function refreshAccountToken(account, client, _source = "foreground", { on
 
     account.access = json.access_token;
     account.expires = Date.now() + json.expires_in * 1000;
+    warnOnEphemeralTokenRotation(account, json.refresh_token);
     if (json.refresh_token) {
       account.refreshToken = json.refresh_token;
     }

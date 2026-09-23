@@ -32,6 +32,7 @@ import { loadAccounts, saveAccounts, getStoragePath, createDefaultStats } from "
 import { loadConfig, saveConfig, getConfigPath, VALID_STRATEGIES } from "./lib/config.mjs";
 import { authorize, exchange, refreshToken, revoke } from "./lib/oauth.mjs";
 import { adjustActiveIndexAfterRemoval } from "./lib/account-state.mjs";
+import { warnOnEphemeralTokenRotation } from "./lib/accounts.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -159,6 +160,7 @@ export async function refreshAccessToken(account) {
     });
     account.access = json.access_token;
     account.expires = Date.now() + json.expires_in * 1000;
+    warnOnEphemeralTokenRotation(account, json.refresh_token);
     if (json.refresh_token) account.refreshToken = json.refresh_token;
     account.token_updated_at = Date.now();
     return json.access_token;

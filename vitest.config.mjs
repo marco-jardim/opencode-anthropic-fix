@@ -2,6 +2,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Strips OAuth environment variables so a developer's or CI runner's shell
+    // cannot change what the suite exercises. See test/setup-env.mjs.
+    setupFiles: ["./test/setup-env.mjs"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "html"],
