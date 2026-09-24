@@ -537,33 +537,48 @@ It also injects optional env-driven headers:
 
 ### 4.3 OAuth token-layer user-agent mimicry
 
-OAuth token calls (`POST /v1/oauth/token`, exchange and refresh) now default to
-Claude Code 2.1.195's SDK native-fetch OAuth-provider fingerprint
-(`userOAuthProvider`). This is controlled by the config flag
-`oauth.sdk_token_useragent`, which **defaults to `true`**.
+> **This section is a summary. The authoritative OAuth-layer contract is
+> [`docs/oauth-2.1.280-contract.md`](./oauth-2.1.280-contract.md), and its
+> executable half is `test/conformance/oauth-wire-parity.test.mjs`.** That
+> document records every OAuth endpoint, header, body key and scope with the byte
+> offset in the 2.1.280 bundle that attests it, marks every value the evidence
+> does **not** attest, and lists the divergences this plugin knowingly keeps.
+> Change a value here only together with that document.
 
-Headers sent by default (flag `true`, matching CC 2.1.195):
+OAuth token calls (`POST /v1/oauth/token`, exchange and refresh) send exactly one
+fingerprint: Claude Code 2.1.280's SDK OAuth-provider shape
+(`userOAuthProvider`). There is no second path and no switch.
 
-- `User-Agent: anthropic-sdk-typescript/0.94.0 userOAuthProvider`
-- `anthropic-beta: oauth-2025-04-20` ← new on the token endpoint
+Headers sent on every token request, in emission order:
+
 - `Content-Type: application/json`
-- (no explicit `Accept` — native `fetch` default)
+- `anthropic-beta: oauth-2025-04-20`
+- `User-Agent: anthropic-sdk-typescript/0.112.1 userOAuthProvider`
+- (no explicit `Accept` — §13.8 lists none at either token call site)
 
-Set `oauth.sdk_token_useragent` to `false` to revert to the legacy axios
-fingerprint (byte-identical to the historical CLI):
+Attested for the **refresh** grant at byte `4429828`; the **exchange** grant
+reuses the same triple as an explicit assumption, because §13.8 contains no
+`authorization_code` constant and no offset locating that call site. See contract
+§2.2 and divergence D8.
 
-- `User-Agent: axios/1.13.6`
-- `Accept: application/json, text/plain, */*`
-- `Content-Type: application/json`
+The refresh body is exactly `{ grant_type, refresh_token, client_id }`. It has
+**no `scope` key** — emitting one is a positive fingerprint no genuine 2.1.280
+client produces (contract §2.3, divergence D5).
 
-> ✅ **RE-CONVERGED — Claude Code 2.1.195 (see `docs/claude-code-2.1.195-analysis.md` §6).**
-> Upstream CC migrated the OAuth token client from axios to the Anthropic TS SDK's
-> native fetch OAuth provider (`userOAuthProvider`). The plugin now matches this by
-> default (`oauth.sdk_token_useragent` default `true`). Historically the token
-> endpoint 429'd requests lacking the axios UA; that risk is accepted for the
-> default-on path. Set the flag to `false` to fall back to the byte-identical
-> `axios/1.13.6` + `Accept: application/json, text/plain, */*` fingerprint if a
-> live refresh ever regresses.
+> ⚠️ **RETIRED — the axios fallback no longer exists.** Earlier releases sent
+> `User-Agent: axios/1.13.6` with `Accept: application/json, text/plain, */*`
+> when `oauth.sdk_token_useragent` was `false`. §13.8 records no axios usage
+> anywhere in the 2.1.280 OAuth path, so that flag could only ever make a user
+> _more_ identifiable: they became the only client on the network sending that
+> shape. The code path is gone. The config key is still **recognised** so existing
+> `opencode.json` files keep loading, but it is inert and emits a one-time
+> deprecation warning. See contract divergence D2.
+
+> ⚠️ **The SDK version moved `0.94.0` → `0.112.1`** (contract §3, byte `4407908`
+> — the only such declaration in the dump), and the consumer authorize host moved
+> `claude.ai/oauth/authorize` → **`claude.com/cai/oauth/authorize`** (byte
+> `4655440`). Both were live fingerprints and are recorded as divergences D3 and
+> D4, now closed.
 
 ### 4.4 WebFetch user-agent (intentional divergence)
 
@@ -768,6 +783,13 @@ This plugin no longer auto-includes `fine-grained-tool-streaming-2025-05-14` in 
 | Agent SDK without CC entrypoint (`CLAUDE_AGENT_SDK_VERSION` set, no `CLAUDE_CODE_ENTRYPOINT`)               | `You are a Claude agent, built on Anthropic's Claude Agent SDK.`                                 |
 
 All three values are tracked in `KNOWN_IDENTITY_STRINGS` for deduplication during block filtering.
+
+> **Per-model prompt selection (2.1.280, not mimicked).** Claude Code 2.1.280
+> sends a shorter system prompt to models carrying the `lean_prompt` capability
+> (the upstream predicate's return is inverted relative to that name), and a
+> remote override can change the choice. The text of neither prompt has been
+> extracted, so the difference is unknown and this plugin cannot mimic it. See
+> [`lean-prompt-claude-code-2.1.280.md`](./lean-prompt-claude-code-2.1.280.md).
 
 ### 6.4 Cache scoping architecture
 

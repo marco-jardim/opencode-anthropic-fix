@@ -136,14 +136,19 @@ const ALLOWED_USER_AGENT_LITERALS = {
 /**
  * Files allowed to keep a `2.1.<NN>` version literal, with the reason.
  *
- * EMPTY BY DESIGN. The emulated version has exactly one source — the profile —
- * and every production consumer reads it through the seam. An entry here means
- * a module re-typed the version and must justify why the profile could not
- * answer.
+ * The emulated version has exactly one source — the profile — and every
+ * production consumer reads it through the seam. An entry here means a module
+ * re-typed the version and must justify why the profile could not answer.
  *
  * @type {Record<string, number>}
  */
-const ALLOWED_VERSION_LITERALS = {};
+const ALLOWED_VERSION_LITERALS = {
+  // EMPTY BY DESIGN. Restored to empty after QA-1: the OAuth deprecation warning
+  // that briefly needed two `2.1.280` literals was reworded to name neither the
+  // release nor the contract document's filename. A count-based allowance would
+  // have let a later edit swap a doc reference for a real wire literal without
+  // this guard noticing, which is precisely the failure it exists to catch.
+};
 
 /** @param {string} source @param {RegExp} pattern @returns {number} */
 function countMatches(source, pattern) {
@@ -195,7 +200,15 @@ describe("Claude Code version literals are retired from production code", () => 
   });
 
   it("keeps no `2.1.<NN>` version literal anywhere in production code", () => {
-    expect(scanProductionContexts(CC_VERSION_LITERAL)).toEqual({});
+    // Report the offending LINES for anything outside the allowlist, so a
+    // failure names what to delete rather than just counting it. Allowlisted
+    // files still have their COUNT pinned below, so a second literal sneaking
+    // into an already-listed file is still a failure.
+    const contexts = scanProductionContexts(CC_VERSION_LITERAL);
+    const unlisted = Object.fromEntries(
+      Object.entries(contexts).filter(([file]) => !(file in ALLOWED_VERSION_LITERALS)),
+    );
+    expect(unlisted).toEqual({});
     expect(scanProduction(CC_VERSION_LITERAL)).toEqual(ALLOWED_VERSION_LITERALS);
   });
 

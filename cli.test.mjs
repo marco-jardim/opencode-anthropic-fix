@@ -990,6 +990,21 @@ describe("auth commands", () => {
     }
   });
 
+  it("cmdLogin reports a rejected OAuth endpoint without an unhandled rejection", async () => {
+    loadAccounts.mockResolvedValue(null);
+    vi.mocked(authorize).mockRejectedValueOnce(new Error("CLAUDE_CODE_CUSTOM_OAUTH_URL is not an approved endpoint."));
+    const restoreTTY = setStdinTTY(true);
+    try {
+      await expect(cmdLogin()).resolves.toBe(1);
+      expect(authorize).toHaveBeenCalledWith("max");
+      expect(output.errorText()).toContain("CLAUDE_CODE_CUSTOM_OAUTH_URL");
+      expect(exchange).not.toHaveBeenCalled();
+      expect(saveAccounts).not.toHaveBeenCalled();
+    } finally {
+      restoreTTY();
+    }
+  });
+
   it("cmdLogin adds a new account via OAuth", async () => {
     loadAccounts.mockResolvedValue(null);
     const restoreTTY = setStdinTTY(true);
@@ -1880,5 +1895,27 @@ describe("cmdResetStats", () => {
     loadAccounts.mockResolvedValue(null);
     const code = await cmdResetStats("all");
     expect(code).toBe(1);
+  });
+});
+
+import { describeRevokeOutcome } from "./cli.mjs";
+
+describe("describeRevokeOutcome", () => {
+  it("describes local discard and names the opt-in setting when skipped", () => {
+    const message = describeRevokeOutcome({ attempted: false, ok: false });
+    expect(message).toContain("discarded locally");
+    expect(message).toContain("oauth.revoke_on_logout");
+  });
+
+  it("describes successful server-side revocation", () => {
+    expect(describeRevokeOutcome({ attempted: true, ok: true, status: 200 })).toContain("revoked server-side");
+  });
+
+  it("describes HTTP and network failures without claiming revocation", () => {
+    const message = describeRevokeOutcome({ attempted: true, ok: false, status: 401 });
+    expect(message).toContain("failed");
+    expect(message).toContain("HTTP 401");
+    expect(message).not.toMatch(/revoked/i);
+    expect(describeRevokeOutcome({ attempted: true, ok: false, error: "network down" })).toContain("network down");
   });
 });

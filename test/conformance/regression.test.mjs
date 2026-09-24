@@ -74,6 +74,8 @@ import { AnthropicAuthPlugin } from "../../index.mjs";
 import { saveAccounts, loadAccounts } from "../../lib/storage.mjs";
 import { loadConfig } from "../../lib/config.mjs";
 
+const { authorize, refreshToken } = await import("../../lib/oauth.mjs");
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -334,6 +336,61 @@ describe("Fix #4: OAuth state validation (CSRF protection)", () => {
 
     const result = await authResult.callback("auth-code#wrong-state");
     expect(result.type).toBe("failed");
+  });
+});
+
+describe("OAuth wire contract (CC 2.1.280)", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    loadConfig.mockReturnValue({});
+  });
+
+  it("uses the consumer authorize host and path without the legacy claude.ai/oauth URL", async () => {
+    const { url } = await authorize("max");
+    const parsed = new URL(url);
+    expect(parsed.origin).toBe("https://claude.com");
+    expect(parsed.pathname).toBe("/cai/oauth/authorize");
+    expect(url).not.toContain("claude.ai/oauth");
+  });
+
+  it("uses the attested token User-Agent rather than the old SDK or axios", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
+    });
+    await refreshToken("refresh-token");
+    const [, init] = mockFetch.mock.calls[0];
+    const userAgent = init.headers["User-Agent"];
+    expect(userAgent).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+    expect(userAgent).not.toContain("0.94.0");
+    expect(userAgent).not.toContain("axios/");
+  });
+
+  it("keeps every outbound OAuth header value free of axios/", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
+    });
+    await refreshToken("refresh-token");
+    const [, init] = mockFetch.mock.calls[0];
+    const values = Object.values(init.headers);
+    expect(values.length).toBeGreaterThan(0);
+    for (const value of values) {
+      expect(typeof value).toBe("string");
+      expect(value.includes("axios/")).toBe(false);
+    }
+  });
+
+  it("sends exactly three refresh body keys without scope", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
+    });
+    await refreshToken("refresh-token");
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id"]);
+    expect("scope" in body).toBe(false);
   });
 });
 
