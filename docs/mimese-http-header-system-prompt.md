@@ -784,6 +784,13 @@ This plugin no longer auto-includes `fine-grained-tool-streaming-2025-05-14` in 
 
 All three values are tracked in `KNOWN_IDENTITY_STRINGS` for deduplication during block filtering.
 
+> **Per-model prompt selection (2.1.280, not mimicked).** Claude Code 2.1.280
+> sends a shorter system prompt to models carrying the `lean_prompt` capability
+> (the upstream predicate's return is inverted relative to that name), and a
+> remote override can change the choice. The text of neither prompt has been
+> extracted, so the difference is unknown and this plugin cannot mimic it. See
+> [`lean-prompt-claude-code-2.1.280.md`](./lean-prompt-claude-code-2.1.280.md).
+
 ### 6.4 Cache scoping architecture
 
 Cache scoping is **host policy**, and it is the only half of the real CC's
