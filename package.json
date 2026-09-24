@@ -1,6 +1,6 @@
 {
   "name": "opencode-anthropic-fix",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
@@ -55,6 +55,6 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@tormentalabs/claude-code-wire-compat": "latest"
+    "@tormentalabs/claude-code-wire-compat": "0.5.0"
   }
 }

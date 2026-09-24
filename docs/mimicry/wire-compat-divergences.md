@@ -23,8 +23,10 @@ itself a defect: then the fix belongs in the consumer. `stainlessHelper` markers
 
 ## Package version state (read this before running `npm install`)
 
-- `package.json` specifies the **`latest` dist-tag**, not a version. The resolved version, its
-  registry tarball URL and its `sha512` integrity live in `package-lock.json`, and `npm ci` installs
+- `package.json` pins **exactly `0.5.0`** (since plugin 2.0.0; it tracked the `latest` dist-tag
+  before). `0.6.0` switches the package's `DEFAULT_PROFILE` to Claude Code 2.1.280, and against it the
+  plugin's suite fails 48 tests, so the pin holds until the plugin's wire port to 2.1.280 lands. The
+  registry tarball URL and `sha512` integrity live in `package-lock.json`, and `npm ci` installs
   exactly that. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is installed.
 - The wire shape follows from that: the adapter calls the package **without a `profile` argument**, so
   the plugin inherits the package's `DEFAULT_PROFILE`. `0.1.0` defaulted to `claude-code-2.1.195`;
@@ -341,14 +343,21 @@ the code.
 
 ## Syncing a new package version
 
-The specifier is the `latest` dist-tag, so a sync is a lockfile move, not a `package.json` edit. Do not re-pin an
-exact version to perform a routine sync — that is the emergency-rollback shape (see
-`docs/shared-package-provenance.md`).
-
-1. `npm update @tormentalabs/claude-code-wire-compat`. This rewrites `package-lock.json` only: new version, new
-   registry tarball URL, new `sha512` integrity. **The lockfile diff is the review artifact** — read it before
-   anything else. `docs/shared-package-provenance.md` needs no version edit by design; it documents the policy, and
-   `test/conformance/package-dependency-policy.test.mjs` validates `resolved` against the lock's own `version`.
+1. Move the dependency. Which command applies depends on the specifier in `package.json`:
+   - **While the dependency is pinned exactly** (currently `0.5.0`, see "Package version state" above):
+     `npm install --save-exact @tormentalabs/claude-code-wire-compat@<version>`. `npm update` cannot move an exact
+     pin, because it respects the manifest's constraint. The install rewrites three things that change or name the
+     version, and all three are the review artifact: `package.json` (the specifier), `package-lock.json` (version,
+     registry tarball URL, `sha512` integrity) and `docs/shared-package-provenance.md` (which records the pinned
+     version and must be edited to match; `test/conformance/package-dependency-policy.test.mjs` fails if it does
+     not).
+   - **If the specifier returns to the `latest` dist-tag:** a sync is a lockfile move, not a `package.json` edit. Do
+     not re-pin an exact version to perform a routine sync — that is the emergency-rollback shape (see
+     `docs/shared-package-provenance.md`). `npm update @tormentalabs/claude-code-wire-compat` rewrites
+     `package-lock.json` only: new version, new registry tarball URL, new `sha512` integrity. **The lockfile diff is
+     the review artifact** — read it before anything else. `docs/shared-package-provenance.md` needs no version edit
+     under `latest`; it documents the policy, and `test/conformance/package-dependency-policy.test.mjs` validates
+     `resolved` against the lock's own `version`.
 2. Check whether the package's `DEFAULT_PROFILE` moved (its CHANGELOG says so, and
    `node_modules/@tormentalabs/claude-code-wire-compat/src/build-request.ts` is the seam). If it did:
    - no version literal needs editing. `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT`
