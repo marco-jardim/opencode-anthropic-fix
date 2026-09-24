@@ -591,7 +591,9 @@ PKCE code generation for the OAuth flow is implemented locally in `lib/oauth.mjs
 plugin puts on the wire. A version bump is a **wire change until proven otherwise**. Adopting a new
 release goes through this gate, in order, and each step is a stop condition:
 
-1. **Bump through the registry.** `npm update @tormentalabs/claude-code-wire-compat`. The lockfile
+1. **Bump through the registry.** `npm update @tormentalabs/claude-code-wire-compat` (while the
+   dependency is pinned to exactly `0.5.0`, see `docs/shared-package-provenance.md`, use
+   `npm install --save-exact @tormentalabs/claude-code-wire-compat@<version>` instead). The lockfile
    must resolve the new version from the npm registry with a `resolved` URL and an `integrity`
    hash — a `file:` or `link:` resolution is a local artifact, not a release, and
    `test/conformance/package-dependency-policy.test.mjs` fails on it. **The lockfile diff is the

@@ -37,8 +37,10 @@ When changing `cliVersion`, change `userAgent` to the same version in the same o
 **The override is applied field by field, wholesale per field, against the package's _current_
 base profile — and that base moves.** The plugin deliberately omits the `profile` argument, so the
 base is whatever `DEFAULT_PROFILE` the installed
-`@tormentalabs/claude-code-wire-compat` declares, and the dependency tracks the `latest` dist-tag.
-Every package release can advance it (it moved 2.1.195 → 2.1.233 at the `0.3.0` bump).
+`@tormentalabs/claude-code-wire-compat` declares. Every package release can advance it (it moved
+2.1.195 → 2.1.233 at the `0.3.0` bump). The dependency is currently pinned to exactly `0.5.0`, because
+`0.6.0` advances the default to 2.1.280 ahead of the plugin's port (see
+`docs/shared-package-provenance.md`); the base moves again when the pin lifts.
 
 There is no deep merge. A field you supply **replaces** the base field entirely; a field you omit is
 inherited from the new base. That is fine for scalars like `userAgent` and `cliVersion`, and it is a

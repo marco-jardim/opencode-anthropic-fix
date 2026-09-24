@@ -14,18 +14,27 @@ document is enforced by
 | Field       | Value                                                                   |
 | ----------- | ----------------------------------------------------------------------- |
 | Package     | `@tormentalabs/claude-code-wire-compat`                                 |
-| Specifier   | `latest` (npm dist-tag), in [`package.json`](../package.json)           |
+| Specifier   | `0.5.0` (exact registry version), in [`package.json`](../package.json)  |
 | Origin      | npm registry                                                            |
 | Resolved by | `package-lock.json` — version, registry tarball URL, `sha512` integrity |
 | License     | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                 |
 
-This table deliberately does **not** name a version. The resolved version lives in one place —
-`package-lock.json` — and duplicating it here would create a second source of truth that rots on the
-first `npm update`. To read the version actually installed:
+The lockfile records the same version with its registry tarball URL and integrity hash, and the
+policy test fails if the two disagree. To read the version actually installed:
 
 ```bash
 npm ls @tormentalabs/claude-code-wire-compat
 ```
+
+## Why the specifier is pinned to exactly `0.5.0`
+
+Since plugin 2.0.0 the dependency is an exact pin, suspending the `latest` policy described in the
+next section. `0.6.0` of the package switches its `DEFAULT_PROFILE` to Claude Code 2.1.280. The
+plugin never passes a `profile` argument, so installing `0.6.0` would move its wire to 2.1.280 before
+the plugin has been ported to it: against `0.6.0` the plugin's own suite fails 48 tests (user agent
+and billing `cc_version` report 2.1.280, thinking goes out as `display: "updates"`, the
+redact-thinking beta is absent, and the cache-diagnosis beta can no longer be stripped by the retry
+latch). The pin lifts, and `latest` is restored, when the plugin's wire port to 2.1.280 lands.
 
 ## Why the specifier is the `latest` dist-tag
 
@@ -102,11 +111,12 @@ Two levers, in increasing order of blast radius. Neither is a runtime switch (se
 
 Kept as a record; none of these is the live policy.
 
-| Period               | Specifier                                   | Note                                                                                              |
-| -------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Pre-publication      | GitHub release tarball, `v0.1.0-rc.17` last | The only immutable public artifact before the package was published to npm                        |
-| Phase 9 → 0.3.0 bump | exact registry version `0.1.0`              | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==` |
-| Current              | `latest` dist-tag                           | Inherits the package's `DEFAULT_PROFILE`; reproducibility via `package-lock.json`                 |
+| Period                 | Specifier                                   | Note                                                                                              |
+| ---------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Pre-publication        | GitHub release tarball, `v0.1.0-rc.17` last | The only immutable public artifact before the package was published to npm                        |
+| Phase 9 → 0.3.0 bump   | exact registry version `0.1.0`              | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==` |
+| 0.3.0 → plugin 1.0.0   | `latest` dist-tag                           | Inherits the package's `DEFAULT_PROFILE`; reproducibility via `package-lock.json`                 |
+| Current (plugin 2.0.0) | exact registry version `0.5.0`              | Held back from `0.6.0`'s 2.1.280 default profile; see above                                       |
 
 The `0.1.0` era pinned the profile as a side effect: `0.1.0`'s default was `claude-code-2.1.195`, and
 moving to `0.3.0` moved the wire to `claude-code-2.1.233-sdk-0.112.1`. That coupling is the reason
