@@ -88,6 +88,7 @@ import {
   createDebugResponseHeadersEntry,
   isDebugSinkEnabled,
 } from "./index.mjs";
+import { isBetaRetryAccountUsable } from "./lib/accounts.mjs";
 import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import { loadConfig, loadConfigFresh, saveConfig as saveRuntimeConfig, DEFAULT_CONFIG } from "./lib/config.mjs";
@@ -142,6 +143,45 @@ describe("debug correlation IDs", () => {
     if (isDebugSinkEnabled(config, "headers")) writeDebugFile("headers");
 
     expect(writeDebugFile).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QA fix L5: isBetaRetryAccountUsable — the beta-rejection retry pin must
+// only be honored while the pinned account is still enabled and still
+// tracked by the account manager; otherwise the retry loop must fall back to
+// normal selection instead of force-selecting a stale reference.
+// ---------------------------------------------------------------------------
+describe("isBetaRetryAccountUsable (L5)", () => {
+  const account1 = { index: 1, enabled: true };
+
+  it("is usable when still enabled and present in the account manager", () => {
+    const accountManager = { getEnabledAccounts: () => [{ index: 0, enabled: true }, account1] };
+    expect(isBetaRetryAccountUsable(account1, accountManager, new Set())).toBe(true);
+  });
+
+  it("is not usable when null (no pin set)", () => {
+    const accountManager = { getEnabledAccounts: () => [account1] };
+    expect(isBetaRetryAccountUsable(null, accountManager, new Set())).toBe(false);
+  });
+
+  it("is not usable when it has been disabled since the pin was set (same object, mutated in place)", () => {
+    const disabled = { index: 1, enabled: false };
+    const accountManager = { getEnabledAccounts: () => [] };
+    expect(isBetaRetryAccountUsable(disabled, accountManager, new Set())).toBe(false);
+  });
+
+  it("is not usable when it was removed from the account manager (no longer among enabled accounts)", () => {
+    // Still `enabled: true` on the stale object itself, but removeAccount()
+    // spliced it out of the manager's #accounts — getEnabledAccounts() no
+    // longer includes it, by reference identity.
+    const accountManager = { getEnabledAccounts: () => [{ index: 1, enabled: true }] }; // a DIFFERENT object, same index
+    expect(isBetaRetryAccountUsable(account1, accountManager, new Set())).toBe(false);
+  });
+
+  it("is not usable when its index is in transientRefreshSkips for this request", () => {
+    const accountManager = { getEnabledAccounts: () => [account1] };
+    expect(isBetaRetryAccountUsable(account1, accountManager, new Set([1]))).toBe(false);
   });
 });
 
@@ -4848,6 +4888,62 @@ describe("markSuccess wiring", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
     const secondHeaders = mockFetch.mock.calls[1][1].headers;
     expect(secondHeaders.get("authorization")).toBe("Bearer access-2");
+  });
+
+  it("QA fix L3: strips content-length and content-encoding from the transformed streaming response", async () => {
+    // undici already transparently decodes the upstream body (e.g. gzip) by
+    // the time this Response's .body is readable, so a Content-Length or
+    // Content-Encoding copied from the original upstream response would
+    // describe the ORIGINAL (compressed) wire bytes, not the plaintext
+    // stream transformResponse actually serves. Both headers must be
+    // stripped, never forwarded.
+    vi.resetAllMocks();
+    const client = makeClient();
+
+    loadAccounts.mockResolvedValue(makeAccountsData([{ access: "access-1", expires: Date.now() + 3600_000 }]));
+    saveAccounts.mockResolvedValue(undefined);
+
+    const plugin = await AnthropicAuthPlugin({ client });
+    const getAuth = vi.fn().mockResolvedValue({
+      type: "oauth",
+      refresh: "refresh-1",
+      access: "access-1",
+      expires: Date.now() + 3600_000,
+    });
+    const result = await plugin.auth.loader(getAuth, makeProvider());
+
+    const encoder = new TextEncoder();
+    const sseStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"type":"message_stop"}\n\n'));
+        controller.close();
+      },
+    });
+
+    mockFetch.mockResolvedValueOnce(
+      new Response(sseStream, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "content-length": "42",
+          "content-encoding": "gzip",
+        },
+      }),
+    );
+
+    const response = await result.fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Hi" }],
+      }),
+    });
+    await response.text();
+
+    expect(response.headers.get("content-length")).toBeNull();
+    expect(response.headers.get("content-encoding")).toBeNull();
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
   });
 
   it("does not switch account on mid-stream service-wide overloaded error", async () => {

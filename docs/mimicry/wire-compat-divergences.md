@@ -115,7 +115,7 @@ not something to do as a side effect of a documentation pass.
 ### Rows 1 to 3, in detail
 
 These are the only rows where the plugin still puts something on the wire that the genuine client does not, and they
-survive on purpose. `buildAdditionalBetas` (`lib/mimicry/adapter-input.mjs:601`) pushes `web-search-2025-03-05` when
+survive on purpose. `buildAdditionalBetas` in `lib/mimicry/adapter-input.mjs` pushes `web-search-2025-03-05` when
 `supportsWebSearch(model)`, `advisor-tool-2026-03-01` on any non-`claude-3-*` model, and `CLAUDE_CODE_BETA_FLAG` when
 `isHaikuModel(model)` — the last one so Haiku subagents reached through model-router delegation still get full mimic
 behaviour.
@@ -145,9 +145,9 @@ single-value golden proves the two sides agree on that golden, not on every vect
 
 ### Row 6, in detail
 
-The plugin does have a `resolveMaxTokens` (`lib/mimicry/request-helpers.mjs:227`), but it is a **policy** cap for
+The plugin does have a `resolveMaxTokens` in `lib/mimicry/request-helpers.mjs`, but it is a **policy** cap for
 context-window economy, not a protocol cap against the model's limit. Its first rule is that a caller-supplied value
-wins outright (`request-helpers.mjs:229`), so the model is never consulted — which is exactly why the package's cap is
+wins outright (also in `resolveMaxTokens`), so the model is never consulted — which is exactly why the package's cap is
 the one that bites, on both paths.
 
 This row is invisible to the byte-for-byte vectors: `HOST_BODY.max_tokens` is 8000 and every model those vectors
@@ -163,20 +163,20 @@ The bound is the model **default**, not its upper limit. Upstream only ever comp
 Every entry here was a capability the plugin lost — or would have lost — when the adapter took over request
 construction. Under Option A each was answered with an opt-in seam in the package, not by degrading the plugin.
 
-| Seam | Field                                | Set in                                                              | What it preserves                                                                                                                                                                                                                                                                             |
-| ---- | ------------------------------------ | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| S1   | `additionalBetas`                    | `buildAdditionalBetas` in `lib/mimicry/adapter-input.mjs:601`       | Rows 1–3, `custom_betas` (shortcut-expanded), files-api, structured-outputs, host-SDK betas rescued from the dropped `anthropic-beta` header                                                                                                                                                  |
-| S2   | `betaOverrides.use1MContext`         | `betaOverrides` seam in `lib/mimicry/adapter-input.mjs:872`         | The plugin's `hasOneMillionContext` rule instead of the package's `/\[1m\]/iu` default                                                                                                                                                                                                        |
-| S3   | `cacheControl.suppressIdentityBlock` | **not used by the plugin**                                          | Would drop the identity block's `cache_control` marker and keep the block. See the name-collision note below.                                                                                                                                                                                 |
-| S4   | `metadataOverrides`                  | `buildMetadataOverrides` in `lib/mimicry/adapter-input.mjs:717`     | `OPENCODE_ANTHROPIC_SIGNATURE_USER_ID` and `CLAUDE_CODE_EXTRA_METADATA`                                                                                                                                                                                                                       |
-| S5   | `extraHeaderPolicy`                  | `extraHeaderPolicy` seam in `lib/mimicry/adapter-input.mjs:890`     | Host headers reaching the wire without overwriting canonical ones                                                                                                                                                                                                                             |
-| S6   | `suppressBetas`                      | `buildSuppressBetas` in `lib/mimicry/adapter-input.mjs:673`         | Round-robin's `prompt-caching-scope-2026-01-05` suppression, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`, and the per-account rejected-beta latch (`index.mjs`'s `sentBetaSuppressionsByAccount`, fed through `rejectedBetas`) — the only seam that can reach a beta the package composes itself |
-| S7   | `suppressBillingBlock`               | `suppressBillingBlock` seam in `lib/mimicry/adapter-input.mjs:902`  | `CLAUDE_CODE_ATTRIBUTION_HEADER` opt-out, and half of the lean-system-prompt gate                                                                                                                                                                                                             |
-| S8   | `suppressIdentityBlock` (**root**)   | `suppressIdentityBlock` seam in `lib/mimicry/adapter-input.mjs:926` | The other half of the lean-system-prompt gate                                                                                                                                                                                                                                                 |
-| S9   | `preserveThinkingBlockCacheControl`  | `wire-compat.mjs:242` (**unconditional**)                           | Reasoning blocks that arrive carrying `cache_control` — see below                                                                                                                                                                                                                             |
+| Seam | Field                                | Set in                                                                                    | What it preserves                                                                                                                                                                                                                                                                             |
+| ---- | ------------------------------------ | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1   | `additionalBetas`                    | `buildAdditionalBetas` in `lib/mimicry/adapter-input.mjs`                                 | Rows 1–3, `custom_betas` (shortcut-expanded), files-api, structured-outputs, host-SDK betas rescued from the dropped `anthropic-beta` header                                                                                                                                                  |
+| S2   | `betaOverrides.use1MContext`         | `betaOverrides` seam in `buildAdapterTransport` (`lib/mimicry/adapter-input.mjs`)         | The plugin's `hasOneMillionContext` rule instead of the package's `/\[1m\]/iu` default                                                                                                                                                                                                        |
+| S3   | `cacheControl.suppressIdentityBlock` | **not used by the plugin**                                                                | Would drop the identity block's `cache_control` marker and keep the block. See the name-collision note below.                                                                                                                                                                                 |
+| S4   | `metadataOverrides`                  | `buildMetadataOverrides` in `lib/mimicry/adapter-input.mjs`                               | `OPENCODE_ANTHROPIC_SIGNATURE_USER_ID` and `CLAUDE_CODE_EXTRA_METADATA`                                                                                                                                                                                                                       |
+| S5   | `extraHeaderPolicy`                  | `extraHeaderPolicy` seam in `buildAdapterTransport` (`lib/mimicry/adapter-input.mjs`)     | Host headers reaching the wire without overwriting canonical ones                                                                                                                                                                                                                             |
+| S6   | `suppressBetas`                      | `buildSuppressBetas` in `lib/mimicry/adapter-input.mjs`                                   | Round-robin's `prompt-caching-scope-2026-01-05` suppression, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`, and the per-account rejected-beta latch (`index.mjs`'s `sentBetaSuppressionsByAccount`, fed through `rejectedBetas`) — the only seam that can reach a beta the package composes itself |
+| S7   | `suppressBillingBlock`               | `suppressBillingBlock` seam in `buildAdapterTransport` (`lib/mimicry/adapter-input.mjs`)  | `CLAUDE_CODE_ATTRIBUTION_HEADER` opt-out, and half of the lean-system-prompt gate                                                                                                                                                                                                             |
+| S8   | `suppressIdentityBlock` (**root**)   | `suppressIdentityBlock` seam in `buildAdapterTransport` (`lib/mimicry/adapter-input.mjs`) | The other half of the lean-system-prompt gate                                                                                                                                                                                                                                                 |
+| S9   | `preserveThinkingBlockCacheControl`  | `toClaudeCodeRequestInput` in `lib/mimicry/wire-compat.mjs` (**unconditional**)           | Reasoning blocks that arrive carrying `cache_control` — see below                                                                                                                                                                                                                             |
 
-Two more seams are used outside this table: `capabilities` (set in `buildAdapterTransport` in `lib/mimicry/adapter-input.mjs:938`) downgrades `adaptiveThinking` so
-`OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING` is not a no-op, and `profileOverride` (`resolveProfileOverride` in `lib/mimicry/adapter-input.mjs:451`) carries
+Two more seams are used outside this table: `capabilities` (set in `buildAdapterTransport` in `lib/mimicry/adapter-input.mjs`) downgrades `adaptiveThinking` so
+`OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING` is not a no-op, and `profileOverride` (`resolveProfileOverride` in `lib/mimicry/adapter-input.mjs`) carries
 the coupled `userAgent`/`cliVersion` pair when the plugin's dynamic user agent diverges from the pinned profile.
 
 ### S8 vs S3 — two different fields with the same name
@@ -191,7 +191,7 @@ This is the sharpest edge in the whole surface and it is worth stating twice.
 
 Both default to `false`, both are independent, and they may be combined — in which case the root seam wins because
 there is no block left to mark. The package carries cross-referencing JSDoc on both (in `dist/contracts.d.ts`), and
-`lib/mimicry/wire-compat.mjs` and `lib/mimicry/adapter-input.mjs` (in the `buildAdapterTransport` function around lines 917-927) repeat the warning at both plugin
+`lib/mimicry/wire-compat.mjs` and `lib/mimicry/adapter-input.mjs` (in the `buildAdapterTransport` function) repeat the warning at both plugin
 call sites. Do not "simplify" either comment away.
 
 S8 also forced a redesign inside the package: `canonicalSystemPrefixLength`
@@ -202,7 +202,7 @@ takes `evidence.billingBlockSuppressed` and `evidence.identityBlockSuppressed` a
 
 ### S9 — why it is passed unconditionally
 
-`toClaudeCodeRequestInput` (in `lib/mimicry/wire-compat.mjs:389`) sets `preserveThinkingBlockCacheControl: true` on **every** request, with no condition and no scan of the messages.
+`toClaudeCodeRequestInput` (in `lib/mimicry/wire-compat.mjs`) sets `preserveThinkingBlockCacheControl: true` on **every** request, with no condition and no scan of the messages.
 
 The reason is an API round-trip constraint, not a per-request property. The Anthropic API answers 400 when the client
 mutates a reasoning block in the latest assistant message — _"thinking or redacted_thinking blocks in the latest
@@ -226,9 +226,9 @@ passthrough.
 These were the plugin's defect, so under the Option A exception they were fixed in the plugin. No seam was added.
 
 - **`stainlessHelper` markers no longer reach the wire.** `stripStainlessHelperMarkers`
-  (`lib/mimicry/headers.mjs:228`) removes `x_stainless_helper`, `x-stainless-helper`, `stainless_helper`,
+  (in `lib/mimicry/headers.mjs`) removes `x_stainless_helper`, `x-stainless-helper`, `stainless_helper`,
   `stainlessHelper` and `_stainless_helper` from tools, messages and nested content blocks. It shares the traversal
-  `walkStainlessHelperCarriers` (`lib/mimicry/headers.mjs:183`) with `buildStainlessHelperHeader` (`lib/mimicry/headers.mjs:200`) precisely so that what
+  `walkStainlessHelperCarriers` (in `lib/mimicry/headers.mjs`) with `buildStainlessHelperHeader` (also in `lib/mimicry/headers.mjs`) precisely so that what
   is READ to compute `x-stainless-helper` and what is REMOVED from the body cannot drift apart. Applied on **every**
   path: the adapter path strips inside `buildWireCompatibleRequest`, the count-tokens path inside
   `buildWireCompatibleCountTokensRequest` (both in `lib/mimicry/wire-compat.mjs`), and the frozen legacy forge right
@@ -250,7 +250,7 @@ These were the plugin's defect, so under the Option A exception they were fixed 
 - **The lean-system-prompt opt-in works again on the adapter path.** `token_economy.lean_system_non_main` was a silent
   no-op there. On the legacy path the decision lives in `buildSystemPromptBlocks` (in `lib/mimicry/system-prompt.mjs`), which returns the sanitized blocks before the billing header and the
   identity prefix are prepended — but on the adapter path those two blocks are no longer the plugin's to withhold,
-  because the package composes them. The lean-system-prompt gate in `buildAdapterTransport` (in `lib/mimicry/adapter-input.mjs:917-927`) re-expresses the SAME conjunction
+  because the package composes them. The lean-system-prompt gate in `buildAdapterTransport` (in `lib/mimicry/adapter-input.mjs`) re-expresses the SAME conjunction
   (`lean_system_non_main === true && (requestRole === "title" || "small") && !isTitleGenerator`) as S7 + S8.
 
   `isTitleGenerator` is derived in `index.mjs` (before the body transform) from the **pre-transform** body (`_parsedBodyOnce`). By the
@@ -395,7 +395,7 @@ the code.
    `parseBuiltClaudeCodeRequest`/`buildClaudeCodeRequest` fall back to when a caller omits `profile` entirely, and
    this plugin never omits it. If the CHANGELOG names a new client profile you want the plugin to actually emulate:
    - no version literal needs editing. `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT`
-     (`lib/mimicry/adapter-input.mjs:269-270`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
+     (in `lib/mimicry/adapter-input.mjs`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
      they follow the profile the seam binds rather than being re-typed — `test/conformance/version-literals-retired.test.mjs`
      enforces that. What DOES need a decision is the `WIRE_PROFILE` binding itself: it names an explicit profile
      export (currently `CLAUDE_CODE_2_1_280_PROFILE`), so moving to a newer client is an intentional one-line change

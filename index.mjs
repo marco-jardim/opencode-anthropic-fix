@@ -3,7 +3,12 @@ import { stdin, stdout } from "node:process";
 import { randomBytes, randomUUID, createHash as createHashCrypto } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { AccountManager, RATE_LIMIT_KEY_FAST, warnOnEphemeralTokenRotation } from "./lib/accounts.mjs";
+import {
+  AccountManager,
+  RATE_LIMIT_KEY_FAST,
+  isBetaRetryAccountUsable,
+  warnOnEphemeralTokenRotation,
+} from "./lib/accounts.mjs";
 import {
   authorize as oauthAuthorize,
   exchange as oauthExchange,
@@ -2613,9 +2618,14 @@ export async function AnthropicAuthPlugin({ client }) {
               // names the host's @ai-sdk/anthropic version, which decides
               // whether the L5 host-compat stream shim must run.
               const hostCompatShim = shouldApplyHostCompatShim(getIncomingHeader(input, requestInit, "user-agent"));
-              /** @param {{blockTypeFallbacks: number, deltasDropped: number, eventsDropped: number}} shimStats */
+              /** @param {{blockTypeFallbacks: number, deltasDropped: number, eventsDropped: number, dryRun?: boolean}} shimStats */
               const onHostCompatShim = (shimStats) =>
-                debugLog("host-compat shim rewrote the response stream", shimStats);
+                shimStats.dryRun
+                  ? debugLog(
+                      "host-compat shim disabled for this host SDK version, but would have rewritten the response stream (dry run) — allowlists may need re-extracting",
+                      shimStats,
+                    )
+                  : debugLog("host-compat shim rewrote the response stream", shimStats);
               let showUsageToast;
               try {
                 showUsageToast = new URL(requestUrl).pathname === "/v1/messages" && requestMethod === "POST";
@@ -2734,15 +2744,16 @@ export async function AnthropicAuthPlugin({ client }) {
               let betaRetryAccount = null;
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account — a beta-rejection retry stays on the rejecting
-                // account; otherwise use the pinned account on the first attempt.
+                // account (QA fix L5: only if it's still enabled and still
+                // tracked by the account manager — see isBetaRetryAccountUsable);
+                // otherwise use the pinned account on the first attempt.
                 const _betaRetryAccount = betaRetryAccount;
                 betaRetryAccount = null;
-                const account =
-                  _betaRetryAccount && !transientRefreshSkips.has(_betaRetryAccount.index)
-                    ? _betaRetryAccount
-                    : attempt === 0 && pinnedAccount && !transientRefreshSkips.has(pinnedAccount.index)
-                      ? pinnedAccount
-                      : accountManager.getCurrentAccount(transientRefreshSkips);
+                const account = isBetaRetryAccountUsable(_betaRetryAccount, accountManager, transientRefreshSkips)
+                  ? _betaRetryAccount
+                  : attempt === 0 && pinnedAccount && !transientRefreshSkips.has(pinnedAccount.index)
+                    ? pinnedAccount
+                    : accountManager.getCurrentAccount(transientRefreshSkips);
 
                 // Toast account usage on first use and whenever the account changes
                 if (showUsageToast && account && accountManager) {
@@ -6236,7 +6247,7 @@ function transformRequestUrl(input, emulateSignature = true) {
  * @param {object} [hostCompat] - L5 host-compat shim wiring.
  * @param {boolean} [hostCompat.hostCompatShim] - Run the shim (see
  *   `shouldApplyHostCompatShim`); defaults to on.
- * @param {((stats: {blockTypeFallbacks: number, deltasDropped: number, eventsDropped: number}) => void) | null} [hostCompat.onHostCompatShim]
+ * @param {((stats: {blockTypeFallbacks: number, deltasDropped: number, eventsDropped: number, dryRun?: boolean}) => void) | null} [hostCompat.onHostCompatShim]
  * @returns {Response}
  */
 function transformResponse(
@@ -6262,6 +6273,13 @@ function transformResponse(
 
   // Inject cache transparency headers (session-level, available before stream completes).
   const responseHeaders = new Headers(response.headers);
+  // QA fix L3: undici already decoded `response.body` (e.g. gzip was
+  // transparently inflated) before it ever reached createTransformedSSEStream,
+  // so a Content-Length/Content-Encoding copied from the upstream response
+  // describes the ORIGINAL (possibly compressed) wire bytes, not the stream
+  // this Response actually serves — forwarding either would lie to the host.
+  responseHeaders.delete("content-length");
+  responseHeaders.delete("content-encoding");
   responseHeaders.set("x-opencode-cache-hit-rate", String(Math.round(getAverageCacheHitRate() * 1000) / 1000));
   responseHeaders.set("x-opencode-cache-read-total", String(sessionMetrics.totalCacheRead));
   responseHeaders.set("x-opencode-session-cost", String(Math.round(sessionMetrics.sessionCostUsd * 10000) / 10000));

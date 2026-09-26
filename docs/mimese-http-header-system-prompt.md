@@ -299,14 +299,14 @@ last **user**-message block. This guard is model-agnostic but is what makes Opus
 > superseded on the adapter path: this plugin's session retry latch evicts the beta via the package's
 > `suppressBetas` seam when the API's invalid-beta message names it, rather than by clearing a plugin-local flag —
 > and unlike the description below, it is **not** an indefinite session-long suppression. It expires after a fixed
-> 5-minute TTL (`SESSION_REJECTED_BETA_TTL_MS`, `index.mjs` line 312) and is keyed **per account**
+> 5-minute TTL (`SESSION_REJECTED_BETA_TTL_MS` in `index.mjs`) and is keyed **per account**
 > (`sentBetaLatchKey`), so a rejection on one account never suppresses the beta for another. It never latches
 > `oauth-2025-04-20` or the Claude Code identity beta (`UNSUPPRESSIBLE_BETAS`), never latches a beta whose presence
 > is coupled to a request-body field — e.g. `thinking-display-updates-2026-08-18`, `context-management-2025-06-27`,
 > `effort-2025-11-24`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01` (`BODY_COUPLED_BETAS`) —
 > `cache-diagnosis-2026-04-07` has no such coupled field, so it stays eligible, and it is never written for a
 > `/v1/messages/count_tokens` request, since that surface has no `suppressBetas` input to receive it
-> (`index.mjs`'s `!_isCountTokens` gate around line 3787). If the very next retry fails the same way, the
+> (`index.mjs`'s `!_isCountTokens` gate, in `AnthropicAuthPlugin`'s fetch interceptor). If the very next retry fails the same way, the
 > just-latched entries are dropped immediately rather than kept for the rest of the 5-minute window.
 
 - Flag constant: `SeH = "cache-diagnosis-2026-04-07"`.
@@ -664,9 +664,9 @@ The dead branch, for reference:
 > beta set from the genuine 2.1.280 client's own tables. `buildAnthropicBetaHeader` is reachable ONLY through
 > `buildRequestHeaders`, and only for a request made with signature emulation **on** whose pathname the package has
 > no surface for at all — the files and models endpoints, or a gateway-prefixed route (`index.mjs`'s `_useAdapter`
-> gate at lines 3071–3072 admits only `/v1/messages`, `/messages`, `/v1/messages/count_tokens`, `/messages/count_tokens`; anything else
+> gate, in `AnthropicAuthPlugin`'s fetch interceptor, admits only `/v1/messages`, `/messages`, `/v1/messages/count_tokens`, `/messages/count_tokens`; anything else
 > falls through to this forge). A request made with `signatureEnabled=false`
-> never reaches this builder at all: `index.mjs`'s emulation-off branch (around lines 3288–3298) calls
+> never reaches this builder at all: `index.mjs`'s emulation-off branch (also in `AnthropicAuthPlugin`'s fetch interceptor) calls
 > `buildPassthroughHeaders` (`lib/passthrough-headers.mjs`) first and unconditionally, for every pathname, so
 > `requestHeaders` is already set by the time the legacy-forge branch below it would run. **The list below is
 > therefore the frozen legacy forge's behavior on the files/models/gateway-prefixed surface with emulation on, not
@@ -676,7 +676,7 @@ The dead branch, for reference:
 > [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §2–§3. See
 > [`mimicry/wire-compat-divergences.md`](./mimicry/wire-compat-divergences.md) for the measured diff.
 
-The following applies to the **frozen legacy forge** (`buildAnthropicBetaHeader` in `lib/mimicry/headers.mjs:274`). When `signatureEnabled=true`, the legacy implementation may add dynamically:
+The following applies to the **frozen legacy forge** (`buildAnthropicBetaHeader` in `lib/mimicry/headers.mjs`). When `signatureEnabled=true`, the legacy implementation may add dynamically:
 
 - `claude-code-20250219` (not added for Haiku models)
 - `files-api-2025-04-14` (only for `/v1/files` or when body references `file_id`)
@@ -1287,9 +1287,9 @@ over-broadcast fingerprint.
 
 **This config key only affects the frozen legacy forge**, reached only when signature emulation is **on** and the
 request's pathname is outside the adapter's surface — the files/models endpoints, or a gateway-prefixed route (see
-the boundary banner in `lib/mimicry/headers.mjs` and `index.mjs`'s `_useAdapter` gate at lines 3071–3072).
+the boundary banner in `lib/mimicry/headers.mjs` and `index.mjs`'s `_useAdapter` gate, in `AnthropicAuthPlugin`'s fetch interceptor).
 **Not** on `signature_emulation: false`: that path is pure passthrough (`buildPassthroughHeaders` in `lib/passthrough-headers.mjs`, wired in
-`index.mjs` around lines 3288–3298) and never calls the legacy forge, so this config key has no effect there either.
+`index.mjs`'s emulation-off branch, also in `AnthropicAuthPlugin`'s fetch interceptor) and never calls the legacy forge, so this config key has no effect there either.
 On the path where the forge does run, when `redact_thinking` is true (the default), it adds
 `redact-thinking-2026-02-12` to the beta header. The API returns `redacted_thinking` blocks instead of thinking
 summaries, reducing token overhead on subsequent turns.
