@@ -296,8 +296,18 @@ last **user**-message block. This guard is model-agnostic but is what makes Opus
 > `cache-diagnosis-2026-04-07` is **default-on** for the adapter/production `/v1/messages` turn — a data change from
 > 2.1.233, where the plugin's pinned policy kept it `false`. See
 > [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §3. The retry-latch behavior described below is
-> unchanged in spirit: this plugin's session retry latch evicts the beta via the package's `suppressBetas` seam when
-> the API rejects it, rather than by clearing a plugin-local flag.
+> superseded on the adapter path: this plugin's session retry latch evicts the beta via the package's
+> `suppressBetas` seam when the API's invalid-beta message names it, rather than by clearing a plugin-local flag —
+> and unlike the description below, it is **not** an indefinite session-long suppression. It expires after a fixed
+> 5-minute TTL (`SESSION_REJECTED_BETA_TTL_MS`, `index.mjs` line 312) and is keyed **per account**
+> (`sentBetaLatchKey`), so a rejection on one account never suppresses the beta for another. It never latches
+> `oauth-2025-04-20` or the Claude Code identity beta (`UNSUPPRESSIBLE_BETAS`), never latches a beta whose presence
+> is coupled to a request-body field — e.g. `thinking-display-updates-2026-08-18`, `context-management-2025-06-27`,
+> `effort-2025-11-24`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01` (`BODY_COUPLED_BETAS`) —
+> `cache-diagnosis-2026-04-07` has no such coupled field, so it stays eligible, and it is never written for a
+> `/v1/messages/count_tokens` request, since that surface has no `suppressBetas` input to receive it
+> (`index.mjs`'s `!_isCountTokens` gate around line 3787). If the very next retry fails the same way, the
+> just-latched entries are dropped immediately rather than kept for the rest of the 5-minute window.
 
 - Flag constant: `SeH = "cache-diagnosis-2026-04-07"`.
 - NOT always-on **in the 2.1.119 binary this section was decompiled from**. Gated by GrowthBook flag
@@ -309,9 +319,18 @@ last **user**-message block. This guard is model-agnostic but is what makes Opus
 - When active, the request builder appends `cache-diagnosis-2026-04-07` to `anthropic-beta`
   and injects `{ diagnostics: { previous_message_id: <id> } }` only when all of the following
   hold: beta active, previous_message_id known, conversation is live, and not in zero-shot mode.
-- Retry path: if the server returns HTTP 400 and the response body mentions both
-  `cache-diagnosis-2026-04-07` and `anthropic-beta`, the latch is cleared and the request
-  is retried without the beta.
+- Retry path (2.1.119-era description; **superseded on the 2.1.280 adapter path**, see the note above): a
+  generic "response body mentions both `cache-diagnosis-2026-04-07` and `anthropic-beta`" match is not
+  what drives a retry today. The plugin only recognizes the API's specific invalid-beta message —
+  ``Unexpected value(s) `X` for the `anthropic-beta` header`` — via `parseRejectedBetaNames`
+  (`lib/mimicry/adapter-input.mjs`); any other wording yields no names and drives no retry.
+  `selectLatchableRejectedBetas` additionally caps the match at `MAX_LATCHABLE_REJECTED_BETAS` (2)
+  suppressible identifiers — more than that looks like the error echoed the whole header back, and both
+  its `namedSent` and `latchable` results come back empty rather than latching from it. Separately,
+  `customBetas` rejection handling (`sessionRejectedBetas`) still falls back to a body-mentions match
+  for a **custom** beta when the invalid-beta message names nothing parsable, but that fallback only
+  ever filters `customBetas`; it does not feed `suppressBetas` and so cannot suppress a package-composed
+  beta like this one.
 - Plugin support: listed in `EXPERIMENTAL_BETA_FLAGS`; shortcuts `cache-diagnosis` and
   `cache-diag` are registered in `BETA_SHORTCUTS`. NOT included in any always-on header list.
 
@@ -643,10 +662,16 @@ The dead branch, for reference:
 > Both routes are composed by the shared package — `buildClaudeCodeRequest` and
 > `buildClaudeCodeCountTokensRequest` respectively, wrapped by `lib/mimicry/wire-compat.mjs` — which derives its own
 > beta set from the genuine 2.1.280 client's own tables. `buildAnthropicBetaHeader` is reachable ONLY through
-> `buildRequestHeaders` for a request the package has no surface for at all: the files and models endpoints, a
-> gateway-prefixed route, or any request made with `signatureEnabled=false` (see the boundary banner at the top of
-> `lib/mimicry/headers.mjs`). **The list below is therefore the frozen legacy forge's behavior, not the production
-> `/v1/messages` wire shape.** For what the adapter path actually emits under the pinned 2.1.280 profile — in
+> `buildRequestHeaders`, and only for a request made with signature emulation **on** whose pathname the package has
+> no surface for at all — the files and models endpoints, or a gateway-prefixed route (`index.mjs`'s `_useAdapter`
+> gate admits only `/v1/messages`, `/messages`, `/v1/messages/count_tokens`, `/messages/count_tokens`; anything else
+> falls through to this forge, around `index.mjs` lines 3281–3297). A request made with `signatureEnabled=false`
+> never reaches this builder at all: `index.mjs`'s emulation-off branch (around lines 3268–3278) calls
+> `buildPassthroughHeaders` (`lib/passthrough-headers.mjs`) first and unconditionally, for every pathname, so
+> `requestHeaders` is already set by the time the legacy-forge branch below it would run. **The list below is
+> therefore the frozen legacy forge's behavior on the files/models/gateway-prefixed surface with emulation on, not
+> the production `/v1/messages` wire shape and not the emulation-off passthrough shape either.** For what the
+> adapter path actually emits under the pinned 2.1.280 profile — in
 > particular for `redact-thinking-2026-02-12` and `cache-diagnosis-2026-04-07` — see §11.3 below and
 > [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §2–§3. See
 > [`mimicry/wire-compat-divergences.md`](./mimicry/wire-compat-divergences.md) for the measured diff.
@@ -697,8 +722,10 @@ Provider filter:
 ### 5.2 Claude Code reference beta list (consolidated)
 
 > This section (and §5.3 below) still describes the **frozen legacy forge** — see the note under §5.1. Every
-> `redact-thinking-2026-02-12` bullet below is that forge's `signatureEnabled=true` default, reachable today only for
-> files/models/gateway-prefixed routes or `signatureEnabled=false`. The production `/v1/messages` turn's
+> `redact-thinking-2026-02-12` bullet below is that forge's `signatureEnabled=true` default, reachable today only when
+> signature emulation is **on** and the pathname is outside the adapter's surface (the files/models endpoints, or a
+> gateway-prefixed route) — never with `signatureEnabled=false`, which is pure passthrough
+> (`lib/passthrough-headers.mjs`) and never reaches this forge. The production `/v1/messages` turn's
 > `redact-thinking-2026-02-12` decision belongs entirely to the shared package under the pinned 2.1.280 profile; see
 > §11.3 and [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §2.
 
@@ -1258,10 +1285,14 @@ over-broadcast fingerprint.
 
 ### 11.3 Redact Thinking
 
-**This config key only affects the frozen legacy forge** (`signature_emulation: false`, or the files/models/gateway
-routes the adapter has no surface for — see the boundary banner in `lib/mimicry/headers.mjs`). On that path, when
-`redact_thinking` is true (the default), it adds `redact-thinking-2026-02-12` to the beta header. The API returns
-`redacted_thinking` blocks instead of thinking summaries, reducing token overhead on subsequent turns.
+**This config key only affects the frozen legacy forge**, reached only when signature emulation is **on** and the
+request's pathname is outside the adapter's surface — the files/models endpoints, or a gateway-prefixed route (see
+the boundary banner in `lib/mimicry/headers.mjs` and `index.mjs`'s `_useAdapter` gate around lines 3050–3052).
+**Not** on `signature_emulation: false`: that path is pure passthrough (`lib/passthrough-headers.mjs`, wired in
+`index.mjs` around lines 3268–3278) and never calls the legacy forge, so this config key has no effect there either.
+On the path where the forge does run, when `redact_thinking` is true (the default), it adds
+`redact-thinking-2026-02-12` to the beta header. The API returns `redacted_thinking` blocks instead of thinking
+summaries, reducing token overhead on subsequent turns.
 
 **Default: on** (matches CC 2.1.150). Opt out via `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`.
 

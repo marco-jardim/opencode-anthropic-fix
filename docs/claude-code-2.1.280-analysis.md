@@ -173,10 +173,24 @@ without the second site ever firing, and `redact-thinking-2026-02-12` can reach 
 and `index.mjs`, which finds no reference to that config key outside `lib/config.mjs` (the schema) and
 `lib/mimicry/headers.mjs` (the one consumer). The adapter path that composes the default,
 signature-emulation-on `/v1/messages` turn never reads it: the wire-compat package's own guards above
-decide the outcome unconditionally. A user who runs `/anthropic set redact-thinking off` today changes
-nothing about the beta on their normal turns; it only affects the frozen `signature_emulation: false`
-compatibility path. See `docs/mimese-http-header-system-prompt.md` §11.3 for where this is now stated
-plainly.
+decide the outcome unconditionally.
+
+That legacy forge is reached only when `_emulationEnabled` is `true` **and** the request's pathname is
+outside the adapter's own surface — `index.mjs` gates `_useAdapter` on
+`_emulationEnabled && (ADAPTER_MESSAGES_PATHNAMES.has(pathname) || ADAPTER_COUNT_TOKENS_PATHNAMES.has(pathname))`
+(`index.mjs` around lines 3050–3052), and those two sets hold exactly `/v1/messages`, `/messages`,
+`/v1/messages/count_tokens`, `/messages/count_tokens` (`lib/mimicry/adapter-input.mjs` lines 68 and 71).
+So the forge fires only for the files endpoint, the models endpoint, or a gateway-prefixed route whose
+pathname does not match one of those four strings — never for the default `/v1/messages` turn.
+Signature emulation **off** does not reach the forge either: `index.mjs`'s
+`if (!requestHeaders && !_emulationEnabled)` branch (around lines 3268–3278) runs first and calls
+`buildPassthroughHeaders` (`lib/passthrough-headers.mjs`), which forwards the host's headers verbatim
+plus the OAuth auth envelope and contains no redact-thinking logic at all; the legacy-forge branch right
+below it (around lines 3281–3297) only runs when `requestHeaders` is still unset, which the
+emulation-off branch has already prevented. A user who runs `/anthropic set redact-thinking off` today
+changes nothing about the beta on their normal `/v1/messages` turns; it only affects the frozen legacy
+forge on the files/models/gateway-prefixed surface reached with signature emulation **on**. See
+`docs/mimese-http-header-system-prompt.md` §11.3 for where this is now stated plainly.
 
 ---
 
@@ -199,7 +213,26 @@ one seam that can reach a beta the package composes itself (see S6 in
 `docs/mimicry/wire-compat-divergences.md`). Because `cacheDiagnosisEnabled` now defaults `true`, a
 rejection of `cache-diagnosis-2026-04-07` — which the plugin previously could not provoke, since the
 legacy forge only ever added the header when the operator opted in — becomes newly reachable, and the
-latch is the mechanism documented to evict it for the rest of the session.
+latch is the mechanism that evicts it.
+
+That latch is **not** "for the rest of the session": it expires after a fixed 5-minute TTL
+(`SESSION_REJECTED_BETA_TTL_MS`, `index.mjs` line 312), so a request more than 5 minutes after the
+rejection re-admits the beta rather than suppressing it indefinitely. It is also keyed **per account**
+(`sentBetaLatchKey`, `sentBetaSuppressionsByAccount`), so a rejection observed on one account never
+suppresses the beta for a different account in the same rotation. Two categories of beta are never
+latched at all: `oauth-2025-04-20` and the Claude Code identity beta (`UNSUPPRESSIBLE_BETAS`), and every
+beta whose presence is coupled to a request-body field — `thinking-display-updates-2026-08-18`,
+`context-management-2025-06-27`, `effort-2025-11-24`, `structured-outputs-2025-12-15`,
+`fast-mode-2026-02-01`, and others in `BODY_COUPLED_BETAS` — because suppressing only the header would
+leave the paired body field on a request that no longer carries the beta. `cache-diagnosis-2026-04-07`
+carries no such paired field, so it remains eligible. The latch is also never written for a
+`/v1/messages/count_tokens` request: `index.mjs` only computes and records `_sentLatchableBetas` when
+`_betaRejectionSignal && _useAdapter && !_isCountTokens` (the `_isCountTokens`-gated block that calls
+`selectLatchableRejectedBetas`, currently line 3788), since that surface has no `suppressBetas` input for
+a latch to reach. Finally, if the very next retry on the **same account** (`pendingSentBetaLatch`,
+checked against `sentBetaLatchKey(account)`) fails the same way, the entries just latched are dropped
+immediately rather than kept for the rest of the 5-minute window (the `_latchUnderTest` block, currently
+`index.mjs` lines 3761–3773).
 
 ---
 
@@ -360,7 +393,7 @@ this plugin now depends on, so it is recorded here alongside the profile it trav
 
 ---
 
-## 11. Open questions
+## 11. Open questions / known limitations
 
 - **Was `cacheDiagnosisEnabled: false` ever correct for 2.1.233?** The library states plainly that it
   cannot settle this without acquiring the 2.1.233 binary and transcribing `ppr()` from it directly —
@@ -383,3 +416,27 @@ this plugin now depends on, so it is recorded here alongside the profile it trav
   model string; the remote served-capability override layer (`np`/`gq`); and the exact
   presence-vs-position rule for Haiku's `isAgenticQuery` re-push of `claude-code-20250219`. Each is
   recorded at its point of use in the library's own §13 port table. `[library-decision]`
+- **Grapheme truncation follows the runtime's own ICU, not a pinned one.** `lib/unicode-text.mjs`'s
+  `truncateGraphemes` — the helper the rolling summarizer uses to cut text without splitting a
+  surrogate pair or a grapheme cluster — draws its boundaries from `new Intl.Segmenter(undefined, {
+granularity: "grapheme" })`, i.e. whichever Unicode-segmentation tables the host JS engine ships.
+  opencode itself runs on Bun (JavaScriptCore), while this plugin's test suite runs on Node (V8); the
+  two engines' bundled ICU/segmentation data can disagree on where a cluster boundary falls for newer
+  emoji ZWJ sequences and some Indic/complex-script sequences. A test asserting an exact truncated
+  byte sequence under Node is therefore not a guarantee that a live opencode session under Bun cuts a
+  rolling-summary section at the same code-unit offset — this is a property of the runtime boundary,
+  not a bug in `truncateGraphemes` itself, and nothing in this codebase pins a specific segmentation
+  table to close it.
+- **Pre-existing `formatTemplate` edge cases, left as-is.** `lib/rolling-summarizer.mjs`'s
+  `formatTemplate` has three sharp edges this pass did not change: (1) when `maxChars` does not exceed
+  the closing tag's own length (`"\n</session-summary>".length`, 19), the function returns that bare
+  closing tag as `out` — which is itself longer than `maxChars`, so the "hard cap" is not actually
+  enforced below that threshold; (2) a section can shrink to `""` when its very first grapheme cluster
+  is wider, in UTF-16 code units, than the truncation target computed for it — `truncateGraphemes`'s
+  documented contract for an over-wide leading cluster — which a single complex ZWJ emoji sequence at
+  the start of a summarized section can trigger even though the target is floored at
+  `EMPTY_SECTION.length` (6, for the literal `"(none)"`); (3) `render()`'s
+  `TEMPLATE.replace("{topics}", sec.topics).replace(...)` chain passes each section as a plain string
+  replacement, so a summarized section that itself contains a literal `$&`, `$$`, `` $` ``, `$'`, or
+  `$<name>` is silently reinterpreted by `String.prototype.replace`'s special-replacement-pattern
+  syntax instead of being inserted verbatim.
