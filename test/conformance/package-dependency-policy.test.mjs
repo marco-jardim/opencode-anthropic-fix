@@ -32,13 +32,19 @@ const releaseTarball =
  * A dependency specifier is acceptable only when a RESOLVED INSTALL of it is
  * reproducible and integrity-checked. Two shapes qualify:
  *
- *   * the literal `latest` dist-tag — the wire shape of this plugin is the
- *     package's own `DEFAULT_PROFILE`, so tracking `latest` is how the plugin
- *     inherits a newer genuine-client profile without a code change. The tag
- *     itself is mutable, which is precisely why reproducibility is delegated to
- *     `package-lock.json`: the lock records the resolved version, the registry
- *     tarball URL, and its `sha512` integrity, and `npm ci` installs exactly
- *     that. Moving the tag therefore still requires a reviewed lockfile diff.
+ *   * the literal `latest` dist-tag — `lib/mimicry/wire-compat.mjs` passes
+ *     `WIRE_PROFILE` as an explicit `profile` argument to every one of the
+ *     package's request-building entry points it calls, so the wire shape
+ *     (the emulated client profile) does NOT move on a bare `npm update`
+ *     anymore; moving it is a deliberate one-line rebind of `WIRE_PROFILE` at
+ *     that seam (see docs/shared-package-provenance.md, "Why the specifier is
+ *     the `latest` dist-tag"). Tracking `latest` is how the plugin inherits
+ *     library fixes and additive capabilities without a `package.json` edit.
+ *     The tag itself is mutable, which is precisely why reproducibility is
+ *     delegated to `package-lock.json`: the lock records the resolved
+ *     version, the registry tarball URL, and its `sha512` integrity, and
+ *     `npm ci` installs exactly that. Moving the tag therefore still requires
+ *     a reviewed lockfile diff.
  *   * an exact registry version — retained because emergency rollback pins one
  *     (see docs/shared-package-provenance.md).
  *

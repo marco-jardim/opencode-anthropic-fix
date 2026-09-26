@@ -164,17 +164,17 @@ The bound is the model **default**, not its upper limit. Upstream only ever comp
 Every entry here was a capability the plugin lost — or would have lost — when the adapter took over request
 construction. Under Option A each was answered with an opt-in seam in the package, not by degrading the plugin.
 
-| Seam | Field                                | Set in                                             | What it preserves                                                                                                                                                          |
-| ---- | ------------------------------------ | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| S1   | `additionalBetas`                    | `adapter-input.mjs:347` (`buildAdditionalBetas`)   | Rows 1–3, `custom_betas` (shortcut-expanded), files-api, structured-outputs, host-SDK betas rescued from the dropped `anthropic-beta` header                               |
-| S2   | `betaOverrides.use1MContext`         | `adapter-input.mjs:554`                            | The plugin's `hasOneMillionContext` rule instead of the package's `/\[1m\]/iu` default                                                                                     |
-| S3   | `cacheControl.suppressIdentityBlock` | **not used by the plugin**                         | Would drop the identity block's `cache_control` marker and keep the block. See the name-collision note below.                                                              |
-| S4   | `metadataOverrides`                  | `adapter-input.mjs:444` (`buildMetadataOverrides`) | `OPENCODE_ANTHROPIC_SIGNATURE_USER_ID` and `CLAUDE_CODE_EXTRA_METADATA`                                                                                                    |
-| S5   | `extraHeaderPolicy`                  | `adapter-input.mjs:612` (`"dropConflicting"`)      | Host headers reaching the wire without overwriting canonical ones                                                                                                          |
-| S6   | `suppressBetas`                      | `adapter-input.mjs:409` (`buildSuppressBetas`)     | Round-robin's `prompt-caching-scope-2026-01-05` suppression and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` — the only seam that can reach a beta the package composes itself |
-| S7   | `suppressBillingBlock`               | `adapter-input.mjs:624`, `:644`                    | `CLAUDE_CODE_ATTRIBUTION_HEADER` opt-out, and half of the lean-system-prompt gate                                                                                          |
-| S8   | `suppressIdentityBlock` (**root**)   | `adapter-input.mjs:648`                            | The other half of the lean-system-prompt gate                                                                                                                              |
-| S9   | `preserveThinkingBlockCacheControl`  | `wire-compat.mjs:242` (**unconditional**)          | Reasoning blocks that arrive carrying `cache_control` — see below                                                                                                          |
+| Seam | Field                                | Set in                                             | What it preserves                                                                                                                                                                                                                                                                             |
+| ---- | ------------------------------------ | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1   | `additionalBetas`                    | `adapter-input.mjs:347` (`buildAdditionalBetas`)   | Rows 1–3, `custom_betas` (shortcut-expanded), files-api, structured-outputs, host-SDK betas rescued from the dropped `anthropic-beta` header                                                                                                                                                  |
+| S2   | `betaOverrides.use1MContext`         | `adapter-input.mjs:554`                            | The plugin's `hasOneMillionContext` rule instead of the package's `/\[1m\]/iu` default                                                                                                                                                                                                        |
+| S3   | `cacheControl.suppressIdentityBlock` | **not used by the plugin**                         | Would drop the identity block's `cache_control` marker and keep the block. See the name-collision note below.                                                                                                                                                                                 |
+| S4   | `metadataOverrides`                  | `adapter-input.mjs:444` (`buildMetadataOverrides`) | `OPENCODE_ANTHROPIC_SIGNATURE_USER_ID` and `CLAUDE_CODE_EXTRA_METADATA`                                                                                                                                                                                                                       |
+| S5   | `extraHeaderPolicy`                  | `adapter-input.mjs:612` (`"dropConflicting"`)      | Host headers reaching the wire without overwriting canonical ones                                                                                                                                                                                                                             |
+| S6   | `suppressBetas`                      | `adapter-input.mjs` (`buildSuppressBetas`)         | Round-robin's `prompt-caching-scope-2026-01-05` suppression, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`, and the per-account rejected-beta latch (`index.mjs`'s `sentBetaSuppressionsByAccount`, fed through `rejectedBetas`) — the only seam that can reach a beta the package composes itself |
+| S7   | `suppressBillingBlock`               | `adapter-input.mjs:624`, `:644`                    | `CLAUDE_CODE_ATTRIBUTION_HEADER` opt-out, and half of the lean-system-prompt gate                                                                                                                                                                                                             |
+| S8   | `suppressIdentityBlock` (**root**)   | `adapter-input.mjs:648`                            | The other half of the lean-system-prompt gate                                                                                                                                                                                                                                                 |
+| S9   | `preserveThinkingBlockCacheControl`  | `wire-compat.mjs:242` (**unconditional**)          | Reasoning blocks that arrive carrying `cache_control` — see below                                                                                                                                                                                                                             |
 
 Two more seams are used outside this table: `capabilities` (`adapter-input.mjs:662`) downgrades `adaptiveThinking` so
 `OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING` is not a no-op, and `profileOverride` (`adapter-input.mjs:197`) carries
@@ -392,14 +392,23 @@ the code.
      version and must be edited to match; `test/conformance/package-dependency-policy.test.mjs` fails if it does
      not).
 2. Check whether the package's `DEFAULT_PROFILE` moved (its CHANGELOG says so, and
-   `node_modules/@tormentalabs/claude-code-wire-compat/src/build-request.ts` is the seam). If it did:
+   `node_modules/@tormentalabs/claude-code-wire-compat/src/build-request.ts` is the seam). `buildWireCompatibleRequest`
+   and `buildWireCompatibleCountTokensRequest` (`lib/mimicry/wire-compat.mjs`) pass `WIRE_PROFILE` as an EXPLICIT
+   `profile` argument to `buildClaudeCodeRequest` / `buildClaudeCodeCountTokensRequest`, so a moved `DEFAULT_PROFILE`
+   by itself changes nothing about what this plugin composes — the package's default only matters for what
+   `parseBuiltClaudeCodeRequest`/`buildClaudeCodeRequest` fall back to when a caller omits `profile` entirely, and
+   this plugin never omits it. If the CHANGELOG names a new client profile you want the plugin to actually emulate:
    - no version literal needs editing. `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT`
      (`lib/mimicry/adapter-input.mjs:269-270`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
      they follow the profile the seam binds rather than being re-typed — `test/conformance/version-literals-retired.test.mjs`
      enforces that. What DOES need a decision is the `WIRE_PROFILE` binding itself: it names an explicit profile
      export (currently `CLAUDE_CODE_2_1_280_PROFILE`), so moving to a newer client is an intentional one-line change
-     at the seam, not a side effect of the bump. Leaving it behind the package's `DEFAULT_PROFILE` does not fail
-     closed — it makes every request carry a redundant `profileOverride`. (The old
+     at the seam — import the new profile singleton and rebind `WIRE_PROFILE` to it — not a side effect of the bump.
+     Leaving `WIRE_PROFILE` behind a newer `DEFAULT_PROFILE` does not fail closed, but it no longer silently
+     migrates the wire either (that was the failure mode before the request path started passing `profile`
+     explicitly — see docs/shared-package-provenance.md, "Why the specifier is the `latest` dist-tag"): every
+     request keeps composing under the OLD, pinned profile indefinitely, so the plugin simply does not gain
+     whatever the newer client profile would have changed until someone deliberately does the rebind. (The old
      `FALLBACK_CLAUDE_CLI_VERSION` / `CLI_TO_SDK_VERSION` literals lived in `lib/request-headers.mjs`, which this
      migration deleted.)
    - copy the package's analysis doc for the new client version into `docs/claude-code-<version>-analysis.md`, which

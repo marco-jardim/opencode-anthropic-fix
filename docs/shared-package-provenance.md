@@ -31,11 +31,22 @@ npm ls @tormentalabs/claude-code-wire-compat
 
 From plugin 2.0.0 until this port, the dependency was an exact pin (`0.5.0`), suspending the `latest`
 policy described in the next section. `0.6.0` of the package switched its `DEFAULT_PROFILE` to
-Claude Code 2.1.280; the plugin never passes a `profile` argument, so installing `0.6.0` unported
-would have moved its wire to 2.1.280 before the plugin was ready for it — against `0.6.0` the plugin's
-own suite failed 48 tests (user agent and billing `cc_version` reporting 2.1.280, thinking going out as
-`display: "updates"`, the redact-thinking beta absent, the cache-diagnosis beta no longer strippable by
-the retry latch).
+Claude Code 2.1.280; at the time, the plugin did not pass an explicit `profile` argument to any of the
+package's three request-building entry points, so installing `0.6.0` unported would have moved its wire
+to 2.1.280 before the plugin was ready for it — against `0.6.0` the plugin's own suite failed 48 tests
+(user agent and billing `cc_version` reporting 2.1.280, thinking going out as `display: "updates"`, the
+redact-thinking beta absent, the cache-diagnosis beta no longer strippable by the plugin's THEN-only
+retry latch). At the time that latch only filtered `custom_betas` (today's `sessionRejectedBetas` in
+`index.mjs`), and cache-diagnosis is a beta the 2.1.280 package composes BY DEFAULT — not a custom beta a
+user configured — so that latch had no way to reach it. The adapter migration closed exactly that gap
+with a second, per-account, TTL'd latch that CAN reach a package-composed beta: `index.mjs`'s
+`sentBetaSuppressionsByAccount`, fed by the API's own "Unexpected value(s)" rejection message
+(`adapter-input.mjs`'s `parseRejectedBetaNames` / `selectLatchableRejectedBetas`) and wired to the package
+through `buildSuppressBetas`'s `rejectedBetas` argument (see
+[`wire-compat-divergences.md`](mimicry/wire-compat-divergences.md)'s S6 row). That omission is exactly
+what "Why the specifier is the `latest` dist-tag" below now closes: the plugin pins `WIRE_PROFILE`
+explicitly on every entry point, so a repeat of the PROFILE half of this scenario can no longer happen
+merely by tracking `latest`.
 
 The plugin's wire port to 2.1.280 is what this pin was waiting for, and it has landed: `WIRE_PROFILE` in
 [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs) now binds `CLAUDE_CODE_2_1_280_PROFILE`, and the
@@ -47,20 +58,37 @@ document keeps the `0.5.0` pin on record.
 
 ## Why the specifier is the `latest` dist-tag
 
-The plugin does not compose the wire request itself; it delegates to the package and **omits the
-`profile` argument**, which means it inherits whatever the package declares as its `DEFAULT_PROFILE`.
-That default is the package's statement of "the newest genuine Claude Code client we have analysed
-and transcribed" — `claude-code-2.1.280-sdk-0.112.1` as of the version this lock resolves. Tracking
-`latest` is therefore not laziness about versioning; it is the mechanism by which a newly analysed
-client profile reaches this plugin's wire without a code change to the composition path.
+The plugin delegates composition of the wire request to the package, but it does **not** let the
+emulated client profile float with the dependency. `buildWireCompatibleRequest` and
+`buildWireCompatibleCountTokensRequest` ([`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs)) pass
+`WIRE_PROFILE` as an **explicit `profile` argument** to `buildClaudeCodeRequest` /
+`buildClaudeCodeCountTokensRequest`, rather than omitting it and inheriting whatever the installed
+package declares as its `DEFAULT_PROFILE`. The package's own `0.6.0` CHANGELOG entry states why: "the
+pin has to be passed on every call to each of the three entry points that read the default seam —
+pinning the builders alone is not enough." `WIRE_PROFILE` currently binds `CLAUDE_CODE_2_1_280_PROFILE`
+— `claude-code-2.1.280-sdk-0.112.1`, the package's statement of "the newest genuine Claude Code client
+we have analysed and transcribed" as of the version this lock resolves — but that binding does not move
+on its own.
 
-Two constants shadow that default and must move with it —
+Tracking `latest` is therefore about a different axis than the wire profile: library fixes, new opt-in
+fields (`extraHeaderPolicy`, the model-query exports, the public beta registries) and other additive
+capabilities reach the plugin without a `package.json` edit, exactly as a `latest` dist-tag promises.
+What it can no longer do silently is move the WIRE — the bytes this plugin actually puts on the network.
+A newly analysed client profile reaches this plugin's wire only when `WIRE_PROFILE` is deliberately
+repointed at the newly exported profile singleton: a one-line, reviewed change at the single seam in
+`wire-compat.mjs`, not a side effect of `npm update`. Before this was enforced, `0.6.0` moved
+`DEFAULT_PROFILE` to 2.1.280 in a minor release and broke 48 plugin tests that were still asserting
+2.1.233 bytes (see "The exact `0.5.0` pin has lifted" above) — exactly the failure mode passing `profile`
+explicitly on every entry point exists to close.
+
+Two constants shadow `WIRE_PROFILE` and must move with it —
 `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT` in
-[`adapter-input.mjs`](../lib/mimicry/adapter-input.mjs), both tracking `WIRE_PROFILE.cliVersion` as
-re-exported by [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs). They exist so `resolveProfileOverride` stays
-silent in the common case; if they lag the package, every request starts carrying a redundant profile
-override. The conformance suite fails loudly when they drift, so this is a caught mistake rather than
-a silent one.
+[`adapter-input.mjs`](../lib/mimicry/adapter-input.mjs), both tracking `WIRE_PROFILE.cliVersion` /
+`.userAgent` as re-exported by [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs). They exist so the
+adapter's own field-level `resolveProfileOverride` — a `userAgent`/`cliVersion` patch over whichever
+profile is in force, unrelated to the `profile` argument above — stays silent in the common case; if
+they lag `WIRE_PROFILE`, every request starts carrying a redundant `profileOverride` field. The
+conformance suite fails loudly when they drift, so this is a caught mistake rather than a silent one.
 
 ### Where reproducibility actually lives
 
@@ -155,16 +183,24 @@ reinstall the plugin from the registry, re-resolving `latest` for both the plugi
 next load has the same effect. Neither of these is something this repository's tooling can trigger —
 they run on the machine that installed the plugin, not in this checkout or in CI.
 
-**The discipline this implies.** With `latest`, a `@tormentalabs/claude-code-wire-compat` release that
-changes `DEFAULT_PROFILE` changes this plugin's wire for every consumer who resolves `latest` fresh —
-published npm installs and opencode's own plugin cache alike — without this repository's own gates
-(`check:wire-compat-drift`, the test suite, a human reviewing a lockfile diff) ever seeing it first,
-because none of that runs on the consumer's machine. Such a library release therefore has to be
-coordinated with a plugin port landing first, or close behind — which is exactly why the `0.5.0` pin
-existed from plugin 2.0.0 until this port lifted it (see "The exact `0.5.0` pin has lifted" above). If
-a library release ships a wire-breaking `DEFAULT_PROFILE` move before the plugin is ported to it, the
-lever is the same one-line fix as any other emergency: pin an exact version (see "Emergency rollback of
-the wire shape" below).
+**The discipline this implies.** With `latest`, a `@tormentalabs/claude-code-wire-compat` release still
+reaches every consumer who resolves `latest` fresh — published npm installs and opencode's own plugin
+cache alike — without this repository's own gates (`check:wire-compat-drift`, the test suite, a human
+reviewing a lockfile diff) ever seeing it first, because none of that runs on the consumer's machine.
+Passing `WIRE_PROFILE` explicitly on every entry point (see "Why the specifier is the `latest` dist-tag"
+above) closes the specific failure mode this discipline used to name: a `DEFAULT_PROFILE` move no
+longer changes what any consumer's request looks like on the wire, because the profile a consumer's
+install composes against is the one bound in the plugin SOURCE it installed, not whatever the freshly
+resolved package declares as its default. What tracking `latest` still exposes every such consumer to,
+unreviewed, is everything else the package can change under a fixed profile — validation behaviour
+(`0.7.0`'s widened body-character acceptance is exactly this shape), new required capability keys, error
+codes, and any other byte the profile itself does not pin. A library release of that kind still benefits
+from being coordinated with a plugin release that has actually run its suite against it, which is
+exactly why `check:wire-compat-drift` and the wire-sensitive targeted suites exist — it simply cannot
+silently move the emulated client VERSION the way an unpinned `profile` argument once let it. If a
+library release ships a wire-breaking behavioural change under a fixed profile before the plugin has run
+its suite against it, the lever is the same one-line fix as any other emergency: pin an exact version
+(see "Emergency rollback of the wire shape" below).
 
 ## Emergency rollback of the wire shape
 
