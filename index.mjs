@@ -97,8 +97,13 @@ import {
   isOpus47Model,
   isOpus48Model,
 } from "./lib/mimicry/wire-compat.mjs";
-
-export { isFable5Model, isMythos5Model, isAdaptiveThinkingModel } from "./lib/mimicry/wire-compat.mjs";
+import {
+  createDebugCorrelationId,
+  isDebugSinkEnabled,
+  createDebugRequestDump,
+  createDebugOutgoingHeadersEntry,
+  createDebugResponseHeadersEntry,
+} from "./lib/debug-dump.mjs";
 
 // Max times a single logical request may fall back from fast->standard speed on
 // the same account before giving up the fast attempt entirely. 1 is enough: one
@@ -4718,24 +4723,6 @@ export async function AnthropicAuthPlugin({ client }) {
 /** Module-level config ref for functions outside AnthropicAuthPlugin closure. */
 let _pluginConfig = null;
 
-const _debugSessionId = randomUUID().slice(0, 8);
-let _debugReqSeq = 0;
-
-export function createDebugCorrelationId() {
-  return `${_debugSessionId}-${(++_debugReqSeq).toString(36).padStart(4, "0")}`;
-}
-
-export function isDebugSinkEnabled(config, sink) {
-  return sink === "body" ? config.token_economy?.debug_dump_bodies === true : Boolean(config.debug);
-}
-
-export function createDebugRequestDump(correlationId, timestamp, finalBody) {
-  return {
-    filename: `req-${timestamp}-${correlationId}.json`,
-    content: JSON.stringify({ correlationId, timestamp, bodyRedacted: redactString(finalBody) }),
-  };
-}
-
 async function writeSseCapture(correlationId, buf, truncated) {
   const fs = await import("node:fs");
   const path = await import("node:path");
@@ -4754,23 +4741,6 @@ async function writeSseCapture(correlationId, buf, truncated) {
     path.join(dir, `res-${ts}-${correlationId}.sse`),
     redactString(buf) + (truncated ? "\n[capture truncated at 256KB]" : ""),
   );
-}
-
-export function createDebugOutgoingHeadersEntry(correlationId, timestamp, requestHeaders) {
-  return [
-    `\n=== ${timestamp} | corr=${correlationId} | OUTGOING request headers ===`,
-    JSON.stringify(redactSecrets(requestHeaders), null, 2),
-    "",
-  ].join("\n");
-}
-
-export function createDebugResponseHeadersEntry(correlationId, timestamp, response, debugHeaders) {
-  return [
-    `\n=== ${timestamp} | corr=${correlationId} | status=${response.status} ok=${response.ok} account=${debugHeaders.account} mgr=${debugHeaders.accountManager} ===`,
-    `Rate-limit headers: ${JSON.stringify(debugHeaders.rateLimitHeaders, null, 2)}`,
-    `All headers: ${JSON.stringify(debugHeaders.allHeaders, null, 2)}`,
-    "",
-  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------

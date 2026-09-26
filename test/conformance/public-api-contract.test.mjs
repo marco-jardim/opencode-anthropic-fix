@@ -1,8 +1,11 @@
 /**
- * These model helpers are published API because package.json `main` is
- * `./index.mjs`. This contract freezes their behavior across the upcoming
- * request-construction refactor. Any intentional change to these results is a
- * BREAKING CHANGE requiring a major version decision.
+ * These model helpers are consumed directly from `lib/mimicry/wire-compat.mjs`
+ * (NOT re-exported from `index.mjs` — see
+ * `test/conformance/plugin-entry-exports.test.mjs` for why: `index.mjs` is an
+ * opencode plugin entry module, and opencode's plugin loader calls every one
+ * of its exports as a plugin factory). This contract freezes their behavior
+ * across the upcoming request-construction refactor. Any intentional change
+ * to these results is a BREAKING CHANGE requiring a major version decision.
  *
  * TIGHTENED when the hand-written regexes of `lib/mimicry/models.mjs` were
  * retired in favour of the wire package's model catalogue (see
@@ -23,7 +26,7 @@
  */
 import { describe, it, expect } from "vitest";
 
-import { isFable5Model, isMythos5Model, isAdaptiveThinkingModel } from "../../index.mjs";
+import { isFable5Model, isMythos5Model, isAdaptiveThinkingModel } from "../../lib/mimicry/wire-compat.mjs";
 
 /** Version separators the model catalogue recognises. */
 const separators = [".", "-"];
