@@ -265,3 +265,116 @@ describe("formatTemplate", () => {
     expect(out).not.toContain("{files}");
   });
 });
+
+// ---------------------------------------------------------------------------
+// formatTemplate — grapheme-safe truncation (U2)
+//
+// ASCII-only source file. Non-ASCII code points are written as \u escapes.
+// ---------------------------------------------------------------------------
+
+describe("formatTemplate — grapheme-safe truncation (U2)", () => {
+  // A grinning-face emoji: one grapheme cluster, 2 UTF-16 units (surrogate pair).
+  const GRIN = "😀";
+  // "e" + combining acute accent: one grapheme cluster, 2 UTF-16 units.
+  const E_ACUTE = "é";
+
+  it("never splits a surrogate pair when shortening the longest section", () => {
+    // A single very long section forces the 10%-chop loop to run repeatedly.
+    // Sprinkle emoji throughout so some chop boundary is virtually certain
+    // to land mid-cluster under the old byte-oriented slice(0, N).
+    const topics = ("- topic " + GRIN + " ").repeat(80);
+    const out = formatTemplate({ topics, outstanding: "(none)", files: "(none)" }, 300);
+
+    expect(out.isWellFormed()).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(300);
+    expect(out.startsWith("<session-summary>\n")).toBe(true);
+    expect(out.endsWith("</session-summary>")).toBe(true);
+  });
+
+  it("never splits a base character from its combining accent when shortening", () => {
+    const topics = ("- caf" + E_ACUTE + " note ").repeat(60);
+    const out = formatTemplate({ topics, outstanding: "(none)", files: "(none)" }, 250);
+
+    expect(out.isWellFormed()).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(250);
+  });
+
+  it("never splits a surrogate pair when the final envelope hard-cap fires", () => {
+    // Pick a maxChars just above the closing-tag floor but below what the
+    // section-shrink loop can reach on its own (each section frozen at the
+    // "(none)"-length floor still leaves the fixed template chrome over
+    // budget), forcing the envelope-level cut to actually fire.
+    const topics = "- " + GRIN.repeat(50);
+    const out = formatTemplate({ topics, outstanding: "(none)", files: "(none)" }, 40);
+
+    expect(out.isWellFormed()).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(40);
+    expect(out.endsWith("</session-summary>")).toBe(true);
+  });
+
+  it("negative control: the legacy slice(0, N) would have produced a lone surrogate here", () => {
+    const topics = "- " + GRIN.repeat(50);
+    const rendered = TEMPLATE.replace("{topics}", topics)
+      .replace("{outstanding}", "(none)")
+      .replace("{files}", "(none)");
+    const closing = "\n</session-summary>";
+
+    // Pick maxChars so the legacy cut point lands exactly between the first
+    // GRIN's two surrogate halves, regardless of the template's exact prefix
+    // length.
+    const emojiStart = rendered.indexOf(GRIN);
+    const cutAt = emojiStart + 1;
+    const maxChars = cutAt + closing.length;
+
+    // Reproduce the OLD envelope cut exactly: slice(0, maxChars - closing.length) + closing.
+    const legacyHead = rendered.slice(0, Math.max(0, maxChars - closing.length));
+    expect(legacyHead.length).toBe(cutAt);
+    const legacyOut = legacyHead + closing;
+    expect(legacyOut.isWellFormed()).toBe(false);
+
+    const fixedOut = formatTemplate({ topics, outstanding: "(none)", files: "(none)" }, maxChars);
+    expect(fixedOut.isWellFormed()).toBe(true);
+    expect(fixedOut.length).toBeLessThanOrEqual(maxChars);
+  });
+
+  it("falls back to a bare, well-formed closing tag when the budget is smaller than the closing tag itself", () => {
+    for (const maxChars of [0, 1, 5, 18, 19]) {
+      const out = formatTemplate({ topics: "- " + GRIN.repeat(20), outstanding: "(none)", files: "(none)" }, maxChars);
+      expect(out).toBe("\n</session-summary>");
+      expect(out.isWellFormed()).toBe(true);
+    }
+  });
+
+  it("stays deterministic and well-formed across a sweep of small budgets", () => {
+    const topics = ("- " + GRIN + " and " + E_ACUTE + " ").repeat(40);
+    const parsed = { topics, outstanding: "(none)", files: "(none)" };
+    const closing = "\n</session-summary>";
+    for (let maxChars = 0; maxChars <= 120; maxChars += 5) {
+      const a = formatTemplate(parsed, maxChars);
+      const b = formatTemplate(parsed, maxChars);
+      expect(a).toBe(b);
+      expect(a.isWellFormed()).toBe(true);
+      // Below the closing-tag floor, the documented fallback (a bare closing
+      // tag) can exceed maxChars by design; above it, the hard cap always
+      // holds.
+      if (maxChars > closing.length) {
+        expect(a.length).toBeLessThanOrEqual(maxChars);
+      } else {
+        expect(a).toBe(closing);
+      }
+    }
+  });
+
+  it("makes forward progress even when a single grapheme exceeds the per-chop budget", () => {
+    // A section made ENTIRELY of one huge cluster: the 10%-chop target can
+    // land inside that cluster, which truncateGraphemes must refuse to
+    // split — it should still shrink the section (to "") rather than loop
+    // forever or leave it unchanged.
+    const hugeCluster = "e" + "́".repeat(500);
+    const out = formatTemplate({ topics: hugeCluster, outstanding: "(none)", files: "(none)" }, 200);
+
+    expect(out.isWellFormed()).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(200);
+    expect(out.endsWith("</session-summary>")).toBe(true);
+  });
+});

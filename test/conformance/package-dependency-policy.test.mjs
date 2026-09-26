@@ -32,13 +32,19 @@ const releaseTarball =
  * A dependency specifier is acceptable only when a RESOLVED INSTALL of it is
  * reproducible and integrity-checked. Two shapes qualify:
  *
- *   * the literal `latest` dist-tag — the wire shape of this plugin is the
- *     package's own `DEFAULT_PROFILE`, so tracking `latest` is how the plugin
- *     inherits a newer genuine-client profile without a code change. The tag
- *     itself is mutable, which is precisely why reproducibility is delegated to
- *     `package-lock.json`: the lock records the resolved version, the registry
- *     tarball URL, and its `sha512` integrity, and `npm ci` installs exactly
- *     that. Moving the tag therefore still requires a reviewed lockfile diff.
+ *   * the literal `latest` dist-tag — `lib/mimicry/wire-compat.mjs` passes
+ *     `WIRE_PROFILE` as an explicit `profile` argument to every one of the
+ *     package's request-building entry points it calls, so the wire shape
+ *     (the emulated client profile) does NOT move on a bare `npm update`
+ *     anymore; moving it is a deliberate one-line rebind of `WIRE_PROFILE` at
+ *     that seam (see docs/shared-package-provenance.md, "Why the specifier is
+ *     the `latest` dist-tag"). Tracking `latest` is how the plugin inherits
+ *     library fixes and additive capabilities without a `package.json` edit.
+ *     The tag itself is mutable, which is precisely why reproducibility is
+ *     delegated to `package-lock.json`: the lock records the resolved
+ *     version, the registry tarball URL, and its `sha512` integrity, and
+ *     `npm ci` installs exactly that. Moving the tag therefore still requires
+ *     a reviewed lockfile diff.
  *   * an exact registry version — retained because emergency rollback pins one
  *     (see docs/shared-package-provenance.md).
  *
@@ -250,7 +256,7 @@ describe("shared wire package rollback documentation", () => {
     //
     // EVERY package binding is named here. The count-tokens migration added
     // `buildClaudeCodeCountTokensRequest`, the request-headers migration added
-    // `CLAUDE_CODE_2_1_233_PROFILE` (re-exported as `WIRE_PROFILE` so the rest
+    // `CLAUDE_CODE_2_1_280_PROFILE` (re-exported as `WIRE_PROFILE` so the rest
     // of the tree reads the baseline CLI version without importing the
     // package), and the model-predicate migration added the nine
     // model-query bindings that replaced the hand-written regexes of the
@@ -259,11 +265,11 @@ describe("shared wire package rollback documentation", () => {
     // `supportsStructuredOutputs`, `supportsWebSearch`) that the adapter path
     // used to take from `lib/mimicry/headers.mjs`. A revert therefore has
     // fifteen entry points to unwind rather than one. The beta-table
-    // reconciliation then added `BETA_REGISTRY_2_1_233`, which no production
+    // reconciliation then added `BETA_REGISTRY_2_1_280`, which no production
     // path reads — `lib/betas.test.mjs` walks it to prove the host's literal
     // beta headers have not drifted from the genuine client's — for sixteen.
     expect(adapter).toMatch(
-      /^import \{\n {2}BETA_REGISTRY_2_1_233,\n {2}buildClaudeCodeRequest,\n {2}buildClaudeCodeCountTokensRequest,\n {2}CLAUDE_CODE_2_1_233_PROFILE,\n {2}hasOneMillionContext,\n {2}isAdaptiveThinkingModel,\n {2}isClaude3Model,\n {2}isEligibleFor1MContext,\n {2}isFable5Model,\n {2}isHaikuModel,\n {2}isMythos5Model,\n {2}isOpus46Model,\n {2}isOpus47Model,\n {2}isOpus48Model,\n {2}supportsStructuredOutputs,\n {2}supportsWebSearch,\n\} from "@tormentalabs\/claude-code-wire-compat";$/m,
+      /^import \{\n {2}BETA_REGISTRY_2_1_280,\n {2}buildClaudeCodeRequest,\n {2}buildClaudeCodeCountTokensRequest,\n {2}CLAUDE_CODE_2_1_280_PROFILE,\n {2}hasOneMillionContext,\n {2}isAdaptiveThinkingModel,\n {2}isClaude3Model,\n {2}isEligibleFor1MContext,\n {2}isFable5Model,\n {2}isHaikuModel,\n {2}isMythos5Model,\n {2}isOpus46Model,\n {2}isOpus47Model,\n {2}isOpus48Model,\n {2}supportsStructuredOutputs,\n {2}supportsWebSearch,\n\} from "@tormentalabs\/claude-code-wire-compat";$/m,
     );
     expect(provenance).toMatch(/static[^\n]*import|import[^\n]*static/i);
   });

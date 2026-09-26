@@ -1,18 +1,28 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
-> **Note on the production wire shape (added at the `0.3.0` dependency bump).**
-> The composition that actually goes on the wire now follows the `DEFAULT_PROFILE`
-> of `@tormentalabs/claude-code-wire-compat`, which is **Claude Code 2.1.233**
-> (`claude-code-2.1.233-sdk-0.112.1`) as of this note. The plugin inherits it by
-> omitting the `profile` argument, so a package release can advance it.
+> **Note on the production wire shape (updated for the `0.7.0` dependency bump).**
+> The composition that actually goes on the wire follows the `DEFAULT_PROFILE` the
+> plugin binds at `lib/mimicry/wire-compat.mjs`, which is now **Claude Code 2.1.280**
+> (`claude-code-2.1.280-sdk-0.112.1`) as of this note. The plugin inherits the wire
+> shape by omitting the `profile` argument on every call, so a package release can
+> advance it; see [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md)
+> for the current emulation claim, and
+> [`claude-code-2.1.233-analysis.md`](claude-code-2.1.233-analysis.md) for the
+> previous one.
 >
 > **The body of this document remains the verified 2.1.195 decompilation** and is
 > still the right reference for how each header and system-prompt segment is
-> derived. The 195 → 233 deltas are recorded in the package's `CHANGELOG` and in
-> [`claude-code-2.1.233-analysis.md`](claude-code-2.1.233-analysis.md); the ones
-> visible on a default turn are the user agent, `x-stainless-package-version`
+> derived. The 195 → 233 → 280 deltas are recorded in the package's `CHANGELOG`
+> and in the two analysis documents linked above; the ones visible on a default
+> turn moving 195 → 233 were the user agent, `x-stainless-package-version`
 > (`0.94.0` → `0.112.1`), the billing block's `cc_version`, and the removal of
-> `summarize-connector-text-2026-03-13` from the beta registry.
+> `summarize-connector-text-2026-03-13` from the beta registry. Moving 233 → 280
+> additionally changes: nine new beta registry entries (four of them reachable on
+> a default turn — see `claude-code-2.1.280-analysis.md` §5), `cache-diagnosis-2026-04-07`
+> flips from gated to default-on, and `redact-thinking-2026-02-12` is composed and
+> then removed again whenever thinking is active and the caller supplied no
+> `thinking.display` — see §11.3 below for what that means for
+> `token_economy.redact_thinking`.
 
 <!-- Last verified against: Claude Code 2.1.195 — DECOMPILED from the real
      linux-x64 native binary (@anthropic-ai/claude-code-linux-x64@2.1.195, Bun-
@@ -134,16 +144,17 @@ binary additionally filters tool names through `Hcp`; that allowlist remains
 unresolved, so the plugin documents the approximation and accepts all tool names
 rather than inventing a list.
 
-| CC version | SDK bundled | Beta additions                                                                                                                                                                                                                                                                                                                                                                                       | Beta removals                                                                 | OAuth change                                                                                                                                                                                  |
-| ---------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2.1.195    | 0.94.0      | Registry 24→28: `+ server-side-fallback-2026-06-01`, `+ fallback-credit-2026-06-01` (both opt-in/gated, not default). CONFIRMED default-on for modern first-party models: `context-management-2025-06-27` (`n0d(model)`) + `effort-2025-11-24` (`Kw(model)`) — plugin under-sends both. CC re-adds `x-client-request-id:<uuid>` + conditional `x-cc-atis`. New optional `, workload/<n>` UA segment. | none                                                                          | **Token-call client axios→SDK fetch**: UA `anthropic-sdk-typescript/0.94.0 userOAuthProvider` + `anthropic-beta: oauth-2025-04-20` on token POST. Login flow/scopes/client_id byte-identical. |
-| 2.1.159    | 0.94.0      | `summarize-connector-text-2026-03-13` revived as registry label `narration_summaries`, gated by GrowthBook `pewter_owl_header` (default-off) + first-party + non-fast-mode. New header `x-is-refusal-fallback` gated by server `convolute_arcades` (default-off).                                                                                                                                    | none                                                                          | none (byte-identical)                                                                                                                                                                         |
-| 2.1.154    | 0.94.0\*    | Opus 4.8 launch (2026-05-28) support: claude-opus-4-8 routed as adaptive-thinking + 1M context + fast-mode eligible                                                                                                                                                                                                                                                                                  | none (vs 2.1.150)                                                             | none                                                                                                                                                                                          |
-| 2.1.150    | 0.94.0      | 26-entry registry; redact-thinking-2026-02-12 default ON; extended-cache-ttl + thinking-token-count default ON (plugin)                                                                                                                                                                                                                                                                              | advanced-tool-use, tool-search-tool, fast-mode, effort removed from always-on | none                                                                                                                                                                                          |
-| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on)                                                                                                                                                                                                                                                                                                                                      | none                                                                          | none on wire; client-side refresh telemetry expanded (legacy-lock detect)                                                                                                                     |
-| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01                                                                                                                                                                                                                                                                                                                                               | none                                                                          | none                                                                                                                                                                                          |
-| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                                                                                                                                                                                                                                                                                                                                                           | none                                                                          | none                                                                                                                                                                                          |
-| 2.1.117    | 0.81.0      | (baseline for this doc)                                                                                                                                                                                                                                                                                                                                                                              | none                                                                          | none                                                                                                                                                                                          |
+| CC version | SDK bundled | Beta additions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Beta removals                                                                 | OAuth change                                                                                                                                                                                  |
+| ---------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2.1.280    | 0.112.1     | Registry 31→40 vs 2.1.233 (no 2.1.233 row exists here; see `claude-code-2.1.233-analysis.md` and `claude-code-2.1.280-analysis.md`): 9 new entries, none removed, non-uniform insertion. Four reachable on a default first-party turn: `mid-conversation-tool-changes-2026-07-01`, `mid-conversation-system-clear-at-2026-08-21`, `thinking-binding-controls-2026-08-01` (header only, no `block_binding` body field), `thinking-display-updates-2026-08-18` (couples to a `redact-thinking-2026-02-12` removal, see §11.3). `cache-diagnosis-2026-04-07` flips from gated to default-on. Model catalogue 17→20: adds `claude-opus-5-5` (new `opus` alias default), `claude-fable-5-1` (new `fable` alias default), `claude-mythos-5-1`. | none                                                                          | none (SDK unchanged at 0.112.1; a server-side version gate now refuses `claude-opus-5-5` to a client presenting an older version signal, per `claude-code-2.1.280-analysis.md` §8).           |
+| 2.1.195    | 0.94.0      | Registry 24→28: `+ server-side-fallback-2026-06-01`, `+ fallback-credit-2026-06-01` (both opt-in/gated, not default). CONFIRMED default-on for modern first-party models: `context-management-2025-06-27` (`n0d(model)`) + `effort-2025-11-24` (`Kw(model)`) — plugin under-sends both. CC re-adds `x-client-request-id:<uuid>` + conditional `x-cc-atis`. New optional `, workload/<n>` UA segment.                                                                                                                                                                                                                                                                                                                                     | none                                                                          | **Token-call client axios→SDK fetch**: UA `anthropic-sdk-typescript/0.94.0 userOAuthProvider` + `anthropic-beta: oauth-2025-04-20` on token POST. Login flow/scopes/client_id byte-identical. |
+| 2.1.159    | 0.94.0      | `summarize-connector-text-2026-03-13` revived as registry label `narration_summaries`, gated by GrowthBook `pewter_owl_header` (default-off) + first-party + non-fast-mode. New header `x-is-refusal-fallback` gated by server `convolute_arcades` (default-off).                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | none                                                                          | none (byte-identical)                                                                                                                                                                         |
+| 2.1.154    | 0.94.0\*    | Opus 4.8 launch (2026-05-28) support: claude-opus-4-8 routed as adaptive-thinking + 1M context + fast-mode eligible                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | none (vs 2.1.150)                                                             | none                                                                                                                                                                                          |
+| 2.1.150    | 0.94.0      | 26-entry registry; redact-thinking-2026-02-12 default ON; extended-cache-ttl + thinking-token-count default ON (plugin)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | advanced-tool-use, tool-search-tool, fast-mode, effort removed from always-on | none                                                                                                                                                                                          |
+| 2.1.143    | 0.81.0      | mid-conversation-system-2026-04-07 (registry only, not auto-on)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | none                                                                          | none on wire; client-side refresh telemetry expanded (legacy-lock detect)                                                                                                                     |
+| 2.1.133    | 0.81.0      | extended-cache-ttl-2025-04-11, environments-2025-11-01                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | none                                                                          | none                                                                                                                                                                                          |
+| 2.1.119    | 0.81.0      | cache-diagnosis-2026-04-07                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | none                                                                          | none                                                                                                                                                                                          |
+| 2.1.117    | 0.81.0      | (baseline for this doc)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | none                                                                          | none                                                                                                                                                                                          |
 
 ### 2.1.155–2.1.159 changes (narration_summaries revival, 2026-05-31)
 
@@ -256,7 +267,9 @@ last **user**-message block. This guard is model-agnostic but is what makes Opus
 - `x-anthropic-additional-protection: true` confirmed as conditional header (set when `CLAUDE_CODE_ADDITIONAL_PROTECTION=1`).
 - Beta set restructured: 26-entry registry with 4 betas removed from always-on
   (`advanced-tool-use-2025-11-20`, `tool-search-tool-2025-10-19`, `fast-mode-2026-02-01`, `effort-2025-11-24`).
-- `redact-thinking-2026-02-12` is default ON for first-party, non-SDK requests (matching CC 2.1.150). Opt out via `/anthropic set redact-thinking off`.
+- `redact-thinking-2026-02-12` is default ON for first-party, non-SDK requests (matching CC 2.1.150). Opt out via
+  `/anthropic set redact-thinking off` — **on the frozen legacy forge only**; see §11.3 for the 2.1.280 adapter-path
+  truth, which this toggle does not reach.
 - `context-management-2025-06-27` is hardcoded `&& false` in CC D5q (effectively disabled).
 - `structured-outputs-2025-12-15` depends on the caller supplying an output format; `tengu_tool_pear` instead gates `tool.strict = true` on the tool-schema path.
 - Billing header format, `anthropic-version`, OAuth constants: byte-identical to 2.1.143.
@@ -277,8 +290,28 @@ last **user**-message block. This guard is model-agnostic but is what makes Opus
 
 ### cache-diagnosis-2026-04-07 (added in 2.1.119)
 
+> **This entry describes the 2.1.119-era gate and the frozen legacy forge's own `EXPERIMENTAL_BETA_FLAGS`
+> opt-in.** Under the 2.1.280 profile the plugin now emulates, the gate resolved differently: all three of its legs
+> (`experimentalBetasEnabled`, first-party host, and the third conjunct) evaluate `true` by default, so
+> `cache-diagnosis-2026-04-07` is **default-on** for the adapter/production `/v1/messages` turn — a data change from
+> 2.1.233, where the plugin's pinned policy kept it `false`. See
+> [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §3. The retry-latch behavior described below is
+> superseded on the adapter path: this plugin's session retry latch evicts the beta via the package's
+> `suppressBetas` seam when the API's invalid-beta message names it, rather than by clearing a plugin-local flag —
+> and unlike the description below, it is **not** an indefinite session-long suppression. It expires after a fixed
+> 5-minute TTL (`SESSION_REJECTED_BETA_TTL_MS` in `index.mjs`) and is keyed **per account**
+> (`sentBetaLatchKey`), so a rejection on one account never suppresses the beta for another. It never latches
+> `oauth-2025-04-20` or the Claude Code identity beta (`UNSUPPRESSIBLE_BETAS`), never latches a beta whose presence
+> is coupled to a request-body field — e.g. `thinking-display-updates-2026-08-18`, `context-management-2025-06-27`,
+> `effort-2025-11-24`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01` (`BODY_COUPLED_BETAS`) —
+> `cache-diagnosis-2026-04-07` has no such coupled field, so it stays eligible, and it is never written for a
+> `/v1/messages/count_tokens` request, since that surface has no `suppressBetas` input to receive it
+> (`index.mjs`'s `!_isCountTokens` gate, in `AnthropicAuthPlugin`'s fetch interceptor). If the very next retry fails the same way, the
+> just-latched entries are dropped immediately rather than kept for the rest of the 5-minute window.
+
 - Flag constant: `SeH = "cache-diagnosis-2026-04-07"`.
-- NOT always-on. Gated by GrowthBook flag `tengu_prompt_cache_diagnostics` (default `false`).
+- NOT always-on **in the 2.1.119 binary this section was decompiled from**. Gated by GrowthBook flag
+  `tengu_prompt_cache_diagnostics` (default `false`).
 - Eligibility guard observed upstream: account type must be `firstParty` (standard CC OAuth) or
   `anthropicAws` without `ANTHROPIC_AWS_BASE_URL` override; fails silently if neither. This plugin
   targets first-party OAuth only, so the `anthropicAws` branch is documented for parity but is out
@@ -286,9 +319,18 @@ last **user**-message block. This guard is model-agnostic but is what makes Opus
 - When active, the request builder appends `cache-diagnosis-2026-04-07` to `anthropic-beta`
   and injects `{ diagnostics: { previous_message_id: <id> } }` only when all of the following
   hold: beta active, previous_message_id known, conversation is live, and not in zero-shot mode.
-- Retry path: if the server returns HTTP 400 and the response body mentions both
-  `cache-diagnosis-2026-04-07` and `anthropic-beta`, the latch is cleared and the request
-  is retried without the beta.
+- Retry path (2.1.119-era description; **superseded on the 2.1.280 adapter path**, see the note above): a
+  generic "response body mentions both `cache-diagnosis-2026-04-07` and `anthropic-beta`" match is not
+  what drives a retry today. The plugin only recognizes the API's specific invalid-beta message —
+  ``Unexpected value(s) `X` for the `anthropic-beta` header`` — via `parseRejectedBetaNames`
+  (`lib/mimicry/adapter-input.mjs`); any other wording yields no names and drives no retry.
+  `selectLatchableRejectedBetas` additionally caps the match at `MAX_LATCHABLE_REJECTED_BETAS` (2)
+  suppressible identifiers — more than that looks like the error echoed the whole header back, and both
+  its `namedSent` and `latchable` results come back empty rather than latching from it. Separately,
+  `customBetas` rejection handling (`sessionRejectedBetas`) still falls back to a body-mentions match
+  for a **custom** beta when the invalid-beta message names nothing parsable, but that fallback only
+  ever filters `customBetas`; it does not feed `suppressBetas` and so cannot suppress a package-composed
+  beta like this one.
 - Plugin support: listed in `EXPERIMENTAL_BETA_FLAGS`; shortcuts `cache-diagnosis` and
   `cache-diag` are registered in `BETA_SHORTCUTS`. NOT included in any always-on header list.
 
@@ -497,7 +539,7 @@ With emulation on, both remaining constructions ensure:
   - optional suffixes:
     - `CLAUDE_AGENT_SDK_VERSION`
     - `CLAUDE_AGENT_SDK_CLIENT_APP`
-- always removes `x-api-key`
+- always removes `x-api-key` (and `x-session-affinity`, a host-side session hint)
 
 ### 4.2 Extra headers when mimicry is enabled
 
@@ -616,19 +658,35 @@ The dead branch, for reference:
 - added `interleaved-thinking-2025-05-14` (in addition to OAuth beta)
 - added `token-counting-2024-11-01` for `/v1/messages/count_tokens`
 
-> **`/v1/messages/count_tokens` with `signatureEnabled=true` no longer uses this builder.** That route is composed by
-> the shared package's count surface (`buildClaudeCodeCountTokensRequest`), which derives its own beta set from the
-> model, appends `token-counting-2024-11-01` itself, and emits a body of `{model, messages, tools}` with no `system`,
-> `metadata` or `max_tokens`. The list below therefore describes the `/v1/messages` route and the emulation-off count
-> route. See [`mimicry/wire-compat-divergences.md`](./mimicry/wire-compat-divergences.md) for the measured diff.
+> **Neither `/v1/messages` nor `/v1/messages/count_tokens` with `signatureEnabled=true` uses this builder anymore.**
+> Both routes are composed by the shared package — `buildClaudeCodeRequest` and
+> `buildClaudeCodeCountTokensRequest` respectively, wrapped by `lib/mimicry/wire-compat.mjs` — which derives its own
+> beta set from the genuine 2.1.280 client's own tables. `buildAnthropicBetaHeader` is reachable ONLY through
+> `buildRequestHeaders`, and only for a request made with signature emulation **on** whose pathname the package has
+> no surface for at all — the files and models endpoints, or a gateway-prefixed route (`index.mjs`'s `_useAdapter`
+> gate, in `AnthropicAuthPlugin`'s fetch interceptor, admits only `/v1/messages`, `/messages`, `/v1/messages/count_tokens`, `/messages/count_tokens`; anything else
+> falls through to this forge). A request made with `signatureEnabled=false`
+> never reaches this builder at all: `index.mjs`'s emulation-off branch (also in `AnthropicAuthPlugin`'s fetch interceptor) calls
+> `buildPassthroughHeaders` (`lib/passthrough-headers.mjs`) first and unconditionally, for every pathname, so
+> `requestHeaders` is already set by the time the legacy-forge branch below it would run. **The list below is
+> therefore the frozen legacy forge's behavior on the files/models/gateway-prefixed surface with emulation on, not
+> the production `/v1/messages` wire shape and not the emulation-off passthrough shape either.** For what the
+> adapter path actually emits under the pinned 2.1.280 profile — in
+> particular for `redact-thinking-2026-02-12` and `cache-diagnosis-2026-04-07` — see §11.3 below and
+> [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §2–§3. See
+> [`mimicry/wire-compat-divergences.md`](./mimicry/wire-compat-divergences.md) for the measured diff.
 
-When `signatureEnabled=true`, current implementation may add dynamically:
+The following applies to the **frozen legacy forge** (`buildAnthropicBetaHeader` in `lib/mimicry/headers.mjs`). When `signatureEnabled=true`, the legacy implementation may add dynamically:
 
 - `claude-code-20250219` (not added for Haiku models)
 - `files-api-2025-04-14` (only for `/v1/files` or when body references `file_id`)
 - `interleaved-thinking-2025-05-14` (if model supports it and not disabled by `DISABLE_INTERLEAVED_THINKING`)
 - `context-1m-2025-08-07` (if model indicates 1M context)
-- `redact-thinking-2026-02-12` (**default ON** — matches CC 2.1.150; opt out via `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`)
+- `redact-thinking-2026-02-12` (**default ON in this frozen forge** — matches CC 2.1.150; opt out via
+  `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`. This toggle has **no effect** on the
+  default `/v1/messages` turn: the adapter path's `redact-thinking-2026-02-12` decision is made entirely by the shared
+  package under the 2.1.280 profile — composed while thinking is inactive, and spliced back out whenever thinking is
+  active and the caller supplied no `thinking.display` — see §11.3)
 - `context-management-2025-06-27` (opt-in via `token_economy.context_management`; hardcoded `&& false` in CC 2.1.150 D5q)
 - `structured-outputs-2025-12-15` (opt-in via `token_economy.structured_outputs`; enabled by a caller-supplied output format in CC)
 - `web-search-2025-03-05` (added on supported models; the plugin gates on the model only — upstream additionally gates on provider `vertex`/`foundry`)
@@ -662,6 +720,14 @@ Provider filter:
   [Provider Scope](../README.md#provider-scope).
 
 ### 5.2 Claude Code reference beta list (consolidated)
+
+> This section (and §5.3 below) still describes the **frozen legacy forge** — see the note under §5.1. Every
+> `redact-thinking-2026-02-12` bullet below is that forge's `signatureEnabled=true` default, reachable today only when
+> signature emulation is **on** and the pathname is outside the adapter's surface (the files/models endpoints, or a
+> gateway-prefixed route) — never with `signatureEnabled=false`, which is pure passthrough
+> (`lib/passthrough-headers.mjs`) and never reaches this forge. The production `/v1/messages` turn's
+> `redact-thinking-2026-02-12` decision belongs entirely to the shared package under the pinned 2.1.280 profile; see
+> §11.3 and [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §2.
 
 Automatically enabled by Claude Code 2.1.150 (D5q builder, first-party OAuth, non-haiku):
 
@@ -1219,9 +1285,32 @@ over-broadcast fingerprint.
 
 ### 11.3 Redact Thinking
 
-When `redact_thinking` is true (the default), adds `redact-thinking-2026-02-12` to the beta header. The API returns `redacted_thinking` blocks instead of thinking summaries, reducing token overhead on subsequent turns.
+**This config key only affects the frozen legacy forge**, reached only when signature emulation is **on** and the
+request's pathname is outside the adapter's surface — the files/models endpoints, or a gateway-prefixed route (see
+the boundary banner in `lib/mimicry/headers.mjs` and `index.mjs`'s `_useAdapter` gate, in `AnthropicAuthPlugin`'s fetch interceptor).
+**Not** on `signature_emulation: false`: that path is pure passthrough (`buildPassthroughHeaders` in `lib/passthrough-headers.mjs`, wired in
+`index.mjs`'s emulation-off branch, also in `AnthropicAuthPlugin`'s fetch interceptor) and never calls the legacy forge, so this config key has no effect there either.
+On the path where the forge does run, when `redact_thinking` is true (the default), it adds
+`redact-thinking-2026-02-12` to the beta header. The API returns `redacted_thinking` blocks instead of thinking
+summaries, reducing token overhead on subsequent turns.
 
 **Default: on** (matches CC 2.1.150). Opt out via `/anthropic set redact-thinking off` or `token_economy.redact_thinking = false`.
+
+**On the default `/v1/messages` turn (signature emulation on, adapter path, 2.1.280 profile), this config key and
+this command have no effect.** The shared package decides `redact-thinking-2026-02-12` on its own, from the request's
+own thinking state, with no reference to plugin configuration:
+
+- It is **composed** whenever experimental betas are enabled, interleaved thinking is active, the session is
+  interactive, and thinking summaries are not being shown — the same four conditions this config key used to gate on
+  the legacy forge.
+- It is then **removed again** whenever thinking is active and the caller supplied no `thinking.display`: that
+  branch instead sets `thinking.display: "updates"` on the body and pushes
+  `thinking-display-updates-2026-08-18` in its place.
+- Net effect: on a typical adaptive-thinking turn with no caller-supplied display, `redact-thinking-2026-02-12` is
+  **absent** from the wire; when thinking is inactive, or the caller explicitly sets a display, it can still be
+  present.
+
+See [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §2 for the full mechanism and its citations.
 
 ### 11.4 Connector-Text Summarization (`summarize-connector-text-2026-03-13`)
 

@@ -29,6 +29,14 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run check:invariants
+      - name: Check wire-compat drift
+        # Non-blocking: a new @tormentalabs/claude-code-wire-compat release
+        # under the `latest` dist-tag (see docs/shared-package-provenance.md)
+        # is expected to outrun this branch between ports, and that should
+        # not redden unrelated PRs. `npm run check:wire-compat-drift` (no
+        # continue-on-error) still gates publish.yml.
+        continue-on-error: true
+        run: npm run check:wire-compat-drift
       - name: Run tests
         run: |
           set -euo pipefail

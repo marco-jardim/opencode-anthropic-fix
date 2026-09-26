@@ -8,7 +8,10 @@ body byte-for-byte after normalising genuine per-run nondeterminism.
 **The direction of the difference inverted once, and then the ground moved again.** That suite was written when the
 shared package was the incomplete implementation and the plugin was the reference. Since the package's Wave 7 work
 (`v0.1.0-rc.10`) and the max-tokens clamp (`v0.1.0-rc.11`), the package is derived directly from a genuine client
-binary — 2.1.195 then, 2.1.233 since the `0.3.0` default profile — and is the reference. Since `index.mjs` started routing the first-party `/v1/messages` turn through the adapter,
+binary — 2.1.195 then, 2.1.233 since the `0.3.0` default profile, and **2.1.280 since `0.7.0`** (the profile itself
+landed at `0.6.0`; `0.7.0` is the release this plugin actually depends on and additionally changes the body-prose
+Unicode policy, see [`../claude-code-2.1.280-analysis.md`](../claude-code-2.1.280-analysis.md) §10) — and is the
+reference. Since `index.mjs` started routing the first-party `/v1/messages` turn through the adapter,
 the plugin's production path **is** the package plus plugin-owned policy — so most rows below are no longer "two
 implementations disagree" but "the plugin deliberately steers the package through a seam".
 
@@ -23,15 +26,19 @@ itself a defect: then the fix belongs in the consumer. `stainlessHelper` markers
 
 ## Package version state (read this before running `npm install`)
 
-- `package.json` pins **exactly `0.5.0`** (since plugin 2.0.0; it tracked the `latest` dist-tag
-  before). `0.6.0` switches the package's `DEFAULT_PROFILE` to Claude Code 2.1.280, and against it the
-  plugin's suite fails 48 tests, so the pin holds until the plugin's wire port to 2.1.280 lands. The
-  registry tarball URL and `sha512` integrity live in `package-lock.json`, and `npm ci` installs
-  exactly that. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is installed.
+- `package.json` tracks the **`latest`** dist-tag again. The exact pin at `0.5.0` (since plugin 2.0.0) was a
+  temporary hold while the plugin's wire port to 2.1.280 was in flight — `0.6.0` switched the package's
+  `DEFAULT_PROFILE` to Claude Code 2.1.280, which failed 48 tests against the port that had not yet landed. The
+  port has landed (see `docs/claude-code-2.1.280-analysis.md`), so the pin lifted. `package-lock.json` resolves
+  `latest` to **`0.7.0`** as of this note. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is
+  actually installed — a dist-tag is mutable, so the lockfile, not this sentence, is the source of truth.
 - The wire shape follows from that: the adapter calls the package **without a `profile` argument**, so
   the plugin inherits the package's `DEFAULT_PROFILE`. `0.1.0` defaulted to `claude-code-2.1.195`;
-  `0.3.0` defaults to `claude-code-2.1.233-sdk-0.112.1`. A package release can therefore move the
-  wire, which is the whole point of the arrangement and the reason the golden suite exists.
+  `0.3.0` moved it to `claude-code-2.1.233-sdk-0.112.1`; `0.6.0` moved it again to
+  `claude-code-2.1.280-sdk-0.112.1` (SDK version unchanged). A package release can therefore move the
+  wire, which is the whole point of the arrangement and the reason the golden suite exists. An emergency
+  rollback pins an exact version instead of tracking `latest` — see
+  `docs/emergency-protocol-profile.md` and `docs/shared-package-provenance.md`.
 - S8 and S9 shipped in `0.1.0-rc.17` and are present in every release since.
 
 The lockfile and `docs/shared-package-provenance.md` must agree with the policy.
@@ -67,8 +74,12 @@ what a package bump does.
 ## Outbound divergences
 
 Upstream symbol names and byte offsets refer to the genuine client binary the row was traced against — 2.1.195 for
-rows written before the `0.3.0` default-profile move, 2.1.233 after — as recorded in the package's
-`docs/source-trace.md` and, for 2.1.233, in [`../claude-code-2.1.233-analysis.md`](../claude-code-2.1.233-analysis.md).
+rows written before the `0.3.0` default-profile move, 2.1.233 after, and 2.1.280 since the `0.6.0`/`0.7.0` move — as
+recorded in the package's `docs/source-trace.md` and, for 2.1.233 and 2.1.280 respectively, in
+[`../claude-code-2.1.233-analysis.md`](../claude-code-2.1.233-analysis.md) and
+[`../claude-code-2.1.280-analysis.md`](../claude-code-2.1.280-analysis.md). Rows 1–6 have not been independently
+re-verified against the 2.1.280 binary beyond what row 3's update below cites; treat an unmarked row as carried
+forward from 2.1.233 rather than freshly confirmed.
 
 | #   | Field                                | Plugin emits                                      | Package emits                                     | State                                                                                           |
 | --- | ------------------------------------ | ------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -82,13 +93,29 @@ rows written before the `0.3.0` default-profile move, 2.1.233 after — as recor
 Upstream truth for the rows that are still open:
 
 - Row 1: the base beta set opens `if(!isHaiku) push(claudeCode)`, so the genuine client never carries it on Haiku.
-- Row 2: the only two push sites are guarded by `provider==="vertex"` and `provider==="foundry"` (`IPt`).
-- Row 3: the identifier exists in the registry (`f2r`) but no push site was found anywhere in the binary.
+- Row 2: under 2.1.233 the only two push sites were guarded by `provider==="vertex"` and `provider==="foundry"`
+  (`IPt`). **Confirmed unchanged under 2.1.280**: the per-model table's `web_search` entry still reads
+  `when:(e)=>e.provider==="vertex"&&hw(e.canonical)||e.provider==="foundry"` — same two providers, no first-party
+  branch (`docs/protocol/versions/claude-code-2.1.280-analysis.md` §7.1, entry 9). `[DER]`
+- Row 3: under 2.1.233 the identifier existed in the registry (`f2r`) but no push site was found anywhere in the
+  binary. **Superseded under 2.1.280 analysis**: a push site now IS found, at
+  `t7e() && (Yb() || h.advisorModel !== void 0)`. `t7e` is true on a default first-party install, but `Yb` reads the
+  remote flag `tengu_sage_compass2` (default **false**), and `advisorModel` is unset by default, so the beta is
+  still absent on a default turn — just for a now-known reason rather than an unresolved one
+  (`docs/protocol/versions/claude-code-2.1.280-analysis.md` §7.6, the "absent identifier" table). `[DER]`
+
+**Pending an owner decision, not a bug.** Rows 2 and 3 are the plugin sending two betas the genuine 2.1.280 client's
+default first-party path never sends — `web-search-2025-03-05` unconditionally on any model `supportsWebSearch`
+reports true for, and `advisor-tool-2026-03-01` unconditionally on any non-`claude-3-*` model, with no equivalent of
+either upstream gate (provider, or the `tengu_sage_compass2` remote flag) on the plugin's side. This document records
+the divergence and leaves it open; it does not change plugin behaviour. Closing it — gating either push on a provider
+check or a config flag mirroring the remote default — is a product decision for whoever owns `lib/betas.mjs` policy,
+not something to do as a side effect of a documentation pass.
 
 ### Rows 1 to 3, in detail
 
 These are the only rows where the plugin still puts something on the wire that the genuine client does not, and they
-survive on purpose. `buildAdditionalBetas` (`lib/mimicry/adapter-input.mjs:347`) pushes `web-search-2025-03-05` when
+survive on purpose. `buildAdditionalBetas` in `lib/mimicry/adapter-input.mjs` pushes `web-search-2025-03-05` when
 `supportsWebSearch(model)`, `advisor-tool-2026-03-01` on any non-`claude-3-*` model, and `CLAUDE_CODE_BETA_FLAG` when
 `isHaikuModel(model)` — the last one so Haiku subagents reached through model-router delegation still get full mimic
 behaviour.
@@ -118,9 +145,9 @@ single-value golden proves the two sides agree on that golden, not on every vect
 
 ### Row 6, in detail
 
-The plugin does have a `resolveMaxTokens` (`lib/mimicry/request-helpers.mjs:227`), but it is a **policy** cap for
+The plugin does have a `resolveMaxTokens` in `lib/mimicry/request-helpers.mjs`, but it is a **policy** cap for
 context-window economy, not a protocol cap against the model's limit. Its first rule is that a caller-supplied value
-wins outright (`request-helpers.mjs:229`), so the model is never consulted — which is exactly why the package's cap is
+wins outright (also in `resolveMaxTokens`), so the model is never consulted — which is exactly why the package's cap is
 the one that bites, on both paths.
 
 This row is invisible to the byte-for-byte vectors: `HOST_BODY.max_tokens` is 8000 and every model those vectors
@@ -136,20 +163,20 @@ The bound is the model **default**, not its upper limit. Upstream only ever comp
 Every entry here was a capability the plugin lost — or would have lost — when the adapter took over request
 construction. Under Option A each was answered with an opt-in seam in the package, not by degrading the plugin.
 
-| Seam | Field                                | Set in                                             | What it preserves                                                                                                                                                          |
-| ---- | ------------------------------------ | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| S1   | `additionalBetas`                    | `adapter-input.mjs:347` (`buildAdditionalBetas`)   | Rows 1–3, `custom_betas` (shortcut-expanded), files-api, structured-outputs, host-SDK betas rescued from the dropped `anthropic-beta` header                               |
-| S2   | `betaOverrides.use1MContext`         | `adapter-input.mjs:554`                            | The plugin's `hasOneMillionContext` rule instead of the package's `/\[1m\]/iu` default                                                                                     |
-| S3   | `cacheControl.suppressIdentityBlock` | **not used by the plugin**                         | Would drop the identity block's `cache_control` marker and keep the block. See the name-collision note below.                                                              |
-| S4   | `metadataOverrides`                  | `adapter-input.mjs:444` (`buildMetadataOverrides`) | `OPENCODE_ANTHROPIC_SIGNATURE_USER_ID` and `CLAUDE_CODE_EXTRA_METADATA`                                                                                                    |
-| S5   | `extraHeaderPolicy`                  | `adapter-input.mjs:612` (`"dropConflicting"`)      | Host headers reaching the wire without overwriting canonical ones                                                                                                          |
-| S6   | `suppressBetas`                      | `adapter-input.mjs:409` (`buildSuppressBetas`)     | Round-robin's `prompt-caching-scope-2026-01-05` suppression and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` — the only seam that can reach a beta the package composes itself |
-| S7   | `suppressBillingBlock`               | `adapter-input.mjs:624`, `:644`                    | `CLAUDE_CODE_ATTRIBUTION_HEADER` opt-out, and half of the lean-system-prompt gate                                                                                          |
-| S8   | `suppressIdentityBlock` (**root**)   | `adapter-input.mjs:648`                            | The other half of the lean-system-prompt gate                                                                                                                              |
-| S9   | `preserveThinkingBlockCacheControl`  | `wire-compat.mjs:242` (**unconditional**)          | Reasoning blocks that arrive carrying `cache_control` — see below                                                                                                          |
+| Seam | Field                                | Set in                                                                                    | What it preserves                                                                                                                                                                                                                                                                             |
+| ---- | ------------------------------------ | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1   | `additionalBetas`                    | `buildAdditionalBetas` in `lib/mimicry/adapter-input.mjs`                                 | Rows 1–3, `custom_betas` (shortcut-expanded), files-api, structured-outputs, host-SDK betas rescued from the dropped `anthropic-beta` header                                                                                                                                                  |
+| S2   | `betaOverrides.use1MContext`         | `betaOverrides` seam in `buildAdapterTransport` (`lib/mimicry/adapter-input.mjs`)         | The plugin's `hasOneMillionContext` rule instead of the package's `/\[1m\]/iu` default                                                                                                                                                                                                        |
+| S3   | `cacheControl.suppressIdentityBlock` | **not used by the plugin**                                                                | Would drop the identity block's `cache_control` marker and keep the block. See the name-collision note below.                                                                                                                                                                                 |
+| S4   | `metadataOverrides`                  | `buildMetadataOverrides` in `lib/mimicry/adapter-input.mjs`                               | `OPENCODE_ANTHROPIC_SIGNATURE_USER_ID` and `CLAUDE_CODE_EXTRA_METADATA`                                                                                                                                                                                                                       |
+| S5   | `extraHeaderPolicy`                  | `extraHeaderPolicy` seam in `buildAdapterTransport` (`lib/mimicry/adapter-input.mjs`)     | Host headers reaching the wire without overwriting canonical ones                                                                                                                                                                                                                             |
+| S6   | `suppressBetas`                      | `buildSuppressBetas` in `lib/mimicry/adapter-input.mjs`                                   | Round-robin's `prompt-caching-scope-2026-01-05` suppression, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`, and the per-account rejected-beta latch (`index.mjs`'s `sentBetaSuppressionsByAccount`, fed through `rejectedBetas`) — the only seam that can reach a beta the package composes itself |
+| S7   | `suppressBillingBlock`               | `suppressBillingBlock` seam in `buildAdapterTransport` (`lib/mimicry/adapter-input.mjs`)  | `CLAUDE_CODE_ATTRIBUTION_HEADER` opt-out, and half of the lean-system-prompt gate                                                                                                                                                                                                             |
+| S8   | `suppressIdentityBlock` (**root**)   | `suppressIdentityBlock` seam in `buildAdapterTransport` (`lib/mimicry/adapter-input.mjs`) | The other half of the lean-system-prompt gate                                                                                                                                                                                                                                                 |
+| S9   | `preserveThinkingBlockCacheControl`  | `toClaudeCodeRequestInput` in `lib/mimicry/wire-compat.mjs` (**unconditional**)           | Reasoning blocks that arrive carrying `cache_control` — see below                                                                                                                                                                                                                             |
 
-Two more seams are used outside this table: `capabilities` (`adapter-input.mjs:662`) downgrades `adaptiveThinking` so
-`OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING` is not a no-op, and `profileOverride` (`adapter-input.mjs:197`) carries
+Two more seams are used outside this table: `capabilities` (set in `buildAdapterTransport` in `lib/mimicry/adapter-input.mjs`) downgrades `adaptiveThinking` so
+`OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING` is not a no-op, and `profileOverride` (`resolveProfileOverride` in `lib/mimicry/adapter-input.mjs`) carries
 the coupled `userAgent`/`cliVersion` pair when the plugin's dynamic user agent diverges from the pinned profile.
 
 ### S8 vs S3 — two different fields with the same name
@@ -163,20 +190,19 @@ This is the sharpest edge in the whole surface and it is worth stating twice.
   This is the one the plugin sets, and only inside the lean-system-prompt gate.
 
 Both default to `false`, both are independent, and they may be combined — in which case the root seam wins because
-there is no block left to mark. The package carries cross-referencing JSDoc on both (`dist/contracts.d.ts:603` and
-`:803`), and `lib/mimicry/wire-compat.mjs:225-231` and `adapter-input.mjs:645-648` repeat the warning at both plugin
+there is no block left to mark. The package carries cross-referencing JSDoc on both (in `dist/contracts.d.ts`), and
+`lib/mimicry/wire-compat.mjs` and `lib/mimicry/adapter-input.mjs` (in the `buildAdapterTransport` function) repeat the warning at both plugin
 call sites. Do not "simplify" either comment away.
 
 S8 also forced a redesign inside the package: `canonicalSystemPrefixLength`
-(`dist/build-request.js:931`) used to infer the canonical prefix length from the POSITION of the identity text. It now
+(in `dist/build-request.js`) used to infer the canonical prefix length from the POSITION of the identity text. It now
 takes `evidence.billingBlockSuppressed` and `evidence.identityBlockSuppressed` as arguments
-(`dist/build-request.js:1327`) and confirms structurally. With two suppression seams there are four prefix states
+(also in `dist/build-request.js`) and confirms structurally. With two suppression seams there are four prefix states
 (2, 1, 1, 0), and the empty-prefix state was not parseable under the old positional rule.
 
 ### S9 — why it is passed unconditionally
 
-`toClaudeCodeRequestInput` sets `preserveThinkingBlockCacheControl: true` on **every** request
-(`lib/mimicry/wire-compat.mjs:242`), with no condition and no scan of the messages.
+`toClaudeCodeRequestInput` (in `lib/mimicry/wire-compat.mjs`) sets `preserveThinkingBlockCacheControl: true` on **every** request, with no condition and no scan of the messages.
 
 The reason is an API round-trip constraint, not a per-request property. The Anthropic API answers 400 when the client
 mutates a reasoning block in the latest assistant message — _"thinking or redacted_thinking blocks in the latest
@@ -189,7 +215,7 @@ Gating the flag on "does some block actually carry the key" would add a traversa
 getting that traversal wrong reproduces exactly the `INVALID_INPUT` the seam exists to remove. With the flag on and no
 such key present, the package output is byte-identical.
 
-Scope, from the package's own contract (`dist/contracts.d.ts:858`): the allowlist grows by `cache_control` and by
+Scope, from the package's own contract (in `dist/contracts.d.ts`): the allowlist grows by `cache_control` and by
 nothing else. `scope`, which `text` blocks tolerate for legacy reasons, is **not** accepted on a reasoning block. The
 value goes through the same `cache_control` validator every other block uses, so a malformed marker still fails closed,
 and the preserved marker takes no part in the package's cache-control machinery — no TTL, no breakpoint, verbatim
@@ -200,9 +226,9 @@ passthrough.
 These were the plugin's defect, so under the Option A exception they were fixed in the plugin. No seam was added.
 
 - **`stainlessHelper` markers no longer reach the wire.** `stripStainlessHelperMarkers`
-  (`lib/mimicry/headers.mjs:146`) removes `x_stainless_helper`, `x-stainless-helper`, `stainless_helper`,
+  (in `lib/mimicry/headers.mjs`) removes `x_stainless_helper`, `x-stainless-helper`, `stainless_helper`,
   `stainlessHelper` and `_stainless_helper` from tools, messages and nested content blocks. It shares the traversal
-  `walkStainlessHelperCarriers` (`headers.mjs:101`) with `buildStainlessHelperHeader` (`:118`) precisely so that what
+  `walkStainlessHelperCarriers` (in `lib/mimicry/headers.mjs`) with `buildStainlessHelperHeader` (also in `lib/mimicry/headers.mjs`) precisely so that what
   is READ to compute `x-stainless-helper` and what is REMOVED from the body cannot drift apart. Applied on **every**
   path: the adapter path strips inside `buildWireCompatibleRequest`, the count-tokens path inside
   `buildWireCompatibleCountTokensRequest` (both in `lib/mimicry/wire-compat.mjs`), and the frozen legacy forge right
@@ -212,24 +238,22 @@ These were the plugin's defect, so under the Option A exception they were fixed 
 
 - **`context-hint-2026-04-09` is gone from every path.** The adapter path never emitted it; the legacy path used to
   push the beta in `buildAnthropicBetaHeader` and inject `context_hint: { enabled: true }` in `transformRequestBody`.
-  Both push sites are now comments explaining the removal (`lib/mimicry/headers.mjs:291-297`,
-  `lib/mimicry/request-body.mjs:592-596`). The genuine 2.1.195 client sends neither, so emitting them was a
+  Both push sites are now comments explaining the removal (in `lib/mimicry/headers.mjs` and `lib/mimicry/request-body.mjs`). The genuine 2.1.195 client sends neither, so emitting them was a
   fingerprint. Pinned by a parity test asserting the beta and the body field are absent on both construction paths.
 
 - **`token_economy.context_hint` is deprecated, not deleted.** The key still parses and still normalises
-  (`lib/config.mjs:794`) so existing config files keep loading, but nothing reads it. An explicit `context_hint: true`
-  makes `validateConfig` emit a one-shot `console.warn("[anthropic-auth] ...")` (`lib/config.mjs:771-780`), latched by
-  `contextHintDeprecationWarned` (`lib/config.mjs:537`) so it fires once per process. The default `false` stays quiet.
+  (in `lib/config.mjs`) so existing config files keep loading, but nothing reads it. An explicit `context_hint: true`
+  makes `validateConfig` emit a one-shot `console.warn("[anthropic-auth] ...")` (in `lib/config.mjs`), latched by
+  `contextHintDeprecationWarned` (also in `lib/config.mjs`) so it fires once per process. The default `false` stays quiet.
   A user-facing switch that becomes a silent no-op is not acceptable in this codebase; this is the required exit.
 
 - **The lean-system-prompt opt-in works again on the adapter path.** `token_economy.lean_system_non_main` was a silent
-  no-op there. On the legacy path the decision lives in `buildSystemPromptBlocks` (`leanNonMain`,
-  `lib/mimicry/system-prompt.mjs:581-587`), which returns the sanitized blocks before the billing header and the
+  no-op there. On the legacy path the decision lives in `buildSystemPromptBlocks` (in `lib/mimicry/system-prompt.mjs`), which returns the sanitized blocks before the billing header and the
   identity prefix are prepended — but on the adapter path those two blocks are no longer the plugin's to withhold,
-  because the package composes them. `adapter-input.mjs:639-649` re-expresses the SAME conjunction
+  because the package composes them. The lean-system-prompt gate in `buildAdapterTransport` (in `lib/mimicry/adapter-input.mjs`) re-expresses the SAME conjunction
   (`lean_system_non_main === true && (requestRole === "title" || "small") && !isTitleGenerator`) as S7 + S8.
 
-  `isTitleGenerator` is derived in `index.mjs:3196-3197` from the **pre-transform** body (`_parsedBodyOnce`). By the
+  `isTitleGenerator` is derived in `index.mjs` (before the body transform) from the **pre-transform** body (`_parsedBodyOnce`). By the
   time the transport is built, the title-generator system-prompt swap has already rewritten those blocks, so detecting
   it later would give a false negative and the attribution would be dropped from a turn that must keep it.
 
@@ -344,29 +368,43 @@ the code.
 ## Syncing a new package version
 
 1. Move the dependency. Which command applies depends on the specifier in `package.json`:
-   - **While the dependency is pinned exactly** (currently `0.5.0`, see "Package version state" above):
+   - **Under the `latest` dist-tag (the current specifier):** a sync is a lockfile move, not a `package.json` edit.
+     Run `npm run sync:wire-compat` (`scripts/sync-wire-compat.mjs`): it runs
+     `npm update @tormentalabs/claude-code-wire-compat`, prints the old and new versions, then runs the wire-sensitive
+     suites (`wire-baseline` and `test/conformance`). A plain `npm install` does NOT move the version — it keeps
+     whatever the lock resolves, which is how a checkout silently stayed on `0.5.0`. The update rewrites
+     `package-lock.json` only: new version, new registry tarball URL, new `sha512` integrity. **The lockfile diff is
+     the review artifact** — read it before anything else. `docs/shared-package-provenance.md` needs no version edit
+     under `latest`; it documents the policy, and `test/conformance/package-dependency-policy.test.mjs` validates
+     `resolved` against the lock's own `version`. `npm run check:wire-compat-drift` confirms the lock, the installed
+     copy and the registry `latest` agree; the publish workflow runs it before publishing. Do not re-pin an exact
+     version to perform a routine sync — that is the emergency-rollback shape (see
+     `docs/shared-package-provenance.md`).
+   - **While the dependency is pinned exactly** (emergency rollback only):
      `npm install --save-exact @tormentalabs/claude-code-wire-compat@<version>`. `npm update` cannot move an exact
      pin, because it respects the manifest's constraint. The install rewrites three things that change or name the
      version, and all three are the review artifact: `package.json` (the specifier), `package-lock.json` (version,
      registry tarball URL, `sha512` integrity) and `docs/shared-package-provenance.md` (which records the pinned
      version and must be edited to match; `test/conformance/package-dependency-policy.test.mjs` fails if it does
      not).
-   - **If the specifier returns to the `latest` dist-tag:** a sync is a lockfile move, not a `package.json` edit. Do
-     not re-pin an exact version to perform a routine sync — that is the emergency-rollback shape (see
-     `docs/shared-package-provenance.md`). `npm update @tormentalabs/claude-code-wire-compat` rewrites
-     `package-lock.json` only: new version, new registry tarball URL, new `sha512` integrity. **The lockfile diff is
-     the review artifact** — read it before anything else. `docs/shared-package-provenance.md` needs no version edit
-     under `latest`; it documents the policy, and `test/conformance/package-dependency-policy.test.mjs` validates
-     `resolved` against the lock's own `version`.
 2. Check whether the package's `DEFAULT_PROFILE` moved (its CHANGELOG says so, and
-   `node_modules/@tormentalabs/claude-code-wire-compat/src/build-request.ts` is the seam). If it did:
+   `node_modules/@tormentalabs/claude-code-wire-compat/src/build-request.ts` is the seam). `buildWireCompatibleRequest`
+   and `buildWireCompatibleCountTokensRequest` (`lib/mimicry/wire-compat.mjs`) pass `WIRE_PROFILE` as an EXPLICIT
+   `profile` argument to `buildClaudeCodeRequest` / `buildClaudeCodeCountTokensRequest`, so a moved `DEFAULT_PROFILE`
+   by itself changes nothing about what this plugin composes — the package's default only matters for what
+   `parseBuiltClaudeCodeRequest`/`buildClaudeCodeRequest` fall back to when a caller omits `profile` entirely, and
+   this plugin never omits it. If the CHANGELOG names a new client profile you want the plugin to actually emulate:
    - no version literal needs editing. `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT`
-     (`lib/mimicry/adapter-input.mjs:238-239`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
+     (in `lib/mimicry/adapter-input.mjs`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
      they follow the profile the seam binds rather than being re-typed — `test/conformance/version-literals-retired.test.mjs`
      enforces that. What DOES need a decision is the `WIRE_PROFILE` binding itself: it names an explicit profile
-     export (currently `CLAUDE_CODE_2_1_233_PROFILE`), so moving to a newer client is an intentional one-line change
-     at the seam, not a side effect of the bump. Leaving it behind the package's `DEFAULT_PROFILE` does not fail
-     closed — it makes every request carry a redundant `profileOverride`. (The old
+     export (currently `CLAUDE_CODE_2_1_280_PROFILE`), so moving to a newer client is an intentional one-line change
+     at the seam — import the new profile singleton and rebind `WIRE_PROFILE` to it — not a side effect of the bump.
+     Leaving `WIRE_PROFILE` behind a newer `DEFAULT_PROFILE` does not fail closed, but it no longer silently
+     migrates the wire either (that was the failure mode before the request path started passing `profile`
+     explicitly — see docs/shared-package-provenance.md, "Why the specifier is the `latest` dist-tag"): every
+     request keeps composing under the OLD, pinned profile indefinitely, so the plugin simply does not gain
+     whatever the newer client profile would have changed until someone deliberately does the rebind. (The old
      `FALLBACK_CLAUDE_CLI_VERSION` / `CLI_TO_SDK_VERSION` literals lived in `lib/request-headers.mjs`, which this
      migration deleted.)
    - copy the package's analysis doc for the new client version into `docs/claude-code-<version>-analysis.md`, which

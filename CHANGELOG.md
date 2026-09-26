@@ -2,6 +2,49 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [Unreleased]
+
+The request wire now emulates Claude Code 2.1.280, through `@tormentalabs/claude-code-wire-compat` 0.7.0. This also
+fixes sessions dying with `INVALID_UNICODE`.
+
+### Fixed
+
+- **Sessions no longer die with `INVALID_UNICODE` when a tool prints colours or control characters.** The wire
+  package pinned until now (0.5.0) rejected every C0 control except TAB, LF and CR in message text, before the
+  request was sent. Any tool output carrying ANSI colour codes, NUL, BEL or FF ended the session. 0.7.0 accepts every
+  well-formed string as message text; only lone surrogates are still rejected, now with a safe location in the
+  error.
+- **Truncation never splits a character.** Compacted tool descriptions and the rolling summary used to cut at a
+  fixed UTF-16 length. An emoji straddling the cut left a lone surrogate and the request was rejected. Cuts now
+  land on grapheme boundaries.
+- **Streamed responses keep every byte.** The UTF-8 decoder is flushed at the end of the stream, and SSE framing no
+  longer depends on how bytes are split into chunks. Invalid UTF-8 in an event stream now fails the stream
+  explicitly instead of disappearing. Non-SSE bodies pass through untouched.
+
+### Changed
+
+- **The emulated client is Claude Code 2.1.280.** User agent `claude-cli/2.1.280 (external, cli)`. While thinking is
+  active and no display is set, requests send `thinking-display-updates-2026-08-18` with body
+  `thinking.display: "updates"` instead of `redact-thinking-2026-02-12`. `thinking-binding-controls-2026-08-01` and
+  `cache-diagnosis-2026-04-07` are sent by default, as the genuine client does. See
+  `docs/claude-code-2.1.280-analysis.md`. `token_economy.redact_thinking` has no effect on the production path.
+- **A beta the API rejects is dropped for that account for 5 minutes**, with one retry on the same account. This
+  applies only to betas named in the API's invalid-beta message that were actually sent. It never applies to
+  `oauth-2025-04-20`, `claude-code-20250219`, or betas tied to a body field, and never to `count_tokens`. No account
+  is penalised for a beta rejection.
+- **The wire-compat dependency tracks `latest` again**, and the plugin passes its emulated profile explicitly. Library
+  fixes arrive with a normal install; the emulated client only changes when the plugin changes. `npm install`
+  keeps whatever the lockfile resolves. Run `npm run sync:wire-compat` to move to the newest library.
+  `npm run check:wire-compat-drift` fails when the lockfile is behind; it runs before every npm publish.
+- **Unknown response block types no longer break the turn in opencode.** opencode's embedded `@ai-sdk/anthropic`
+  (3.0.111) rejects content block, delta and event types it does not know. For that SDK version or older, unknown
+  blocks are turned into the SDK's own no-op `fallback` block, and their deltas are dropped. The request is
+  unchanged. A newer SDK receives the stream untouched.
+- `node cli.mjs diagnose` reports the emulated profile and the loaded wire-compat version.
+
+**If you installed from npm:** opencode caches plugin dependencies. Run
+`opencode plugin opencode-anthropic-fix --force` to pick up the new wire package.
+
 ## [2.0.0] — 2026-09-24
 
 OAuth parity with Claude Code 2.1.280. The OAuth endpoints, the token-request fingerprint, the refresh body, scope

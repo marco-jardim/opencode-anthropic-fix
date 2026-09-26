@@ -159,20 +159,20 @@ const GOLDEN_ADAPTER_URL = "https://api.anthropic.com/v1/messages?beta=true";
 const GOLDEN_ADAPTER_HEADERS = [
   [
     "anthropic-beta",
-    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11",
+    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07",
   ],
   ["anthropic-dangerous-direct-browser-access", "true"],
   ["anthropic-version", "2023-06-01"],
   ["authorization", "Bearer test-access"],
   ["content-type", "application/json"],
-  ["user-agent", "claude-cli/2.1.233 (external, cli)"],
+  ["user-agent", "claude-cli/2.1.280 (external, cli)"],
   ["x-app", "cli"],
   ["x-claude-code-session-id", "11111111-1111-4111-8111-111111111111"],
   ["x-client-request-id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
   ["x-stainless-arch", "<machine>"],
   ["x-stainless-lang", "js"],
   ["x-stainless-os", "<machine>"],
-  // 2.1.233 bundles @anthropic-ai/sdk 0.112.1 (was 0.94.0 through 2.1.222).
+  // 2.1.280 bundles @anthropic-ai/sdk 0.112.1 (was 0.94.0 through 2.1.222).
   ["x-stainless-package-version", "0.112.1"],
   ["x-stainless-retry-count", "0"],
   ["x-stainless-runtime", "node"],
@@ -189,8 +189,8 @@ const GOLDEN_ADAPTER_BODY = {
     // The `.768` suffix is the fingerprint: unchanged algorithm (salt
     // `59cf53e54c78` + chars 4/7/20 of the first user message + VERSION,
     // SHA-256, first three hex chars), different output only because VERSION is
-    // an input and VERSION moved 2.1.195 -> 2.1.233.
-    { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.233.768; cc_entrypoint=cli; cch=00000;" },
+    // an input and VERSION moved 2.1.195 -> 2.1.280.
+    { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.280.790; cc_entrypoint=cli; cch=00000;" },
     {
       type: "text",
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -389,7 +389,7 @@ describe("adapter golden wire", () => {
 // WHAT CHANGED. `_useAdapter` is false on exactly one condition now: signature
 // emulation off. And with it off the plugin no longer runs a REDUCED forge — it
 // runs NO forge. The old assertions in this block pinned the half-mimicry that
-// survived: a forged `claude-cli/2.1.233` user-agent emitted outside the
+// survived: a forged `claude-cli/2.1.280` user-agent emitted outside the
 // signature gate, and a minimal `anthropic-beta` that REPLACED whatever the host
 // sent. Both were mimicry with the mimicry switch off, and both are gone.
 //
@@ -682,7 +682,7 @@ describe("shared package adapter input normalization", () => {
       transport,
     );
 
-    expect(JSON.parse(built.body).thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
+    expect(JSON.parse(built.body).thinking).toEqual({ type: "enabled", budget_tokens: 4096, display: "updates" });
   });
 
   // rc.10 added upstream's budget clamp: `Tr = Math.min(Fi - 1, Tr)` where `Fi`
@@ -697,7 +697,7 @@ describe("shared package adapter input normalization", () => {
     );
 
     expect(JSON.parse(built.body).max_tokens).toBe(8000);
-    expect(JSON.parse(built.body).thinking).toEqual({ type: "enabled", budget_tokens: 7999 });
+    expect(JSON.parse(built.body).thinking).toEqual({ type: "enabled", budget_tokens: 7999, display: "updates" });
   });
 
   it("forwards thinking.display to the package instead of dropping it", async () => {
@@ -870,7 +870,7 @@ describe("shared package boundary - deferred plugin policy", () => {
     const existingBody = JSON.parse(existing.body);
     const adapterBody = JSON.parse(adapter.body);
 
-    expect(existingBody.thinking).toEqual({ type: "adaptive" });
+    expect(existingBody.thinking).toEqual({ type: "adaptive", display: "updates" });
     expect(existingBody.output_config).toEqual({ effort: "high" });
     expect(existingBody.temperature).toBeUndefined();
 

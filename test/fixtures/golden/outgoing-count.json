@@ -5,7 +5,7 @@
     "anthropic-version": "2023-06-01",
     "authorization": "Bearer test-access",
     "content-type": "application/json",
-    "user-agent": "claude-cli/2.1.233 (external, cli)",
+    "user-agent": "claude-cli/2.1.280 (external, cli)",
     "x-app": "cli",
     "x-claude-code-session-id": "<normalized>",
     "x-client-request-id": "<normalized>",

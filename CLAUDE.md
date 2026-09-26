@@ -38,11 +38,12 @@ For a rotation-strategy change, consult [strategy-decision-table.md](docs/mimicr
 Follow this exact order (source: [AGENTS.md, “Release flow”](AGENTS.md#release-flow)):
 
 1. Run `npm run check:invariants` (the sources-of-truth guard added in W0·P0.4).
-2. Run `npm version patch --no-git-tag-version`.
-3. Create a separate `chore: bump version to X.Y.Z` commit.
-4. Create the matching git tag `vX.Y.Z`.
-5. Run `npm run build`.
-6. Push to `master`; `.github/workflows/publish.yml` auto-publishes to npm only when `package.json` changed versus `HEAD~1`.
+2. Run `npm run check:wire-compat-drift` (fails if `package-lock.json` is behind the registry's `latest` dist-tag for `@tormentalabs/claude-code-wire-compat`; run `npm run sync:wire-compat` first if it does — see `docs/shared-package-provenance.md`).
+3. Run `npm version patch --no-git-tag-version`.
+4. Create a separate `chore: bump version to X.Y.Z` commit.
+5. Create the matching git tag `vX.Y.Z`.
+6. Run `npm run build`.
+7. Push to `master`; `.github/workflows/publish.yml` auto-publishes to npm only when `package.json` changed versus `HEAD~1` (that workflow also re-runs `check:wire-compat-drift` and blocks the publish step on it).
 
 ## Parallel-safety & commit-often
 

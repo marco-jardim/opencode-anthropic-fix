@@ -101,6 +101,11 @@ Do not run `git commit` manually for small edits — `pre-commit` runs
 
 ## Release flow
 
+- Run `npm run check:invariants` then `npm run check:wire-compat-drift` before
+  bumping a version — the latter fails if `package-lock.json` is behind the
+  registry's `latest` dist-tag for `@tormentalabs/claude-code-wire-compat`
+  (see `docs/shared-package-provenance.md`). `.github/workflows/publish.yml`
+  runs the same check and blocks the publish step on it.
 - Version bumps use `npm version patch --no-git-tag-version`, then a separate
   `chore: bump version to X.Y.Z` commit.
 - `.github/workflows/publish.yml` auto-publishes to npm on push to `master`
