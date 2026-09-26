@@ -54,6 +54,10 @@ jobs:
         if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         run: npm run check:invariants
 
+      - name: Check wire-compat drift
+        if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: npm run check:wire-compat-drift
+
       - name: Test
         if: steps.version_check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         run: npm test
