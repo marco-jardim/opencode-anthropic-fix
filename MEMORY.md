@@ -18,8 +18,9 @@ single seam. Decisions taken along the way, and what each one closes off:
 
 - **D1 — Model API shape: generic capability + named predicates, both package-side.**
   The package exports a generic `modelCapability`-style query _and_ named predicates
-  (`isOpus46Model`, `isFable5Model`, ...). The plugin re-exports the named ones; it
-  does not re-derive them from the generic query, and it does not keep regexes. A
+  (`isOpus46Model`, `isFable5Model`, ...). The plugin imports the named ones through
+  `lib/mimicry/wire-compat.mjs` (the plugin entry no longer re-exports them: opencode calls every entry export
+  as a plugin); it does not re-derive them from the generic query, and it does not keep regexes. A
   host-side regex was how the model surface drifted before — `test/conformance/model-regex-retired.test.mjs`
   now forbids it.
 

@@ -80,14 +80,14 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
+import { AnthropicAuthPlugin } from "./index.mjs";
 import {
-  AnthropicAuthPlugin,
   createDebugCorrelationId,
   createDebugOutgoingHeadersEntry,
   createDebugRequestDump,
   createDebugResponseHeadersEntry,
   isDebugSinkEnabled,
-} from "./index.mjs";
+} from "./lib/debug-dump.mjs";
 import { isBetaRetryAccountUsable } from "./lib/accounts.mjs";
 import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";

@@ -370,8 +370,10 @@ the code.
 1. Move the dependency. Which command applies depends on the specifier in `package.json`:
    - **Under the `latest` dist-tag (the current specifier):** a sync is a lockfile move, not a `package.json` edit.
      Run `npm run sync:wire-compat` (`scripts/sync-wire-compat.mjs`): it runs
-     `npm update @tormentalabs/claude-code-wire-compat`, prints the old and new versions, then runs the wire-sensitive
-     suites (`wire-baseline` and `test/conformance`). A plain `npm install` does NOT move the version — it keeps
+     `npm update @tormentalabs/claude-code-wire-compat --prefer-online` (without `--prefer-online` npm can answer from its
+     cached packument, keep the old version and still exit 0), prints the old and new versions, runs
+     `check:wire-compat-drift` (fails unless lock, installed copy and registry `latest` agree; needs the registry, and
+     fails if `latest` moves mid-sync), then runs the wire-sensitive suites (`wire-baseline` and `test/conformance`). A plain `npm install` does NOT move the version — it keeps
      whatever the lock resolves, which is how a checkout silently stayed on `0.5.0`. The update rewrites
      `package-lock.json` only: new version, new registry tarball URL, new `sha512` integrity. **The lockfile diff is
      the review artifact** — read it before anything else. `docs/shared-package-provenance.md` needs no version edit

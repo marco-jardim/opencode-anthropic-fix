@@ -2,6 +2,20 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [2.1.1] — 2026-09-26
+
+### Fixed
+
+- **Long sessions no longer fail with `INPUT_TOO_LARGE (maximumSize=1000000)`.** The wire package capped every
+  request at about 1 MB before sending it, far below the API's 32 MB request limit, so a long session on a 1M-context
+  model failed locally. `@tormentalabs/claude-code-wire-compat` 0.7.1 raises the ceiling to 32 MiB. A 4.5 MB session
+  now builds in about 140 ms.
+- **opencode no longer logs `failed to load plugin … response.status` on every start.** opencode calls every export
+  of the plugin entry module as a plugin, and `index.mjs` also exported debug helpers. It now exports only the plugin.
+- **`npm run sync:wire-compat` actually moves the lockfile.** It asks the registry directly instead of trusting npm's
+  cached metadata, and fails if the lockfile still lags the registry's `latest` afterwards. Before, it could keep the
+  old version and still report success.
+
 ## [2.1.0] — 2026-09-26
 
 The request wire now emulates Claude Code 2.1.280, through `@tormentalabs/claude-code-wire-compat` 0.7.0. This also

@@ -78,7 +78,8 @@ export function fetchRegistryLatest(repoRoot) {
   // never host- or user-controlled, so cmd.exe's own command-line join is
   // safe here.
   const isWindows = process.platform === "win32";
-  const viewArgs = ["view", PACKAGE_NAME, "dist-tags.latest", "--json"];
+  // --prefer-online: a cached packument can report a stale dist-tag.
+  const viewArgs = ["view", PACKAGE_NAME, "dist-tags.latest", "--json", "--prefer-online"];
   const command = isWindows ? "cmd.exe" : "npm";
   const args = isWindows ? ["/d", "/s", "/c", "npm", ...viewArgs] : viewArgs;
   try {
