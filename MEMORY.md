@@ -53,7 +53,8 @@ single seam. Decisions taken along the way, and what each one closes off:
 
 - **D6 — One seam: `lib/mimicry/wire-compat.mjs`.** Every package import goes through
   it, guarded by an import-seam test. It also BINDS the profile:
-  `isEligibleFor1MContextWire` passes `WIRE_PROFILE` (the 2.1.233 catalogue) rather
+  `isEligibleFor1MContextWire` passes `WIRE_PROFILE` (the 2.1.280 catalogue as of the
+  2.1.280 port; the 2.1.233 catalogue at the time this decision was written) rather
   than letting the package fall back to its own `DEFAULT_PROFILE`. Eligibility must
   follow the client version being emulated, not whatever the package currently
   defaults to; a package bump should not silently move the emulated identity.

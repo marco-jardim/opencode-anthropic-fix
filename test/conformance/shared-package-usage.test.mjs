@@ -275,6 +275,9 @@ describe("the live request path goes through the shared wire package", () => {
       toClaudeCodeRequestInput(FOREGROUND_BODY, {
         accessToken: "test-access",
         clientRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        // The plugin always forwards ttl "1h" (adapter-input.mjs), which moves
+        // extended-cache-ttl ahead of cache-diagnosis; compare like with like.
+        cacheControl: { ttl: "1h" },
         runtime: {
           sessionId: "11111111-1111-4111-8111-111111111111",
           deviceId: "2".repeat(64),

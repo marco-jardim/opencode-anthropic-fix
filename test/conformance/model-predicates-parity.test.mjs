@@ -70,7 +70,7 @@ const MATRIX = [
   // DIVERGENCE (3): same as (2) for Mythos 5 — and this row is ALSO why
   // `isEligibleFor1MContextWire` binds `WIRE_PROFILE` instead of calling the
   // package bare: under the package's default profile (2.1.195) this model is
-  // NOT eligible; under the 2.1.233 profile the plugin emulates, it is.
+  // NOT eligible; under the 2.1.233+ / 2.1.280 profile the plugin emulates, it is.
   ["claude-mythos-5", ["isMythos5Model", "isAdaptiveThinkingModel", "isEligibleFor1MContextWire"]],
 
   // --- dotted version separators (host tolerance) ---------------------------

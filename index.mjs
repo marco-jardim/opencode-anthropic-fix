@@ -78,6 +78,7 @@ import {
   assertAdapterBodyUsable,
   buildAdapterTransport,
   resolveAdapterEnv,
+  UNSUPPRESSIBLE_BETAS,
 } from "./lib/mimicry/adapter-input.mjs";
 import { buildPassthroughHeaders, stripNonApiBodyFields } from "./lib/passthrough-headers.mjs";
 import {
@@ -2699,6 +2700,7 @@ export async function AnthropicAuthPlugin({ client }) {
               let _overloadRecoveryAttempted = false; // Guard: only one quota-aware switch per request
               let _connectionResetRetries = 0; // Cap ECONNRESET/EPIPE retries to prevent infinite loop
               let customBetasStripped = false; // One-shot latch: strip config.custom_betas once per logical request
+              let sentBetaRejectionRetried = false; // One-shot latch: retry once after latching a rejected SENT beta
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // Select account — use pinned account on first attempt if available
                 const account =
@@ -2937,6 +2939,26 @@ export async function AnthropicAuthPlugin({ client }) {
                       }
                       return false;
                     });
+                // Evicting a rejected beta from `customBetas` is not enough on the
+                // adapter path: the package composes some betas on its own (e.g.
+                // `cache-diagnosis-2026-04-07` under 2.1.280), and only
+                // `suppressBetas` (its terminal filter) can take those off the
+                // wire. So the same two evictions are also handed over as
+                // `rejectedBetas`: every configured custom beta while the one-shot
+                // `customBetasStripped` retry is in effect, plus every unexpired
+                // `sessionRejectedBetas` entry. The adapter never suppresses the
+                // OAuth or Claude Code betas from this list (UNSUPPRESSIBLE_BETAS).
+                const _sessionRejectedBetaNames = new Set();
+                if (customBetasStripped) {
+                  for (const b of config.custom_betas ?? []) _sessionRejectedBetaNames.add(resolveBetaShortcut(b));
+                }
+                for (const [canonical, rejectedAt] of sessionRejectedBetas) {
+                  if (Date.now() - rejectedAt > SESSION_REJECTED_BETA_TTL_MS) {
+                    sessionRejectedBetas.delete(canonical);
+                  } else {
+                    _sessionRejectedBetaNames.add(canonical);
+                  }
+                }
                 // PHASE 2.2.3 — THE BETA LATCH IS GONE. It used to merge every
                 // beta ever sent this session back into this value, to avoid
                 // server-side cache-key churn from a beta flipping mid-session.
@@ -3155,6 +3177,7 @@ export async function AnthropicAuthPlugin({ client }) {
                   enabled: getSignatureEmulationEnabled(),
                   claudeCliVersion,
                   customBetas: _sessionFilteredCustomBetas,
+                  rejectedBetas: [..._sessionRejectedBetaNames],
                   strategy: getEffectiveStrategy(),
                   sessionId: signatureSessionId,
                 };
@@ -3705,19 +3728,36 @@ export async function AnthropicAuthPlugin({ client }) {
                   // context_window, long context, 1m/million context) to avoid false positives
                   // on generic 413s (e.g. plain upload-size limits with an empty body).
                   // One retry per logical request (latch prevents loop).
-                  if (
-                    !customBetasStripped &&
-                    (config.custom_betas?.length ?? 0) > 0 &&
-                    ((response.status === 400 &&
+                  const _betaRejectionSignal =
+                    (response.status === 400 &&
                       errorBody &&
                       errorBody.includes("anthropic-beta") &&
                       !errorBody.includes("context-hint")) ||
-                      (response.status === 413 &&
-                        errorBody &&
-                        /anthropic-beta|beta header|unsupported beta|unknown beta|invalid beta|context_window|long context|1m context|million context/i.test(
-                          errorBody,
-                        )))
-                  ) {
+                    (response.status === 413 &&
+                      errorBody &&
+                      /anthropic-beta|beta header|unsupported beta|unknown beta|invalid beta|context_window|long context|1m context|million context/i.test(
+                        errorBody,
+                      ));
+                  // Betas the error body names that were actually on the failing
+                  // request's `anthropic-beta` header. Under 2.1.280 the package
+                  // composes some betas by default (e.g. cache-diagnosis), so a
+                  // rejection can name a beta the user never configured; only the
+                  // adapter path can suppress those (via `rejectedBetas` ->
+                  // `suppressBetas`). OAuth / Claude Code are never latched.
+                  const _sentNamedBetas = [];
+                  if (_betaRejectionSignal && _useAdapter) {
+                    const _sentHeader =
+                      typeof requestHeaders?.get === "function"
+                        ? requestHeaders.get("anthropic-beta")
+                        : requestHeaders?.["anthropic-beta"];
+                    const _bodyLc = errorBody.toLowerCase();
+                    for (const _b of String(_sentHeader ?? "").split(",")) {
+                      const _beta = _b.trim();
+                      if (!_beta || UNSUPPRESSIBLE_BETAS.has(_beta.toLowerCase())) continue;
+                      if (_bodyLc.includes(_beta.toLowerCase())) _sentNamedBetas.push(_beta);
+                    }
+                  }
+                  if (!customBetasStripped && (config.custom_betas?.length ?? 0) > 0 && _betaRejectionSignal) {
                     customBetasStripped = true;
                     // F4: record rejection in session latch so next logical request already
                     // omits the rejected beta without needing a first-fail.
@@ -3736,9 +3776,28 @@ export async function AnthropicAuthPlugin({ client }) {
                       for (const _sb of _toRecord) {
                         sessionRejectedBetas.set(resolveBetaShortcut(_sb), _recordedAt);
                       }
+                      // Same single retry also drops any named SENT beta the user did
+                      // not configure, so it does not take a second retry to clear it.
+                      for (const _beta of _sentNamedBetas) sessionRejectedBetas.set(_beta, _recordedAt);
                     }
+                    if (_sentNamedBetas.length > 0) sentBetaRejectionRetried = true;
                     attempt--;
                     debugLog("custom beta/context rejection - retrying without custom betas");
+                    continue;
+                  }
+
+                  // Sent-beta rejection retry: the error names a beta that was on the
+                  // wire but is not (only) a custom beta, e.g. the package-default
+                  // cache-diagnosis with empty custom_betas. Latch it (TTL'd, as
+                  // above) and retry once; `sentBetaRejectionRetried` prevents a loop.
+                  // Like the custom-beta path, this runs before any account-failure
+                  // bookkeeping and on a non-ok response, so no stream was delivered.
+                  if (!sentBetaRejectionRetried && _sentNamedBetas.length > 0) {
+                    sentBetaRejectionRetried = true;
+                    const _recordedAt = Date.now();
+                    for (const _beta of _sentNamedBetas) sessionRejectedBetas.set(_beta, _recordedAt);
+                    attempt--;
+                    debugLog("sent beta rejection - retrying without", _sentNamedBetas);
                     continue;
                   }
 

@@ -9,7 +9,7 @@
     ["anthropic-version", "2023-06-01"],
     ["authorization", "<redacted>"],
     ["content-type", "application/json"],
-    ["user-agent", "claude-cli/2.1.233 (external, cli)"],
+    ["user-agent", "claude-cli/2.1.280 (external, cli)"],
     ["x-app", "cli"],
     ["x-claude-code-session-id", "<generated>"],
     ["x-client-request-id", "<generated>"],
@@ -28,7 +28,7 @@
     "system": [
       {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.233.768; cc_entrypoint=cli; cch=00000;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.280.790; cc_entrypoint=cli; cch=00000;"
       },
       {
         "type": "text",

@@ -32,6 +32,8 @@
     "install:link": "node scripts/install.mjs link",
     "install:copy": "npm run build && node scripts/install.mjs copy",
     "uninstall": "node scripts/install.mjs uninstall",
+    "sync:wire-compat": "node scripts/sync-wire-compat.mjs",
+    "check:wire-compat-drift": "node scripts/check-wire-compat-drift.mjs",
     "prepare": "husky"
   },
   "lint-staged": {
@@ -55,6 +57,6 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@tormentalabs/claude-code-wire-compat": "0.5.0"
+    "@tormentalabs/claude-code-wire-compat": "latest"
   }
 }

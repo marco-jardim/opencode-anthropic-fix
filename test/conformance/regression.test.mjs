@@ -1287,18 +1287,26 @@ describe("E2E: Beta composition is complete and correct", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("contains all required always-on betas for non-Haiku effort-capable model (v2.1.233 set)", async () => {
+  it("contains all required always-on betas for non-Haiku effort-capable model (v2.1.280 set)", async () => {
     // Use opus-4-6: real CC's Kw(model) pushes effort-2025-11-24 for Opus 4.5/4.6/
     // 4.7/4.8 and Sonnet 4.6, and n0d(model) pushes context-management for any
     // first-party non-claude-3 model — so this model carries BOTH.
-    const { headers } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
+    const { headers, body } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
     const beta = headers.get("anthropic-beta");
+    // The body half of the display-updates pairing: thinking carries display "updates".
+    expect(body.thinking?.display).toBe("updates");
 
-    // RE doc §15.16 always-on set — synced to v2.1.233. The 2.1.233 beta
+    // RE doc §15.16 always-on set — synced to v2.1.280. The 2.1.280 beta
     // registry has 31 effective entries; the only removal against 2.1.195 is
     // `summarize-connector-text-2026-03-13` (narration summaries), which this
     // path never emitted anyway. `fast-mode-2026-02-01` stays absent and is now
-    // doubly guaranteed: 2.1.233 also dropped `fast_mode` from opus-4-6.
+    // doubly guaranteed: 2.1.280 also dropped `fast_mode` from opus-4-6.
+    // Thinking-active models (opus-4-6 is one) additionally get
+    // `thinking-display-updates-2026-08-18` and
+    // `thinking-binding-controls-2026-08-01`, and the genuine 2.1.280 client
+    // splices `redact-thinking-2026-02-12` OUT when display-updates fires, so
+    // redact-thinking must be ABSENT here. `cache-diagnosis-2026-04-07` is
+    // default-on in 2.1.280.
     expect(beta).toContain("oauth-2025-04-20");
     expect(beta).toContain("claude-code-20250219");
     expect(beta).not.toContain("advanced-tool-use-2025-11-20");
@@ -1311,7 +1319,10 @@ describe("E2E: Beta composition is complete and correct", () => {
     expect(beta).toContain("context-management-2025-06-27");
     expect(beta).toContain("extended-cache-ttl-2025-04-11");
     expect(beta).toContain("thinking-token-count-2026-05-13");
-    expect(beta).toContain("redact-thinking-2026-02-12");
+    expect(beta).toContain("thinking-display-updates-2026-08-18");
+    expect(beta).toContain("thinking-binding-controls-2026-08-01");
+    expect(beta).toContain("cache-diagnosis-2026-04-07");
+    expect(beta).not.toContain("redact-thinking-2026-02-12");
     // Provider-aware tool search: tool-search-tool for 3P, neither for 1P by default.
     expect(beta).not.toContain("advanced-tool-use-2025-11-20");
 
@@ -1324,8 +1335,9 @@ describe("E2E: Beta composition is complete and correct", () => {
     // (registered in EXPERIMENTAL_BETA_FLAGS for disable-guard/opt-in only), so the
     // default beta header must still NOT contain it.
     expect(beta).not.toContain("summarize-connector-text-2026-03-13");
-    // redact-thinking is on by default for non-Claude-3 models
-    expect(beta).toContain("redact-thinking-2026-02-12");
+    // redact-thinking: spliced out under 2.1.280 for thinking-active models
+    // (thinking-display-updates replaces it) -- see the block above.
+    expect(beta).not.toContain("redact-thinking-2026-02-12");
 
     // Removed in v2.1.84 — must NOT be sent
     expect(beta).not.toContain("tool-examples-2025-10-29");
@@ -1387,7 +1399,7 @@ describe("E2E: Thinking normalization", () => {
       thinking: { type: "enabled", budget_tokens: 10000 },
     });
 
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   it("Sonnet 4.6 gets adaptive thinking", async () => {
@@ -1396,7 +1408,7 @@ describe("E2E: Thinking normalization", () => {
       thinking: { type: "enabled", budget_tokens: 10000 },
     });
 
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   it("Opus 4.7 gets adaptive thinking", async () => {
@@ -1405,7 +1417,7 @@ describe("E2E: Thinking normalization", () => {
       thinking: { type: "enabled", budget_tokens: 10000 },
     });
 
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   it("Opus 4.7 dotted variant gets adaptive thinking", async () => {
@@ -1414,7 +1426,7 @@ describe("E2E: Thinking normalization", () => {
       thinking: { type: "enabled", budget_tokens: 10000 },
     });
 
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   // Pins the observable side effect of normalizing dotted model ids to dashed
@@ -1446,7 +1458,7 @@ describe("E2E: Thinking normalization", () => {
       thinking: { type: "enabled", budget_tokens: 10000 },
     });
 
-    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 10000 });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 10000, display: "updates" });
   });
 });
 
@@ -1627,7 +1639,7 @@ describe("context_management body field — field ⊆ beta invariant", () => {
   });
 });
 
-describe("E2E: Version is 2.1.233", () => {
+describe("E2E: Version is 2.1.280", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1636,17 +1648,17 @@ describe("E2E: Version is 2.1.233", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.233", async () => {
+  it("User-Agent contains 2.1.280", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.233");
+    expect(headers.get("user-agent")).toContain("2.1.280");
   });
 
-  it("billing header contains 2.1.233", async () => {
+  it("billing header contains 2.1.280", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.233");
+    expect(body.system[0].text).toContain("2.1.280");
   });
 });
 
@@ -1705,12 +1717,12 @@ describe("Opus 4.8", () => {
 
   it("(a) claude-opus-4-8 with no thinking field gets thinking:{type:'adaptive'}", async () => {
     const { body } = await sendRequest(fetchFn, { model: "claude-opus-4-8" });
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   it("(a) dotted variant claude-opus-4.8 also gets adaptive thinking injected", async () => {
     const { body } = await sendRequest(fetchFn, { model: "claude-opus-4.8" });
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   // ── (b) Manual thinking → converted to adaptive ───────────────────────────
@@ -1720,7 +1732,7 @@ describe("Opus 4.8", () => {
       model: "claude-opus-4-8",
       thinking: { type: "enabled", budget_tokens: 10000 },
     });
-    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   // ── (c) top-level effort → output_config.effort ───────────────────────────

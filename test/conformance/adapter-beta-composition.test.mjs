@@ -117,6 +117,7 @@ const DEFAULT_BETAS = [
   "context-management-2025-06-27",
   "prompt-caching-scope-2026-01-05",
   "extended-cache-ttl-2025-04-11",
+  "cache-diagnosis-2026-04-07",
   "web-search-2025-03-05",
   "advisor-tool-2026-03-01",
 ].join(",");
@@ -247,20 +248,21 @@ describe("adapter-path beta composition (end to end)", () => {
   });
 
   it("merges a custom beta additively, keeping the whole default set", async () => {
-    // Both are BETA_SHORTCUTS aliases (lib/betas.mjs:85-90), so shortcut
-    // resolution is under test too. They are chosen for opposite reasons:
-    // `cache-diagnosis` resolves to a beta the package does NOT compose by
-    // default, which is what actually proves the merge is additive;
-    // `cache-ttl` resolves to one it DOES, so the pair also shows an alias
-    // colliding with a composed beta is harmless.
-    testConfig.customBetas = ["cache-diagnosis", "cache-ttl"];
+    // Both are BETA_SHORTCUTS aliases (lib/betas.mjs), so shortcut resolution
+    // is under test too. They are chosen for opposite reasons: `afk-mode`
+    // resolves to a beta the package does NOT compose by default, which is what
+    // actually proves the merge is additive; `cache-ttl` resolves to one it
+    // DOES, so the pair also shows an alias colliding with a composed beta is
+    // harmless. (`cache-diagnosis` used to fill the first role, but under
+    // 2.1.280 the package composes it by default, so it no longer can.)
+    testConfig.customBetas = ["afk-mode", "cache-ttl"];
 
     const header = await driveBetaHeader();
 
-    expect(betaList(DEFAULT_BETAS), "precondition: cache-diagnosis must be absent by default").not.toContain(
-      "cache-diagnosis-2026-04-07",
+    expect(betaList(DEFAULT_BETAS), "precondition: afk-mode must be absent by default").not.toContain(
+      "afk-mode-2026-01-31",
     );
-    expect(betaList(header)).toContain("cache-diagnosis-2026-04-07");
+    expect(betaList(header)).toContain("afk-mode-2026-01-31");
     expect(betaList(header)).toContain("extended-cache-ttl-2025-04-11");
     // Additive, not replacing: nothing the package composed by default may be
     // dropped just because the user asked for one more.

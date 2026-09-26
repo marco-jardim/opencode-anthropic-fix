@@ -38,9 +38,12 @@ When changing `cliVersion`, change `userAgent` to the same version in the same o
 base profile — and that base moves.** The plugin deliberately omits the `profile` argument, so the
 base is whatever `DEFAULT_PROFILE` the installed
 `@tormentalabs/claude-code-wire-compat` declares. Every package release can advance it (it moved
-2.1.195 → 2.1.233 at the `0.3.0` bump). The dependency is currently pinned to exactly `0.5.0`, because
-`0.6.0` advances the default to 2.1.280 ahead of the plugin's port (see
-`docs/shared-package-provenance.md`); the base moves again when the pin lifts.
+2.1.195 → 2.1.233 at the `0.3.0` bump, then 2.1.233 → 2.1.280 at the `0.6.0` bump). The dependency
+specifier tracks the `latest` dist-tag, currently lock-resolved to `0.7.0`, so the default profile in
+normal operation is **2.1.280** (`docs/claude-code-2.1.280-analysis.md`). An emergency rollback pins an
+exact version instead of tracking `latest` — see `docs/shared-package-provenance.md` — and that pin,
+not this override mechanism, is the tool for reverting the base profile itself; the base moves again
+whenever the pin is lifted or moved.
 
 There is no deep merge. A field you supply **replaces** the base field entirely; a field you omit is
 inherited from the new base. That is fine for scalars like `userAgent` and `cliVersion`, and it is a

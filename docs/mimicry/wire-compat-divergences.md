@@ -8,7 +8,10 @@ body byte-for-byte after normalising genuine per-run nondeterminism.
 **The direction of the difference inverted once, and then the ground moved again.** That suite was written when the
 shared package was the incomplete implementation and the plugin was the reference. Since the package's Wave 7 work
 (`v0.1.0-rc.10`) and the max-tokens clamp (`v0.1.0-rc.11`), the package is derived directly from a genuine client
-binary — 2.1.195 then, 2.1.233 since the `0.3.0` default profile — and is the reference. Since `index.mjs` started routing the first-party `/v1/messages` turn through the adapter,
+binary — 2.1.195 then, 2.1.233 since the `0.3.0` default profile, and **2.1.280 since `0.7.0`** (the profile itself
+landed at `0.6.0`; `0.7.0` is the release this plugin actually depends on and additionally changes the body-prose
+Unicode policy, see [`../claude-code-2.1.280-analysis.md`](../claude-code-2.1.280-analysis.md) §10) — and is the
+reference. Since `index.mjs` started routing the first-party `/v1/messages` turn through the adapter,
 the plugin's production path **is** the package plus plugin-owned policy — so most rows below are no longer "two
 implementations disagree" but "the plugin deliberately steers the package through a seam".
 
@@ -23,15 +26,19 @@ itself a defect: then the fix belongs in the consumer. `stainlessHelper` markers
 
 ## Package version state (read this before running `npm install`)
 
-- `package.json` pins **exactly `0.5.0`** (since plugin 2.0.0; it tracked the `latest` dist-tag
-  before). `0.6.0` switches the package's `DEFAULT_PROFILE` to Claude Code 2.1.280, and against it the
-  plugin's suite fails 48 tests, so the pin holds until the plugin's wire port to 2.1.280 lands. The
-  registry tarball URL and `sha512` integrity live in `package-lock.json`, and `npm ci` installs
-  exactly that. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is installed.
+- `package.json` tracks the **`latest`** dist-tag again. The exact pin at `0.5.0` (since plugin 2.0.0) was a
+  temporary hold while the plugin's wire port to 2.1.280 was in flight — `0.6.0` switched the package's
+  `DEFAULT_PROFILE` to Claude Code 2.1.280, which failed 48 tests against the port that had not yet landed. The
+  port has landed (see `docs/claude-code-2.1.280-analysis.md`), so the pin lifted. `package-lock.json` resolves
+  `latest` to **`0.7.0`** as of this note. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is
+  actually installed — a dist-tag is mutable, so the lockfile, not this sentence, is the source of truth.
 - The wire shape follows from that: the adapter calls the package **without a `profile` argument**, so
   the plugin inherits the package's `DEFAULT_PROFILE`. `0.1.0` defaulted to `claude-code-2.1.195`;
-  `0.3.0` defaults to `claude-code-2.1.233-sdk-0.112.1`. A package release can therefore move the
-  wire, which is the whole point of the arrangement and the reason the golden suite exists.
+  `0.3.0` moved it to `claude-code-2.1.233-sdk-0.112.1`; `0.6.0` moved it again to
+  `claude-code-2.1.280-sdk-0.112.1` (SDK version unchanged). A package release can therefore move the
+  wire, which is the whole point of the arrangement and the reason the golden suite exists. An emergency
+  rollback pins an exact version instead of tracking `latest` — see
+  `docs/emergency-protocol-profile.md` and `docs/shared-package-provenance.md`.
 - S8 and S9 shipped in `0.1.0-rc.17` and are present in every release since.
 
 The lockfile and `docs/shared-package-provenance.md` must agree with the policy.
@@ -67,8 +74,12 @@ what a package bump does.
 ## Outbound divergences
 
 Upstream symbol names and byte offsets refer to the genuine client binary the row was traced against — 2.1.195 for
-rows written before the `0.3.0` default-profile move, 2.1.233 after — as recorded in the package's
-`docs/source-trace.md` and, for 2.1.233, in [`../claude-code-2.1.233-analysis.md`](../claude-code-2.1.233-analysis.md).
+rows written before the `0.3.0` default-profile move, 2.1.233 after, and 2.1.280 since the `0.6.0`/`0.7.0` move — as
+recorded in the package's `docs/source-trace.md` and, for 2.1.233 and 2.1.280 respectively, in
+[`../claude-code-2.1.233-analysis.md`](../claude-code-2.1.233-analysis.md) and
+[`../claude-code-2.1.280-analysis.md`](../claude-code-2.1.280-analysis.md). Rows 1–6 have not been independently
+re-verified against the 2.1.280 binary beyond what row 3's update below cites; treat an unmarked row as carried
+forward from 2.1.233 rather than freshly confirmed.
 
 | #   | Field                                | Plugin emits                                      | Package emits                                     | State                                                                                           |
 | --- | ------------------------------------ | ------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -82,13 +93,30 @@ rows written before the `0.3.0` default-profile move, 2.1.233 after — as recor
 Upstream truth for the rows that are still open:
 
 - Row 1: the base beta set opens `if(!isHaiku) push(claudeCode)`, so the genuine client never carries it on Haiku.
-- Row 2: the only two push sites are guarded by `provider==="vertex"` and `provider==="foundry"` (`IPt`).
-- Row 3: the identifier exists in the registry (`f2r`) but no push site was found anywhere in the binary.
+- Row 2: under 2.1.233 the only two push sites were guarded by `provider==="vertex"` and `provider==="foundry"`
+  (`IPt`). **Confirmed unchanged under 2.1.280**: the per-model table's `web_search` entry still reads
+  `when:(e)=>e.provider==="vertex"&&hw(e.canonical)||e.provider==="foundry"` — same two providers, no first-party
+  branch (`docs/protocol/versions/claude-code-2.1.280-analysis.md` §7.1, entry 9). `[DER]`
+- Row 3: under 2.1.233 the identifier existed in the registry (`f2r`) but no push site was found anywhere in the
+  binary. **Superseded under 2.1.280 analysis**: a push site now IS found, at
+  `t7e() && (Yb() || h.advisorModel !== void 0)`. `t7e` is true on a default first-party install, but `Yb` reads the
+  remote flag `tengu_sage_compass2` (default **false**), and `advisorModel` is unset by default, so the beta is
+  still absent on a default turn — just for a now-known reason rather than an unresolved one
+  (`docs/protocol/versions/claude-code-2.1.280-analysis.md` §7.6, the "absent identifier" table). `[DER]`
+
+**Pending an owner decision, not a bug.** Rows 2 and 3 are the plugin sending two betas the genuine 2.1.280 client's
+default first-party path never sends — `web-search-2025-03-05` unconditionally on any model `supportsWebSearch`
+reports true for, and `advisor-tool-2026-03-01` unconditionally on any non-`claude-3-*` model, with no equivalent of
+either upstream gate (provider, or the `tengu_sage_compass2` remote flag) on the plugin's side. This document records
+the divergence and leaves it open; it does not change plugin behaviour. Closing it — gating either push on a provider
+check or a config flag mirroring the remote default — is a product decision for whoever owns `lib/betas.mjs` policy,
+not something to do as a side effect of a documentation pass.
 
 ### Rows 1 to 3, in detail
 
 These are the only rows where the plugin still puts something on the wire that the genuine client does not, and they
-survive on purpose. `buildAdditionalBetas` (`lib/mimicry/adapter-input.mjs:347`) pushes `web-search-2025-03-05` when
+survive on purpose. `buildAdditionalBetas` (`lib/mimicry/adapter-input.mjs:478-513`, verified against the file as it
+stands today — not the `:347` an earlier revision of this document cited) pushes `web-search-2025-03-05` when
 `supportsWebSearch(model)`, `advisor-tool-2026-03-01` on any non-`claude-3-*` model, and `CLAUDE_CODE_BETA_FLAG` when
 `isHaikuModel(model)` — the last one so Haiku subagents reached through model-router delegation still get full mimic
 behaviour.
@@ -344,27 +372,32 @@ the code.
 ## Syncing a new package version
 
 1. Move the dependency. Which command applies depends on the specifier in `package.json`:
-   - **While the dependency is pinned exactly** (currently `0.5.0`, see "Package version state" above):
+   - **Under the `latest` dist-tag (the current specifier):** a sync is a lockfile move, not a `package.json` edit.
+     Run `npm run sync:wire-compat` (`scripts/sync-wire-compat.mjs`): it runs
+     `npm update @tormentalabs/claude-code-wire-compat`, prints the old and new versions, then runs the wire-sensitive
+     suites (`wire-baseline` and `test/conformance`). A plain `npm install` does NOT move the version — it keeps
+     whatever the lock resolves, which is how a checkout silently stayed on `0.5.0`. The update rewrites
+     `package-lock.json` only: new version, new registry tarball URL, new `sha512` integrity. **The lockfile diff is
+     the review artifact** — read it before anything else. `docs/shared-package-provenance.md` needs no version edit
+     under `latest`; it documents the policy, and `test/conformance/package-dependency-policy.test.mjs` validates
+     `resolved` against the lock's own `version`. `npm run check:wire-compat-drift` confirms the lock, the installed
+     copy and the registry `latest` agree; the publish workflow runs it before publishing. Do not re-pin an exact
+     version to perform a routine sync — that is the emergency-rollback shape (see
+     `docs/shared-package-provenance.md`).
+   - **While the dependency is pinned exactly** (emergency rollback only):
      `npm install --save-exact @tormentalabs/claude-code-wire-compat@<version>`. `npm update` cannot move an exact
      pin, because it respects the manifest's constraint. The install rewrites three things that change or name the
      version, and all three are the review artifact: `package.json` (the specifier), `package-lock.json` (version,
      registry tarball URL, `sha512` integrity) and `docs/shared-package-provenance.md` (which records the pinned
      version and must be edited to match; `test/conformance/package-dependency-policy.test.mjs` fails if it does
      not).
-   - **If the specifier returns to the `latest` dist-tag:** a sync is a lockfile move, not a `package.json` edit. Do
-     not re-pin an exact version to perform a routine sync — that is the emergency-rollback shape (see
-     `docs/shared-package-provenance.md`). `npm update @tormentalabs/claude-code-wire-compat` rewrites
-     `package-lock.json` only: new version, new registry tarball URL, new `sha512` integrity. **The lockfile diff is
-     the review artifact** — read it before anything else. `docs/shared-package-provenance.md` needs no version edit
-     under `latest`; it documents the policy, and `test/conformance/package-dependency-policy.test.mjs` validates
-     `resolved` against the lock's own `version`.
 2. Check whether the package's `DEFAULT_PROFILE` moved (its CHANGELOG says so, and
    `node_modules/@tormentalabs/claude-code-wire-compat/src/build-request.ts` is the seam). If it did:
    - no version literal needs editing. `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT`
-     (`lib/mimicry/adapter-input.mjs:238-239`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
+     (`lib/mimicry/adapter-input.mjs:269-270`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
      they follow the profile the seam binds rather than being re-typed — `test/conformance/version-literals-retired.test.mjs`
      enforces that. What DOES need a decision is the `WIRE_PROFILE` binding itself: it names an explicit profile
-     export (currently `CLAUDE_CODE_2_1_233_PROFILE`), so moving to a newer client is an intentional one-line change
+     export (currently `CLAUDE_CODE_2_1_280_PROFILE`), so moving to a newer client is an intentional one-line change
      at the seam, not a side effect of the bump. Leaving it behind the package's `DEFAULT_PROFILE` does not fail
      closed — it makes every request carry a redundant `profileOverride`. (The old
      `FALLBACK_CLAUDE_CLI_VERSION` / `CLI_TO_SDK_VERSION` literals lived in `lib/request-headers.mjs`, which this

@@ -11,12 +11,12 @@ import { WIRE_PROFILE } from "../../lib/mimicry/wire-compat.mjs";
  *
  * The emulated CLI version and the user-agent it composes are WIRE state: they
  * belong to the protocol profile the wire package ships
- * (`CLAUDE_CODE_2_1_233_PROFILE`, re-exported as `WIRE_PROFILE` through
+ * (`CLAUDE_CODE_2_1_280_PROFILE`, re-exported as `WIRE_PROFILE` through
  * `lib/mimicry/wire-compat.mjs`). Phase 3.3 removed the last re-typed copies
  * from `lib/mimicry/adapter-input.mjs`; every consumer now READS the profile,
  * so a package bump moves the plugin without a source edit.
  *
- * Nothing in the language stops the next contributor from typing `"2.1.233"`
+ * Nothing in the language stops the next contributor from typing `"2.1.280"`
  * back into a module and re-opening the drift — the failure mode is silent
  * (a spurious `profileOverride` on every request, or a beta header the package
  * no longer composes). This file is the ratchet: after comments are stripped,
@@ -66,7 +66,7 @@ const PRODUCTION_FILES = [
 /**
  * Drop line and block comments while PRESERVING string and template literals —
  * the opposite bias of the model-regex guard, because the literals this file
- * hunts (`claude-cli/2.1.233 (external, cli)`) live inside strings.
+ * hunts (`claude-cli/2.1.280 (external, cli)`) live inside strings.
  *
  * Strings are matched by the same alternation as comments, so a `//` inside a
  * URL (`"https://api.anthropic.com"`) is never read as a comment opener, and a
@@ -107,7 +107,7 @@ function stripComments(source) {
 /** The Claude Code user-agent prefix, in any form. */
 const USER_AGENT_LITERAL = /claude-cli\//g;
 
-/** A Claude Code 2.1.x version literal (`2.1.233`, `2.1.195`, …). */
+/** A Claude Code 2.1.x version literal (`2.1.280`, `2.1.195`, …). */
 const CC_VERSION_LITERAL = /2\.1\.\d{2,}/g;
 
 /**
@@ -213,18 +213,18 @@ describe("Claude Code version literals are retired from production code", () => 
   });
 
   it("still emulates the profile version it always did — the value moved, not changed", () => {
-    expect(WIRE_PROFILE.cliVersion).toBe("2.1.233");
-    expect(WIRE_PROFILE.userAgent).toBe("claude-cli/2.1.233 (external, cli)");
+    expect(WIRE_PROFILE.cliVersion).toBe("2.1.280");
+    expect(WIRE_PROFILE.userAgent).toBe("claude-cli/2.1.280 (external, cli)");
   });
 });
 
 describe("the scanner itself", () => {
   it("strips comments but preserves string bodies", () => {
     const sample = [
-      "// claude-cli/2.1.233",
+      "// claude-cli/2.1.280",
       "/* 2.1.195 */",
       'const ua = "claude-cli/9.9.9";',
-      'const url = "https://api.anthropic.com/v1/messages"; // 2.1.233',
+      'const url = "https://api.anthropic.com/v1/messages"; // 2.1.280',
     ].join("\n");
     const stripped = stripComments(sample);
 
@@ -234,7 +234,7 @@ describe("the scanner itself", () => {
   });
 
   it("catches a re-typed version literal", () => {
-    const offender = 'const PROFILE_CLI_VERSION = "2.1.233";';
+    const offender = 'const PROFILE_CLI_VERSION = "2.1.280";';
 
     expect(countMatches(stripComments(offender), CC_VERSION_LITERAL)).toBe(1);
   });

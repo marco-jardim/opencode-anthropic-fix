@@ -827,7 +827,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.233");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.280");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -3248,7 +3248,14 @@ describe("header handling", () => {
     expect(betaHeader).not.toContain("fast-mode-2026-02-01");
     // Claude Code v2.1.81: interleaved-thinking is now always-on (not model-gated)
     expect(betaHeader).toContain("interleaved-thinking-2025-05-14");
-    expect(betaHeader).toContain("redact-thinking-2026-02-12");
+    // v2.1.280: thinking-active models get display-updates + binding-controls, and
+    // the genuine client splices redact-thinking out when display-updates fires.
+    // cache-diagnosis is default-on in 2.1.280.
+    expect(betaHeader).toContain("thinking-display-updates-2026-08-18");
+    expect(betaHeader).toContain("thinking-binding-controls-2026-08-01");
+    expect(betaHeader).toContain("cache-diagnosis-2026-04-07");
+    expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
+    expect(JSON.parse(init.body).thinking?.display).toBe("updates");
   });
 
   it("does NOT send context-hint-2026-04-09 by default (partial server rollout, v2.1.110+)", async () => {
@@ -3286,7 +3293,7 @@ describe("header handling", () => {
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
     // RE doc §5.2: Opus 4.6 always uses adaptive thinking
-    expect(parsed.thinking).toEqual({ type: "adaptive" });
+    expect(parsed.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   it("normalizes all budget_tokens variants to adaptive for Opus 4.6", async () => {
@@ -3310,7 +3317,7 @@ describe("header handling", () => {
       const [, init] = mockFetch.mock.calls[0];
       const parsed = JSON.parse(init.body);
       // RE doc §5.2: adaptive for all Opus 4.6 regardless of budget
-      expect(parsed.thinking).toEqual({ type: "adaptive" });
+      expect(parsed.thinking).toEqual({ type: "adaptive", display: "updates" });
     }
   });
 
@@ -3329,7 +3336,7 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.thinking).toEqual({ type: "adaptive" });
+    expect(parsed.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   it("normalizes effort-based thinking to adaptive for Opus 4.6", async () => {
@@ -3347,7 +3354,7 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.thinking).toEqual({ type: "adaptive" });
+    expect(parsed.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   it("moves top-level effort into output_config.effort for Opus 4.6 (fingerprint parity)", async () => {
@@ -3373,7 +3380,7 @@ describe("header handling", () => {
     const parsed = JSON.parse(init.body);
     expect(parsed.effort).toBeUndefined();
     expect(parsed.output_config).toEqual({ effort: "max" });
-    expect(parsed.thinking).toEqual({ type: "adaptive" });
+    expect(parsed.thinking).toEqual({ type: "adaptive", display: "updates" });
   });
 
   it("moves top-level effort into output_config.effort for Sonnet 4.6", async () => {
@@ -3491,7 +3498,7 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
+    expect(parsed.thinking).toEqual({ type: "enabled", budget_tokens: 8000, display: "updates" });
   });
 
   it("haiku 3.5 gets base betas but NOT effort/interleaved (matches real CC hv4/rE gating)", async () => {
@@ -6212,5 +6219,228 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
     // are NOT re-stripped. Total calls are bounded, never infinite.
     expect(mockFetch.mock.calls.length).toBeGreaterThan(0);
     expect(mockFetch.mock.calls.length).toBeLessThan(30);
+  });
+
+  // -------------------------------------------------------------------------
+  // 2.1.280: the package composes some betas itself (cache-diagnosis is
+  // default-on), so evicting them from customBetas alone does not take them off
+  // the wire. The latch routes them through the adapter's suppressBetas.
+  // -------------------------------------------------------------------------
+  describe("package-composed betas and suppressBetas (2.1.280)", () => {
+    const reject400 = (message) => {
+      const body = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } });
+      return {
+        ok: false,
+        status: 400,
+        headers: { get: () => null },
+        json: async () => JSON.parse(body),
+        text: async () => body,
+        clone() {
+          return this;
+        },
+      };
+    };
+    const ok200 = () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (h) => (h === "content-type" ? "text/event-stream" : null) },
+      body: null,
+      text: async () => 'data: {"type":"message_stop"}\n\n',
+      clone() {
+        return this;
+      },
+    });
+    const betasOf = (call) =>
+      call[1].headers
+        .get("anthropic-beta")
+        .split(",")
+        .map((s) => s.trim());
+    const withConfig = async (custom_betas) => {
+      const cfg = { ...testConfig, custom_betas };
+      vi.mocked(loadConfig).mockReturnValue(cfg);
+      vi.mocked(loadConfigFresh).mockReturnValue(cfg);
+      const fn = await setupFetchFn(makeClient());
+      mockFetch.mockReset();
+      return () =>
+        fn("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-opus-4-5",
+            messages: [{ role: "user", content: "hi" }],
+            max_tokens: 10,
+          }),
+        });
+    };
+
+    it("cache-diagnosis is package-composed even with no custom_betas (precondition)", async () => {
+      const send = await withConfig([]);
+      mockFetch.mockResolvedValueOnce(ok200());
+      await send();
+      expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+    });
+
+    it("rejected package-composed beta: absent on retry, absent next request, back after TTL", async () => {
+      let fakeNow = Date.now();
+      const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => fakeNow);
+      try {
+        const send = await withConfig(["cache-diagnosis-2026-04-07"]);
+        mockFetch
+          .mockResolvedValueOnce(reject400("Unknown beta flag cache-diagnosis-2026-04-07 in anthropic-beta header"))
+          .mockResolvedValueOnce(ok200())
+          .mockResolvedValueOnce(ok200())
+          .mockResolvedValueOnce(ok200());
+
+        await send();
+        expect(mockFetch.mock.calls).toHaveLength(2);
+        expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[1])).not.toContain("cache-diagnosis-2026-04-07");
+
+        await send();
+        expect(mockFetch.mock.calls).toHaveLength(3);
+        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("cache-diagnosis-2026-04-07");
+
+        fakeNow += 5 * 60 * 1000 + 1;
+        await send();
+        expect(mockFetch.mock.calls).toHaveLength(4);
+        expect(betasOf(mockFetch.mock.calls[3])).toContain("cache-diagnosis-2026-04-07");
+      } finally {
+        dateSpy.mockRestore();
+      }
+    });
+
+    it("rejected beta the package does NOT compose: behaves as before, defaults untouched", async () => {
+      const send = await withConfig(["afk-mode"]);
+      mockFetch
+        .mockResolvedValueOnce(reject400("Unknown beta flag afk-mode-2026-01-31 in anthropic-beta header"))
+        .mockResolvedValueOnce(ok200())
+        .mockResolvedValueOnce(ok200());
+
+      await send();
+      const first = betasOf(mockFetch.mock.calls[0]);
+      const retry = betasOf(mockFetch.mock.calls[1]);
+      expect(first).toContain("afk-mode-2026-01-31");
+      expect(retry).not.toContain("afk-mode-2026-01-31");
+      // Only the rejected beta leaves: a package default is not collateral damage.
+      expect(retry).toContain("cache-diagnosis-2026-04-07");
+
+      await send();
+      const next = betasOf(mockFetch.mock.calls[2]);
+      expect(next).not.toContain("afk-mode-2026-01-31");
+      expect(next).toContain("cache-diagnosis-2026-04-07");
+    });
+
+    it("never suppresses oauth-2025-04-20 or claude-code-20250219 even when the error names them", async () => {
+      const send = await withConfig(["oauth-2025-04-20", "claude-code-20250219", "cache-diagnosis-2026-04-07"]);
+      mockFetch
+        .mockResolvedValueOnce(
+          reject400(
+            "anthropic-beta rejected: oauth-2025-04-20, claude-code-20250219, cache-diagnosis-2026-04-07 not allowed",
+          ),
+        )
+        .mockResolvedValueOnce(ok200())
+        .mockResolvedValueOnce(ok200());
+
+      await send();
+      const retry = betasOf(mockFetch.mock.calls[1]);
+      expect(retry).toContain("oauth-2025-04-20");
+      expect(retry).toContain("claude-code-20250219");
+      expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+
+      await send();
+      const next = betasOf(mockFetch.mock.calls[2]);
+      expect(next).toContain("oauth-2025-04-20");
+      expect(next).toContain("claude-code-20250219");
+      expect(next).not.toContain("cache-diagnosis-2026-04-07");
+    });
+
+    it("empty custom_betas: a rejected SENT package beta is latched, retried once, and returns after TTL", async () => {
+      let fakeNow = Date.now();
+      const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => fakeNow);
+      try {
+        const send = await withConfig([]);
+        mockFetch
+          .mockResolvedValueOnce(reject400("Unknown beta flag cache-diagnosis-2026-04-07 in anthropic-beta header"))
+          .mockResolvedValueOnce(ok200())
+          .mockResolvedValueOnce(ok200())
+          .mockResolvedValueOnce(ok200());
+
+        const res = await send();
+        expect(res.status).toBe(200);
+        expect(mockFetch.mock.calls).toHaveLength(2);
+        expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+        const retry = betasOf(mockFetch.mock.calls[1]);
+        expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+        expect(retry).toContain("oauth-2025-04-20");
+        expect(retry).toContain("claude-code-20250219");
+
+        await send();
+        expect(mockFetch.mock.calls).toHaveLength(3);
+        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("cache-diagnosis-2026-04-07");
+
+        fakeNow += 5 * 60 * 1000 + 1;
+        await send();
+        expect(mockFetch.mock.calls).toHaveLength(4);
+        expect(betasOf(mockFetch.mock.calls[3])).toContain("cache-diagnosis-2026-04-07");
+      } finally {
+        dateSpy.mockRestore();
+      }
+    });
+
+    it("empty custom_betas: a persistent rejection of a SENT beta is retried exactly once", async () => {
+      const send = await withConfig([]);
+      mockFetch.mockImplementation(async () =>
+        reject400("Unknown beta flag cache-diagnosis-2026-04-07 in anthropic-beta header"),
+      );
+      try {
+        await send();
+      } catch {
+        // A non-retryable 400 may surface as a thrown error; only the call count matters.
+      }
+      expect(mockFetch.mock.calls).toHaveLength(2);
+      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("cache-diagnosis-2026-04-07");
+    });
+
+    it("empty custom_betas: an error naming a beta that was NOT sent latches nothing", async () => {
+      const send = await withConfig([]);
+      mockFetch
+        .mockResolvedValueOnce(reject400("Unknown beta flag afk-mode-2026-01-31 in anthropic-beta header"))
+        .mockResolvedValueOnce(ok200());
+
+      try {
+        await send();
+      } catch {
+        // Surfacing the 400 is fine; what matters is that no beta retry happened.
+      }
+      expect(mockFetch.mock.calls).toHaveLength(1);
+      expect(betasOf(mockFetch.mock.calls[0])).not.toContain("afk-mode-2026-01-31");
+
+      await send();
+      expect(mockFetch.mock.calls).toHaveLength(2);
+      expect(betasOf(mockFetch.mock.calls[1])).toContain("cache-diagnosis-2026-04-07");
+    });
+
+    it("empty custom_betas: an error naming oauth-2025-04-20 latches nothing and does not loop", async () => {
+      const send = await withConfig([]);
+      mockFetch
+        .mockResolvedValueOnce(
+          reject400("anthropic-beta rejected: oauth-2025-04-20 and claude-code-20250219 are not allowed"),
+        )
+        .mockResolvedValueOnce(ok200());
+
+      try {
+        await send();
+      } catch {
+        // Surfacing the 400 is fine; what matters is that no beta retry happened.
+      }
+      expect(mockFetch.mock.calls).toHaveLength(1);
+
+      await send();
+      expect(mockFetch.mock.calls).toHaveLength(2);
+      const next = betasOf(mockFetch.mock.calls[1]);
+      expect(next).toContain("oauth-2025-04-20");
+      expect(next).toContain("claude-code-20250219");
+      expect(next).toContain("cache-diagnosis-2026-04-07");
+    });
   });
 });

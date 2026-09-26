@@ -11,13 +11,14 @@ document is enforced by
 
 ## Current specifier
 
-| Field       | Value                                                                   |
-| ----------- | ----------------------------------------------------------------------- |
-| Package     | `@tormentalabs/claude-code-wire-compat`                                 |
-| Specifier   | `0.5.0` (exact registry version), in [`package.json`](../package.json)  |
-| Origin      | npm registry                                                            |
-| Resolved by | `package-lock.json` — version, registry tarball URL, `sha512` integrity |
-| License     | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                 |
+| Field                 | Value                                                                   |
+| --------------------- | ----------------------------------------------------------------------- |
+| Package               | `@tormentalabs/claude-code-wire-compat`                                 |
+| Specifier             | `latest` (dist-tag), in [`package.json`](../package.json)               |
+| Lock-resolved version | `0.7.0`                                                                 |
+| Origin                | npm registry                                                            |
+| Resolved by           | `package-lock.json` — version, registry tarball URL, `sha512` integrity |
+| License               | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                 |
 
 The lockfile records the same version with its registry tarball URL and integrity hash, and the
 policy test fails if the two disagree. To read the version actually installed:
@@ -26,24 +27,32 @@ policy test fails if the two disagree. To read the version actually installed:
 npm ls @tormentalabs/claude-code-wire-compat
 ```
 
-## Why the specifier is pinned to exactly `0.5.0`
+## The exact `0.5.0` pin has lifted
 
-Since plugin 2.0.0 the dependency is an exact pin, suspending the `latest` policy described in the
-next section. `0.6.0` of the package switches its `DEFAULT_PROFILE` to Claude Code 2.1.280. The
-plugin never passes a `profile` argument, so installing `0.6.0` would move its wire to 2.1.280 before
-the plugin has been ported to it: against `0.6.0` the plugin's own suite fails 48 tests (user agent
-and billing `cc_version` report 2.1.280, thinking goes out as `display: "updates"`, the
-redact-thinking beta is absent, and the cache-diagnosis beta can no longer be stripped by the retry
-latch). The pin lifts, and `latest` is restored, when the plugin's wire port to 2.1.280 lands.
+From plugin 2.0.0 until this port, the dependency was an exact pin (`0.5.0`), suspending the `latest`
+policy described in the next section. `0.6.0` of the package switched its `DEFAULT_PROFILE` to
+Claude Code 2.1.280; the plugin never passes a `profile` argument, so installing `0.6.0` unported
+would have moved its wire to 2.1.280 before the plugin was ready for it — against `0.6.0` the plugin's
+own suite failed 48 tests (user agent and billing `cc_version` reporting 2.1.280, thinking going out as
+`display: "updates"`, the redact-thinking beta absent, the cache-diagnosis beta no longer strippable by
+the retry latch).
+
+The plugin's wire port to 2.1.280 is what this pin was waiting for, and it has landed: `WIRE_PROFILE` in
+[`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs) now binds `CLAUDE_CODE_2_1_280_PROFILE`, and the
+adapter imports `BETA_REGISTRY_2_1_280`. With the port done, the specifier returns to `latest` (the
+lock resolves `0.7.0`) and the discipline this document exists to state moves from "held back" to
+"tracked, with a guard": see "Keeping `latest` from drifting silently" below for the tooling that makes
+a stale lock impossible to miss, locally and at publish. The historical pins table at the end of this
+document keeps the `0.5.0` pin on record.
 
 ## Why the specifier is the `latest` dist-tag
 
 The plugin does not compose the wire request itself; it delegates to the package and **omits the
 `profile` argument**, which means it inherits whatever the package declares as its `DEFAULT_PROFILE`.
 That default is the package's statement of "the newest genuine Claude Code client we have analysed
-and transcribed" — `claude-code-2.1.233-sdk-0.112.1` at the time of writing. Tracking `latest` is
-therefore not laziness about versioning; it is the mechanism by which a newly analysed client profile
-reaches this plugin's wire without a code change to the composition path.
+and transcribed" — `claude-code-2.1.280-sdk-0.112.1` as of the version this lock resolves. Tracking
+`latest` is therefore not laziness about versioning; it is the mechanism by which a newly analysed
+client profile reaches this plugin's wire without a code change to the composition path.
 
 Two constants shadow that default and must move with it —
 `PROFILE_CLI_VERSION` / `PROFILE_USER_AGENT` in
@@ -76,6 +85,86 @@ Ranges deserve a word, since they are also lock-backed. `latest` is a deliberate
 of intent: _track the package, inherit its default profile._ A range says nothing — it silently
 widens what a fresh resolution may pick without anyone having decided that. Emergency rollback is the
 one case that pins an exact version, and it is exact precisely because it is a decision.
+
+## Keeping `latest` from drifting silently
+
+A dist-tag specifier makes reproducibility the lockfile's job, but a lockfile is only ever a snapshot:
+`npm install` does not re-resolve a dependency that is already locked, so a `package-lock.json`
+generated the day before a package release keeps this plugin on the old wire profile indefinitely,
+until someone remembers to run `npm update`. Two scripts make that mechanical instead of relying on
+memory — this is the tooling the previous section promises when it says a moving tag "still requires a
+reviewed lockfile diff."
+
+**`npm run sync:wire-compat`** ([`scripts/sync-wire-compat.mjs`](../scripts/sync-wire-compat.mjs)) is
+the supported way to move the lock forward: it runs `npm update @tormentalabs/claude-code-wire-compat`
+(rewrites `package-lock.json` only; `package.json` keeps `latest`), prints the old and new resolved
+version, and then runs the wire-sensitive targeted tests (`vitest run wire-baseline
+test/conformance`) so a regression in the new release is caught in the same breath as the bump rather
+than later. It does not commit anything — review the `package-lock.json` diff, and re-read this
+document plus [`wire-compat-divergences.md`](./mimicry/wire-compat-divergences.md) if the package's
+`DEFAULT_PROFILE` moved, before committing.
+
+**`npm run check:wire-compat-drift`**
+([`scripts/check-wire-compat-drift.mjs`](../scripts/check-wire-compat-drift.mjs)) is the guard: it
+compares three numbers — the version `package-lock.json` resolves, the version actually installed in
+`node_modules` (catches an `npm install` that was never re-run after the lock changed), and the
+version currently published under the registry's `latest` dist-tag (`npm view
+@tormentalabs/claude-code-wire-compat dist-tags.latest --json`) — and fails with an actionable message
+naming `npm run sync:wire-compat` when the lock is behind. It runs:
+
+- **Locally**, on demand, or as part of the release ritual (see [`AGENTS.md`](../AGENTS.md#release-flow)
+  and [`CLAUDE.md`](../CLAUDE.md#release-ritual)).
+- **In [`publish.yml`](../.github/workflows/publish.yml)**, blocking, right after `check:invariants` —
+  a stale lock can no longer reach `npm publish` unnoticed.
+- **In [`ci.yml`](../.github/workflows/ci.yml)**, advisory (`continue-on-error: true`) — a wire-compat
+  release landing between plugin ports is expected and should not redden unrelated PRs, but it should
+  still show up in the log.
+
+A registry lookup can fail for reasons that have nothing to do with drift (no network, a registry
+outage). `--allow-offline` downgrades that specific failure to a warning with exit `0`, so a CI runner
+without registry egress does not get a false failure; without the flag it is a hard failure, because
+"could not check" is not "no drift."
+
+## Published consumers resolve `latest` at their own install time
+
+`package-lock.json` pins what `npm ci` installs **in this checkout**. It pins nothing for anyone who
+installs this plugin as a dependency of something else, for two independent reasons: `package.json`'s
+`files` allowlist does not include `package-lock.json`, so it is not even shipped inside the published
+npm tarball; and, separately, npm and Bun both ignore a nested dependency's own lockfile when
+installing it as someone else's dependency, resolving that dependency's specifiers fresh against
+whatever the installing project's own lockfile (or lack of one) says. A published install of this
+plugin — or any other consumer — resolves `@tormentalabs/claude-code-wire-compat@latest` at ITS OWN
+install time, independent of what this repository's lock says on that day.
+
+`opencode` itself is such a consumer, and it caches the result. Installing a plugin by package name
+(`opencode plugin <module>`, or a bare name in `opencode.json`'s `plugin` array, as opposed to a local
+path — see [`AGENTS.md`](../AGENTS.md)'s Windows caveats) populates
+`<opencode cache dir>/packages/<plugin>@<version-or-tag>/node_modules/...` (`opencode debug paths`
+prints the cache dir; `~/.cache/opencode` on this machine) with its own independent
+`package-lock.json`, generated whenever that cache entry was last populated. This is not theoretical:
+inspecting that cache on this machine while this port was in flight found
+`.../opencode-anthropic-fix@latest/node_modules/@tormentalabs/claude-code-wire-compat` resolved to
+`0.5.0` — stale, because nothing in this repository's sync tooling reaches a cache outside it, and
+opencode has no reason to refresh an install it already has.
+
+**To refresh a stale cached install:** `opencode plugin opencode-anthropic-fix --force` (`opencode
+plugin <module> --help` documents `-f, --force: replace existing plugin version`) makes opencode
+reinstall the plugin from the registry, re-resolving `latest` for both the plugin and, transitively,
+`@tormentalabs/claude-code-wire-compat`, instead of reusing the existing cache entry. Deleting the
+`<opencode cache dir>/packages/<plugin>@<tag>/` directory directly and letting opencode reinstall on
+next load has the same effect. Neither of these is something this repository's tooling can trigger —
+they run on the machine that installed the plugin, not in this checkout or in CI.
+
+**The discipline this implies.** With `latest`, a `@tormentalabs/claude-code-wire-compat` release that
+changes `DEFAULT_PROFILE` changes this plugin's wire for every consumer who resolves `latest` fresh —
+published npm installs and opencode's own plugin cache alike — without this repository's own gates
+(`check:wire-compat-drift`, the test suite, a human reviewing a lockfile diff) ever seeing it first,
+because none of that runs on the consumer's machine. Such a library release therefore has to be
+coordinated with a plugin port landing first, or close behind — which is exactly why the `0.5.0` pin
+existed from plugin 2.0.0 until this port lifted it (see "The exact `0.5.0` pin has lifted" above). If
+a library release ships a wire-breaking `DEFAULT_PROFILE` move before the plugin is ported to it, the
+lever is the same one-line fix as any other emergency: pin an exact version (see "Emergency rollback of
+the wire shape" below).
 
 ## Emergency rollback of the wire shape
 
@@ -111,12 +200,13 @@ Two levers, in increasing order of blast radius. Neither is a runtime switch (se
 
 Kept as a record; none of these is the live policy.
 
-| Period                 | Specifier                                   | Note                                                                                              |
-| ---------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Pre-publication        | GitHub release tarball, `v0.1.0-rc.17` last | The only immutable public artifact before the package was published to npm                        |
-| Phase 9 → 0.3.0 bump   | exact registry version `0.1.0`              | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==` |
-| 0.3.0 → plugin 1.0.0   | `latest` dist-tag                           | Inherits the package's `DEFAULT_PROFILE`; reproducibility via `package-lock.json`                 |
-| Current (plugin 2.0.0) | exact registry version `0.5.0`              | Held back from `0.6.0`'s 2.1.280 default profile; see above                                       |
+| Period                      | Specifier                                   | Note                                                                                                       |
+| --------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Pre-publication             | GitHub release tarball, `v0.1.0-rc.17` last | The only immutable public artifact before the package was published to npm                                 |
+| Phase 9 → 0.3.0 bump        | exact registry version `0.1.0`              | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==`          |
+| 0.3.0 → plugin 1.0.0        | `latest` dist-tag                           | Inherits the package's `DEFAULT_PROFILE`; reproducibility via `package-lock.json`                          |
+| Plugin 2.0.0 → this port    | exact registry version `0.5.0`              | Held back from `0.6.0`'s 2.1.280 default profile; see "The exact `0.5.0` pin has lifted" above             |
+| Current (post-2.1.280 port) | `latest` dist-tag (lock-resolved `0.7.0`)   | Pin lifted once the plugin's own wire port to 2.1.280 landed; guarded by `npm run check:wire-compat-drift` |
 
 The `0.1.0` era pinned the profile as a side effect: `0.1.0`'s default was `claude-code-2.1.195`, and
 moving to `0.3.0` moved the wire to `claude-code-2.1.233-sdk-0.112.1`. That coupling is the reason
@@ -133,6 +223,7 @@ across the bump. See `docs/mimicry/wire-compat-divergences.md`.
 
 ```bash
 npm ls @tormentalabs/claude-code-wire-compat
+npm run check:wire-compat-drift
 npm test -- --run test/conformance/package-dependency-policy.test.mjs
 npm test -- --run test/conformance/shared-package-parity.test.mjs
 npm test -- --run test/conformance/golden-outgoing.test.mjs
