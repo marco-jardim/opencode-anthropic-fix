@@ -539,7 +539,7 @@ With emulation on, both remaining constructions ensure:
   - optional suffixes:
     - `CLAUDE_AGENT_SDK_VERSION`
     - `CLAUDE_AGENT_SDK_CLIENT_APP`
-- always removes `x-api-key`
+- always removes `x-api-key` (and `x-session-affinity`, a host-side session hint)
 
 ### 4.2 Extra headers when mimicry is enabled
 
@@ -664,9 +664,9 @@ The dead branch, for reference:
 > beta set from the genuine 2.1.280 client's own tables. `buildAnthropicBetaHeader` is reachable ONLY through
 > `buildRequestHeaders`, and only for a request made with signature emulation **on** whose pathname the package has
 > no surface for at all — the files and models endpoints, or a gateway-prefixed route (`index.mjs`'s `_useAdapter`
-> gate admits only `/v1/messages`, `/messages`, `/v1/messages/count_tokens`, `/messages/count_tokens`; anything else
-> falls through to this forge, around `index.mjs` lines 3281–3297). A request made with `signatureEnabled=false`
-> never reaches this builder at all: `index.mjs`'s emulation-off branch (around lines 3268–3278) calls
+> gate at lines 3071–3072 admits only `/v1/messages`, `/messages`, `/v1/messages/count_tokens`, `/messages/count_tokens`; anything else
+> falls through to this forge). A request made with `signatureEnabled=false`
+> never reaches this builder at all: `index.mjs`'s emulation-off branch (around lines 3288–3298) calls
 > `buildPassthroughHeaders` (`lib/passthrough-headers.mjs`) first and unconditionally, for every pathname, so
 > `requestHeaders` is already set by the time the legacy-forge branch below it would run. **The list below is
 > therefore the frozen legacy forge's behavior on the files/models/gateway-prefixed surface with emulation on, not
@@ -676,7 +676,7 @@ The dead branch, for reference:
 > [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) §2–§3. See
 > [`mimicry/wire-compat-divergences.md`](./mimicry/wire-compat-divergences.md) for the measured diff.
 
-When `signatureEnabled=true`, current implementation may add dynamically:
+The following applies to the **frozen legacy forge** (`buildAnthropicBetaHeader` in `lib/mimicry/headers.mjs:274`). When `signatureEnabled=true`, the legacy implementation may add dynamically:
 
 - `claude-code-20250219` (not added for Haiku models)
 - `files-api-2025-04-14` (only for `/v1/files` or when body references `file_id`)
@@ -1287,9 +1287,9 @@ over-broadcast fingerprint.
 
 **This config key only affects the frozen legacy forge**, reached only when signature emulation is **on** and the
 request's pathname is outside the adapter's surface — the files/models endpoints, or a gateway-prefixed route (see
-the boundary banner in `lib/mimicry/headers.mjs` and `index.mjs`'s `_useAdapter` gate around lines 3050–3052).
-**Not** on `signature_emulation: false`: that path is pure passthrough (`lib/passthrough-headers.mjs`, wired in
-`index.mjs` around lines 3268–3278) and never calls the legacy forge, so this config key has no effect there either.
+the boundary banner in `lib/mimicry/headers.mjs` and `index.mjs`'s `_useAdapter` gate at lines 3071–3072).
+**Not** on `signature_emulation: false`: that path is pure passthrough (`buildPassthroughHeaders` in `lib/passthrough-headers.mjs`, wired in
+`index.mjs` around lines 3288–3298) and never calls the legacy forge, so this config key has no effect there either.
 On the path where the forge does run, when `redact_thinking` is true (the default), it adds
 `redact-thinking-2026-02-12` to the beta header. The API returns `redacted_thinking` blocks instead of thinking
 summaries, reducing token overhead on subsequent turns.

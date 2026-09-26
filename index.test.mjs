@@ -1163,6 +1163,36 @@ describe("fetch interceptor", () => {
     expect(text).toContain("mcp_foo");
   });
 
+  // L5 host-compat shim: only older @ai-sdk/anthropic hosts need unknown
+  // content blocks rewritten; newer hosts must see the stream untouched.
+  it.each([
+    ["ai-sdk/anthropic/3.0.111", true],
+    ["ai-sdk/anthropic/9.0.0", false],
+  ])("host-compat shim for user-agent %s rewrites unknown blocks: %s", async (hostAgent, rewritten) => {
+    const unknownBlock =
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"future_block_kind","x":1}}\n\n';
+    mockFetch.mockResolvedValueOnce(
+      new Response(unknownBlock, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "user-agent": `opencode/1.0 ${hostAgent}` },
+      body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, messages: [] }),
+    });
+
+    const text = await response.text();
+    if (rewritten) {
+      expect(text).toContain('"content_block":{"type":"fallback"}');
+      expect(text).not.toContain("future_block_kind");
+    } else {
+      expect(text).toBe(unknownBlock);
+    }
+  });
+
   it("strips mcp_ from tool_use blocks but not text blocks in response stream", async () => {
     // Two SSE events: one tool_use (should strip), one text (should preserve)
     const sseBody = [
@@ -6623,15 +6653,79 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
 
       await send();
       const rejectedAuth = authOf(mockFetch.mock.calls[0]);
+      expect(mockFetch.mock.calls).toHaveLength(2);
+      expect(authOf(mockFetch.mock.calls[1]), "the latch retry stays on the rejected account").toBe(rejectedAuth);
       for (let i = 0; i < 4; i++) await send();
 
-      const later = mockFetch.mock.calls.slice(2);
+      const later = mockFetch.mock.calls.slice(1);
       const sameAccount = later.filter((c) => authOf(c) === rejectedAuth);
       const otherAccount = later.filter((c) => authOf(c) !== rejectedAuth);
       expect(sameAccount.length, "round-robin reaches the rejected account again").toBeGreaterThan(0);
       expect(otherAccount.length, "round-robin reaches the other account").toBeGreaterThan(0);
       for (const call of sameAccount) expect(betasOf(call)).not.toContain("cache-diagnosis-2026-04-07");
       for (const call of otherAccount) expect(betasOf(call)).toContain("cache-diagnosis-2026-04-07");
+    });
+
+    // The one-shot latch retry must land on the account that was rejected: the
+    // latch is keyed per account, so a rotating strategy moving the retry to
+    // another account would resend the beta and burn the only retry.
+    describe.each(["round-robin", "hybrid"])("latch retry account pinning (%s)", (strategy) => {
+      const target = "cache-diagnosis-2026-04-07";
+      const authOf = (call) => call[1].headers.get("authorization");
+      const twoAccounts = (custom = []) => {
+        const far = Date.now() + 3_600_000;
+        return withConfig(custom, {
+          cfgExtra: { account_selection_strategy: strategy },
+          accounts: [
+            { access: "access-a", expires: far },
+            { access: "access-b", expires: far },
+          ],
+        });
+      };
+      const rejectWhileSent = async (url, init) =>
+        init.headers.get("anthropic-beta").includes(target) ? reject400(invalidBeta(target)) : ok200();
+
+      it("QA2-RR: beta rejected for every account -> [A with beta, A without beta] -> 200", async () => {
+        const send = await twoAccounts();
+        mockFetch.mockImplementation(rejectWhileSent);
+
+        const response = await send();
+        expect(response.status).toBe(200);
+        expect(mockFetch.mock.calls).toHaveLength(2);
+        expect(authOf(mockFetch.mock.calls[1])).toBe(authOf(mockFetch.mock.calls[0]));
+        expect(betasOf(mockFetch.mock.calls[0])).toContain(target);
+        expect(betasOf(mockFetch.mock.calls[1])).not.toContain(target);
+      });
+
+      it("custom_betas stripped retry also stays on the rejected account", async () => {
+        const send = await twoAccounts([target]);
+        mockFetch.mockImplementation(rejectWhileSent);
+
+        const response = await send();
+        expect(response.status).toBe(200);
+        expect(mockFetch.mock.calls).toHaveLength(2);
+        expect(authOf(mockFetch.mock.calls[1])).toBe(authOf(mockFetch.mock.calls[0]));
+        expect(betasOf(mockFetch.mock.calls[1])).not.toContain(target);
+      });
+
+      it("M3d drop-on-repeat still applies to the pinned retry", async () => {
+        const send = await twoAccounts();
+        mockFetch
+          .mockResolvedValueOnce(reject400(invalidBeta(target)))
+          .mockResolvedValueOnce(reject400(invalidBeta("interleaved-thinking-2025-05-14")))
+          .mockImplementation(async () => ok200());
+
+        await sendQuietly(send);
+        expect(mockFetch.mock.calls).toHaveLength(2);
+        const rejectedAuth = authOf(mockFetch.mock.calls[0]);
+        expect(authOf(mockFetch.mock.calls[1])).toBe(rejectedAuth);
+
+        // The latch was dropped, so the rejected account sends the beta again.
+        for (let i = 0; i < 3; i++) await send();
+        const backOnRejected = mockFetch.mock.calls.slice(2).filter((c) => authOf(c) === rejectedAuth);
+        expect(backOnRejected.length).toBeGreaterThan(0);
+        for (const call of backOnRejected) expect(betasOf(call)).toContain(target);
+      });
     });
   });
 });

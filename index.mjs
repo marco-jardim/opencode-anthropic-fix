@@ -37,6 +37,7 @@ import { redactSecrets, redactString } from "./lib/redact.mjs";
 import {
   createTransformedSSEStream,
   resolveStreamIdleTimeoutMs,
+  shouldApplyHostCompatShim,
   stripMcpPrefixFromParsedEvent,
 } from "./lib/mimicry/response-stream.mjs";
 import { transformRequestBody, CORE_TOOL_NAMES } from "./lib/mimicry/request-body.mjs";
@@ -2608,6 +2609,13 @@ export async function AnthropicAuthPlugin({ client }) {
               const requestMethod = String(
                 requestInit.method || (requestInput instanceof Request ? requestInput.method : "POST"),
               ).toUpperCase();
+              // The HOST's own User-Agent (not the one sent to Anthropic): it
+              // names the host's @ai-sdk/anthropic version, which decides
+              // whether the L5 host-compat stream shim must run.
+              const hostCompatShim = shouldApplyHostCompatShim(getIncomingHeader(input, requestInit, "user-agent"));
+              /** @param {{blockTypeFallbacks: number, deltasDropped: number, eventsDropped: number}} shimStats */
+              const onHostCompatShim = (shimStats) =>
+                debugLog("host-compat shim rewrote the response stream", shimStats);
               let showUsageToast;
               try {
                 showUsageToast = new URL(requestUrl).pathname === "/v1/messages" && requestMethod === "POST";
@@ -2718,12 +2726,23 @@ export async function AnthropicAuthPlugin({ client }) {
               let sentBetaRejectionRetried = false; // One-shot latch: retry once after latching a rejected SENT beta
               /** @type {{key: string, betas: string[], recordedAt: number} | null} */
               let pendingSentBetaLatch = null; // Entries latched for the retry in flight; dropped if it fails the same way
+              // One-shot: the account that just received a beta rejection. The
+              // beta-rejection retry (`attempt--; continue`) must land on it: the
+              // sent-beta latch is keyed per account, so a rotating strategy
+              // (round-robin, hybrid) moving the retry to another account would
+              // resend the rejected beta and burn the single retry.
+              let betaRetryAccount = null;
               for (let attempt = 0; attempt < maxAttempts; attempt++) {
-                // Select account — use pinned account on first attempt if available
+                // Select account — a beta-rejection retry stays on the rejecting
+                // account; otherwise use the pinned account on the first attempt.
+                const _betaRetryAccount = betaRetryAccount;
+                betaRetryAccount = null;
                 const account =
-                  attempt === 0 && pinnedAccount && !transientRefreshSkips.has(pinnedAccount.index)
-                    ? pinnedAccount
-                    : accountManager.getCurrentAccount(transientRefreshSkips);
+                  _betaRetryAccount && !transientRefreshSkips.has(_betaRetryAccount.index)
+                    ? _betaRetryAccount
+                    : attempt === 0 && pinnedAccount && !transientRefreshSkips.has(pinnedAccount.index)
+                      ? pinnedAccount
+                      : accountManager.getCurrentAccount(transientRefreshSkips);
 
                 // Toast account usage on first use and whenever the account changes
                 if (showUsageToast && account && accountManager) {
@@ -3843,6 +3862,7 @@ export async function AnthropicAuthPlugin({ client }) {
                       if (_sentLatchableBetas.length > 0) _latchSentBetas(_recordedAt);
                     }
                     attempt--;
+                    betaRetryAccount = account;
                     debugLog("custom beta/context rejection - retrying without custom betas");
                     continue;
                   }
@@ -3857,6 +3877,7 @@ export async function AnthropicAuthPlugin({ client }) {
                   if (!sentBetaRejectionRetried && _sentLatchableBetas.length > 0) {
                     _latchSentBetas(Date.now());
                     attempt--;
+                    betaRetryAccount = account;
                     debugLog("sent beta rejection - retrying without", _sentLatchableBetas);
                     continue;
                   }
@@ -4028,7 +4049,10 @@ export async function AnthropicAuthPlugin({ client }) {
                       status: response.status,
                       errorBody: typeof errorBody === "string" ? errorBody.slice(0, 600) : errorBody,
                     });
-                    return transformResponse(response, undefined, undefined, correlationId);
+                    return transformResponse(response, undefined, undefined, correlationId, {
+                      hostCompatShim,
+                      onHostCompatShim,
+                    });
                   }
 
                   const accountSpecific = isAccountSpecificError(response.status, errorBody);
@@ -4254,7 +4278,10 @@ export async function AnthropicAuthPlugin({ client }) {
                       status: response.status,
                     });
                   }
-                  return transformResponse(response, undefined, undefined, correlationId);
+                  return transformResponse(response, undefined, undefined, correlationId, {
+                    hostCompatShim,
+                    onHostCompatShim,
+                  });
                 }
 
                 // Success
@@ -4450,6 +4477,7 @@ export async function AnthropicAuthPlugin({ client }) {
                     : null,
                   accountErrorCallback,
                   correlationId,
+                  { hostCompatShim, onHostCompatShim },
                 );
               }
 
@@ -6205,15 +6233,27 @@ function transformRequestUrl(input, emulateSignature = true) {
  * @param {((details: {reason: import('./lib/backoff.mjs').RateLimitReason, invalidateToken: boolean}) => void) | null} [onAccountError]
  *   Called if a mid-stream error looks account-specific
  * @param {string} [correlationId]
+ * @param {object} [hostCompat] - L5 host-compat shim wiring.
+ * @param {boolean} [hostCompat.hostCompatShim] - Run the shim (see
+ *   `shouldApplyHostCompatShim`); defaults to on.
+ * @param {((stats: {blockTypeFallbacks: number, deltasDropped: number, eventsDropped: number}) => void) | null} [hostCompat.onHostCompatShim]
  * @returns {Response}
  */
-function transformResponse(response, onUsage, onAccountError, correlationId) {
+function transformResponse(
+  response,
+  onUsage,
+  onAccountError,
+  correlationId,
+  { hostCompatShim = true, onHostCompatShim = null } = {},
+) {
   if (!response.body) return response;
   const idleTimeoutMs = resolveStreamIdleTimeoutMs(_pluginConfig);
   const captureEnabled = _pluginConfig?.token_economy?.debug_dump_bodies === true && Boolean(correlationId);
   const stream = createTransformedSSEStream(response, {
     onUsage,
     onAccountError,
+    hostCompatShim,
+    onHostCompatShim,
     correlationId,
     idleTimeoutMs,
     captureEnabled,
