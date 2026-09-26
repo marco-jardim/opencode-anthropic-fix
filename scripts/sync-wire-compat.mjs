@@ -16,11 +16,17 @@
  *
  * Steps:
  *   1. Read the version package-lock.json currently resolves.
- *   2. Run `npm update @tormentalabs/claude-code-wire-compat`. This rewrites
- *      package-lock.json only -- package.json keeps the `latest` specifier.
+ *   2. Run `npm update @tormentalabs/claude-code-wire-compat --prefer-online`.
+ *      This rewrites package-lock.json only -- package.json keeps the `latest`
+ *      specifier. `--prefer-online` is required: without it npm may answer
+ *      from its cached packument and keep the old version while reporting
+ *      success (observed moving 0.7.0 -> 0.7.1).
  *   3. Read the version the lockfile resolves after the update and print
  *      old -> new.
- *   4. Run the wire-sensitive targeted tests
+ *   4. Run scripts/check-wire-compat-drift.mjs, which fails unless the lock,
+ *      the installed copy and the registry `latest` dist-tag agree -- so a
+ *      sync that did not actually move the lock cannot report success.
+ *   5. Run the wire-sensitive targeted tests
  *      (`vitest run wire-baseline test/conformance`).
  *
  * Exits non-zero if either child process fails, without swallowing its exit
@@ -52,7 +58,8 @@ const isWindows = process.platform === "win32";
  * @returns {{ command: string, args: string[] }}
  */
 function forPlatform(command, args) {
-  if (!isWindows) return { command, args };
+  // The node binary itself is a real executable: run it directly, never through cmd.exe.
+  if (!isWindows || command === process.execPath) return { command, args };
   return { command: "cmd.exe", args: ["/d", "/s", "/c", command, ...args] };
 }
 
@@ -94,10 +101,12 @@ function run(command, args, description) {
 
 const before = readLockedVersion(repoRoot);
 
-run("npm", ["update", PACKAGE_NAME], `npm update ${PACKAGE_NAME}`);
+run("npm", ["update", PACKAGE_NAME, "--prefer-online"], `npm update ${PACKAGE_NAME} --prefer-online`);
 
 const after = readLockedVersion(repoRoot);
 console.log(`${PACKAGE_NAME}: ${before ?? "(unresolved)"} -> ${after ?? "(unresolved)"}`);
+
+run(process.execPath, [path.join(repoRoot, "scripts", "check-wire-compat-drift.mjs")], "check-wire-compat-drift");
 
 run("npx", ["vitest", "run", "wire-baseline", "test/conformance"], "vitest run wire-baseline test/conformance");
 
