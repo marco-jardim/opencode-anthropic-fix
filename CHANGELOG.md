@@ -2,6 +2,77 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [2.0.0] — 2026-09-24
+
+OAuth parity with Claude Code 2.1.280. The OAuth endpoints, the token-request fingerprint, the refresh body, scope
+composition, the OAuth environment variables and token expiry now follow the 2.1.280 contract recorded in
+`docs/oauth-2.1.280-contract.md`, and every OAuth constant lives in `lib/oauth-constants.mjs`. The request wire is
+unchanged: the shared wire package is pinned to `0.5.0`, which still emulates Claude Code 2.1.233.
+
+### Breaking
+
+- **The OAuth token fingerprint is the 2.1.280 one, and only that.**
+  - The claude.ai login opens `https://claude.com/cai/oauth/authorize` instead of
+    `https://claude.ai/oauth/authorize`.
+  - Token requests send the SDK user agent `0.112.1` instead of `0.94.0`.
+  - The refresh body is exactly `{ grant_type, refresh_token, client_id }`. The `scope` key is gone, and a
+    caller-supplied `scopes` option can no longer reintroduce it.
+  - The axios token path is deleted, because Claude Code 2.1.280 has no axios OAuth path. Setting
+    `oauth.sdk_token_useragent: false` used to switch to it; the key is still recognised so existing config files
+    load, but it has no effect and warns once per process.
+
+  **What to do:** no configuration change is required. Remove `oauth.sdk_token_useragent` from your config to
+  silence the warning.
+
+- **Login refuses to start while `CLAUDE_CODE_CUSTOM_OAUTH_URL` is set.** A value outside Claude Code's three-entry
+  allowlist is rejected, as the genuine client rejects it. The comparison is exact, so a trailing slash, an uppercase
+  host or `http://` is also rejected. An approved value is refused too, because the evidence does not say what the
+  genuine client uses it for. Previously the variable was ignored. The CLI prints the reason instead of a stack trace.
+  Only login is affected: refresh, exchange and revoke never read it. **What to do:** unset the variable before
+  running a login.
+
+### Added
+
+- **Headless refresh-token login.** Setting `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` seeds an account from the environment.
+  `CLAUDE_CODE_OAUTH_SCOPES` is required with it and is used only as a boot-time check; it never reaches a refresh
+  body. `CLAUDE_CODE_OAUTH_CLIENT_ID` overrides the client id sent on refresh. The seeded account is never written to
+  `anthropic-accounts.json`. That includes a rotated refresh token: the plugin warns once on the first rotation
+  instead of persisting the new token. Omitting `CLAUDE_CODE_OAUTH_SCOPES` fails the load. An incomplete scope list
+  only warns.
+- **Scope negotiation at authorize time.** Two config keys add the conditional scopes: `oauth.plugins_scope` adds
+  `user:plugins`, and `oauth.project_scopes` adds `user:projects:read` and `user:projects:write`. Both default to off,
+  so the default scope strings are byte-identical to 1.0.0. Console login ignores both keys.
+- **Conditional scope composition.** The scope list is built from the base set plus the gated additions, in the
+  recorded order and without duplicates, instead of a frozen list. It is never sorted.
+- **Validation of the 2.1.280 OAuth environment overrides.** `CLAUDE_CODE_CUSTOM_OAUTH_URL` is checked against the
+  allowlist; see Breaking above. The local-development base URLs are accepted only for loopback origins. They are not
+  used for any request yet.
+- **An OAuth wire-parity conformance suite** (`test/conformance/oauth-wire-parity.test.mjs`).
+
+### Changed
+
+- **`@tormentalabs/claude-code-wire-compat` is pinned to exactly `0.5.0` instead of `latest`.** `0.6.0` switches the
+  package's `DEFAULT_PROFILE` to Claude Code 2.1.280. The plugin never passes a profile, so a fresh install would
+  change the request wire before the plugin has been ported. Against `0.6.0`, the plugin's own suite fails 48 tests.
+  The user agent and `cc_version` report 2.1.280, thinking goes out as `display: "updates"`, the redact-thinking beta
+  is absent, and the retry latch can no longer strip the cache-diagnosis beta. The pin lifts when the wire port to
+  2.1.280 lands. See `docs/shared-package-provenance.md`.
+
+### Fixed
+
+- **Token expiry uses a 30-second skew everywhere.** All eleven expiry checks, which used five different spellings,
+  now go through one predicate. A token is treated as expired 30 seconds before it expires. The skew is a minimum,
+  not an addition, so the 300-second foreground refresh buffer and the idle refresh window keep their tuned values. A
+  missing or non-numeric `expires` now counts as expired instead of valid.
+- **Revocation reports what happened.** Revocation used to return `false` whether the opt-in gate was off or the
+  server rejected the request. A user whose revocation failed was told the token had been discarded while it was
+  still live on the server. Revocation now reports whether it was attempted and whether it succeeded, and the CLI
+  reports those three outcomes separately.
+- **Each refresh retry gets its own timeout.** The three attempts used to share one timeout signal.
+- **Scope configuration problems are reported.** If the config cannot be read, the default scopes are still used,
+  but the plugin now warns. An explicit scope option of the wrong type throws instead of silently falling back to the
+  config. An unrecognised project scope is dropped with a one-time warning.
+
 ## [1.0.0] — 2026-08-16
 
 The wire-compat consolidation, complete. The plugin no longer maintains an independent implementation of Claude Code
