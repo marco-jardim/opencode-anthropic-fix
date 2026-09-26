@@ -2,7 +2,7 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
-## [Unreleased]
+## [2.1.0] — 2026-09-26
 
 The request wire now emulates Claude Code 2.1.280, through `@tormentalabs/claude-code-wire-compat` 0.7.0. This also
 fixes sessions dying with `INVALID_UNICODE`.
