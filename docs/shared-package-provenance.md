@@ -124,9 +124,10 @@ memory — this is the tooling the previous section promises when it says a movi
 reviewed lockfile diff."
 
 **`npm run sync:wire-compat`** ([`scripts/sync-wire-compat.mjs`](../scripts/sync-wire-compat.mjs)) is
-the supported way to move the lock forward: it runs `npm update @tormentalabs/claude-code-wire-compat`
-(rewrites `package-lock.json` only; `package.json` keeps `latest`), prints the old and new resolved
-version, and then runs the wire-sensitive targeted tests (`vitest run wire-baseline
+the supported way to move the lock forward: it runs `npm update @tormentalabs/claude-code-wire-compat --prefer-online`
+(rewrites `package-lock.json` only; `package.json` keeps `latest`; `--prefer-online` stops npm answering from
+a stale cached packument), prints the old and new resolved version, runs `check:wire-compat-drift` so a sync
+that did not move the lock fails, and then runs the wire-sensitive targeted tests (`vitest run wire-baseline
 test/conformance`) so a regression in the new release is caught in the same breath as the bump rather
 than later. It does not commit anything — review the `package-lock.json` diff, and re-read this
 document plus [`wire-compat-divergences.md`](./mimicry/wire-compat-divergences.md) if the package's
