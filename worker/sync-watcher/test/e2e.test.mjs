@@ -630,3 +630,42 @@ describe("fetch handler — /health endpoint", () => {
     expect(resp.status).toBe(404);
   });
 });
+
+describe("fetch handler — pipeline isolation", () => {
+  it.each([
+    ["GET", "/run"],
+    ["POST", "/run"],
+    ["HEAD", "/run"],
+    ["PUT", "/run"],
+    ["PATCH", "/run"],
+    ["DELETE", "/run"],
+    ["OPTIONS", "/run"],
+    ["POST", "/run?force=true"],
+    ["GET", "/other/../run"],
+    ["POST", "/%2e/run"],
+    ["GET", "/%72un"],
+    ["POST", "/run/"],
+    ["GET", "/cdn-cgi/handler/scheduled"],
+  ])("rejects %s %s before accessing pipeline capabilities", async (method, path) => {
+    const kv = makeKV();
+    const get = vi.spyOn(kv, "get");
+    const put = vi.spyOn(kv, "put");
+    const deleteKey = vi.spyOn(kv, "delete");
+    const env = makeEnv(kv);
+    fetchRegistryMetadata.mockResolvedValue({ notModified: true });
+    const req = new Request(`https://worker.example${path}`, { method });
+
+    const resp = await worker.fetch(req, env);
+
+    expect(resp.status).toBe(404);
+    expect(await resp.text()).toBe("Not Found");
+    expect(get).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    expect(deleteKey).not.toHaveBeenCalled();
+    expect(fetchRegistryMetadata).not.toHaveBeenCalled();
+    expect(downloadAndExtractCli).not.toHaveBeenCalled();
+    expect(analyzeContractDiff).not.toHaveBeenCalled();
+    expect(env.AI.run).not.toHaveBeenCalled();
+    expect(deliver).not.toHaveBeenCalled();
+  });
+});
