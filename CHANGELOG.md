@@ -2,6 +2,19 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [Unreleased]
+
+### Added
+
+- OpenCode v2 server and TUI entries, with a separate adapter targeting 2.0.21 and the existing v1 factory preserved.
+- Administrative `/anthropic` commands through v2 RPC and TUI, OAuth method registration, per-tier model costs, and explicit summary compaction for the compatibility route.
+- Per-instance runtime state and lifecycle cancellation for requests, refreshes, backoff, and pending account saves.
+- Dual-package builds and explicit `--host=v2` installation. See `docs/opencode-v2.md` for configuration, tested versions, and limitations.
+
+### Changed
+
+- Managed v2 models use the pinned Anthropic AI SDK 3.0.111 and the shared request executor. Tool aliases are restored per request, including JSON responses.
+
 ## [2.1.1] — 2026-09-26
 
 ### Fixed

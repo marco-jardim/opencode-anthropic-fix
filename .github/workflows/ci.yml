@@ -65,3 +65,24 @@ jobs:
           echo "Passing-test count $passed meets the required floor of 1414"
       - run: npm run coverage
       - run: npm run build
+
+  host-compatibility:
+    name: host (${{ matrix.os }}, ${{ matrix.host }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        host: ["1.2.27", "1.18.29", "1.18.34", "2.0.21"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Package and installer contracts
+        run: npx vitest run test/conformance/distribution.test.mjs test/installer.test.mjs
+      - name: Load the official host with isolated fake credentials
+        run: node scripts/run-host-smoke.mjs "${{ matrix.host }}"

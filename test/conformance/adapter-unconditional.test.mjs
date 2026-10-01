@@ -447,8 +447,18 @@ describe("adapter path integration smokes", () => {
 
     // The plugin's own response headers are attached. They are computed when the
     // response is wrapped, BEFORE the body is consumed, so their values reflect
-    // the session up to the request — only their presence is asserted here.
-    expect(Number(response.headers.get("x-opencode-turns"))).toBeGreaterThanOrEqual(1);
-    expect(response.headers.get("x-opencode-cache-read-total")).not.toBeNull();
+    // the session up to the request. A new runtime has no earlier turns; using
+    // previous tests' metrics here would hide an instance-isolation regression.
+    expect(response.headers.get("x-opencode-turns")).toBe("0");
+    expect(response.headers.get("x-opencode-cache-read-total")).toBe("0");
+
+    const nextResponse = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(FOREGROUND_BODY),
+    });
+    expect(nextResponse.headers.get("x-opencode-turns")).toBe("1");
+    expect(nextResponse.headers.get("x-opencode-cache-read-total")).toBe("7");
+    await nextResponse.text();
   });
 });
