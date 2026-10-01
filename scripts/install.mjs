@@ -11,10 +11,24 @@
  *   node scripts/install.mjs link        Symlink both (development)
  *   node scripts/install.mjs copy        Copy both (stable deployment)
  *   node scripts/install.mjs uninstall   Remove both
+ *   node scripts/install.mjs link --host=v2  Link the dual-host package
+ *   node scripts/install.mjs copy --host=v2  Copy the bundled dual-host package
  */
 
 import { existsSync, lstatSync, readlinkSync } from "node:fs";
-import { mkdir, symlink, unlink, rm, copyFile, chmod } from "node:fs/promises";
+import {
+  mkdir,
+  symlink,
+  unlink,
+  rm,
+  copyFile,
+  chmod,
+  readFile,
+  writeFile,
+  readdir,
+  lstat,
+  rmdir,
+} from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -48,6 +62,18 @@ function getBinDir() {
 }
 
 const DIST_DIR = join(PROJECT_ROOT, "dist");
+const PACKAGE_NAME = "opencode-anthropic-fix";
+const PACKAGE_FILES = [
+  "index.mjs",
+  "server.mjs",
+  "tui.mjs",
+  "cli.mjs",
+  "rpc.mjs",
+  "package.json",
+  "LICENSE",
+  "NOTICE",
+  "THIRD_PARTY_NOTICES",
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -287,24 +313,175 @@ async function cmdUninstall() {
   }
 }
 
+// The explicit v2 mode installs a package, never files in the automatic plugin
+// discovery directory. A helper export discovered as a plugin breaks both
+// loaders, and the server and TUI have separate entrypoints.
+function getPackageDir() {
+  return join(dirname(getPluginDir()), "node_modules", PACKAGE_NAME);
+}
+
+async function pathStat(path) {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** Refuse to recursively replace an npm install or an unrelated directory. */
+async function managedPackageState() {
+  const destination = getPackageDir();
+  const stat = await pathStat(destination);
+  if (!stat) return "missing";
+  if (stat.isSymbolicLink()) return "link";
+  if (!stat.isDirectory()) throw new Error(`Refusing to replace a non-directory package: ${destination}`);
+  let manifest;
+  try {
+    manifest = JSON.parse(await readFile(join(destination, "package.json"), "utf8"));
+  } catch (error) {
+    throw new Error(`Package directory is not managed by this installer: ${destination}`, { cause: error });
+  }
+  if (manifest.name !== PACKAGE_NAME || manifest.opencodeAnthropicInstaller !== 1) {
+    throw new Error(`Package directory is not managed by this installer: ${destination}`);
+  }
+  const names = await readdir(destination);
+  for (const name of names) {
+    const child = await lstat(join(destination, name));
+    if (!PACKAGE_FILES.includes(name) || !child.isFile() || child.isSymbolicLink()) {
+      throw new Error(`Package directory contains an unmanaged entry: ${join(destination, name)}`);
+    }
+  }
+  return "copy";
+}
+
+async function removeManagedPackage() {
+  const state = await managedPackageState();
+  const destination = getPackageDir();
+  if (state === "link") await unlink(destination);
+  if (state === "copy") {
+    // Only the inventoried flat bundle files are removed; never recursive rm.
+    for (const name of await readdir(destination)) await unlink(join(destination, name));
+    await rmdir(destination);
+  }
+  return state !== "missing";
+}
+
+function packageCliBin() {
+  return join(getBinDir(), CLI_BIN_NAME + (process.platform === "win32" ? ".cmd" : ""));
+}
+
+async function installPackageCli() {
+  const destination = packageCliBin();
+  const target = join(getPackageDir(), "cli.mjs");
+  const existing = await pathStat(destination);
+  if (existing?.isDirectory() && !existing.isSymbolicLink()) {
+    throw new Error(`Refusing to replace a CLI directory: ${destination}`);
+  }
+  await mkdir(dirname(destination), { recursive: true });
+  if (existing) await unlink(destination);
+  if (process.platform === "win32") {
+    await writeFile(
+      destination,
+      `@echo off\r\nrem ${PACKAGE_NAME} installer\r\nnode "${target.replaceAll("%", "%%")}" %*\r\n`,
+    );
+  } else {
+    await symlink(target, destination);
+    await chmod(target, 0o755);
+  }
+  console.log(green(`CLI: installed ${shortPath(destination)}`));
+}
+
+async function reportPackageConfig() {
+  const stale = [];
+  for (const name of [PLUGIN_ENTRY, "opencode-anthropic-auth.js", PLUGIN_NAME]) {
+    const path = join(getPluginDir(), name);
+    if (await pathStat(path)) stale.push(path);
+  }
+  if (stale.length) {
+    console.log(
+      yellow("\nRemove these previous plugin entries before enabling the package to avoid duplicate loading:"),
+    );
+    for (const path of stale) console.log(`  ${path}`);
+  }
+  console.log("\nAdd this package to OpenCode v2 configuration (opencode.json / opencode.jsonc):");
+  // An explicit path also works outside the config directory's module lookup
+  // and makes the same package's ./server and ./tui exports discoverable.
+  console.log(JSON.stringify({ plugins: [getPackageDir()] }, null, 2));
+  console.log("The installer did not change your configuration. Restart OpenCode after installation.");
+}
+
+async function cmdPackage(command) {
+  const destination = getPackageDir();
+  if (command === "uninstall") {
+    const removed = await removeManagedPackage();
+    const bin = packageCliBin();
+    const stat = await pathStat(bin);
+    if (
+      stat?.isSymbolicLink() ||
+      (stat?.isFile() && (await readFile(bin, "utf8")).includes(`${PACKAGE_NAME} installer`))
+    ) {
+      await unlink(bin);
+    }
+    console.log(removed ? "Dual-host package removed." : "Dual-host package is not installed.");
+    console.log("Remove its plugins entry from your OpenCode configuration if present.");
+    return;
+  }
+
+  await managedPackageState();
+  if (command === "copy") {
+    const source = join(DIST_DIR, PACKAGE_NAME);
+    for (const name of PACKAGE_FILES) {
+      if (!(await pathStat(join(source, name)))?.isFile()) {
+        throw new Error("Dual-host bundle not found. Run `npm run build` first.");
+      }
+    }
+    await removeManagedPackage();
+    await mkdir(destination, { recursive: true });
+    for (const name of PACKAGE_FILES) await copyFile(join(source, name), join(destination, name));
+    console.log(green(`Dual-host package copied to ${shortPath(destination)}`));
+  } else {
+    await removeManagedPackage();
+    await mkdir(dirname(destination), { recursive: true });
+    await symlink(PROJECT_ROOT, destination, process.platform === "win32" ? "junction" : "dir");
+    console.log(green(`Dual-host package linked: ${shortPath(destination)} -> ${PROJECT_ROOT}`));
+  }
+  await installPackageCli();
+  await reportPackageConfig();
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 const command = process.argv[2];
+const options = process.argv.slice(3);
+if (options.some((option) => option !== "--host=v1" && option !== "--host=v2") || options.length > 1) {
+  console.error("Expected at most one host option: --host=v1 or --host=v2.");
+  process.exit(1);
+}
+const packageMode = options.includes("--host=v2");
 
-switch (command) {
-  case "link":
-    await cmdLink();
-    break;
-  case "copy":
-    await cmdCopy();
-    break;
-  case "uninstall":
-    await cmdUninstall();
-    break;
-  default:
-    console.log(`${bold("Installer for opencode-anthropic-auth")}
+if (packageMode && ["link", "copy", "uninstall"].includes(command)) {
+  try {
+    await cmdPackage(command);
+  } catch (error) {
+    console.error(red(error.message));
+    process.exitCode = 1;
+  }
+} else {
+  switch (command) {
+    case "link":
+      await cmdLink();
+      break;
+    case "copy":
+      await cmdCopy();
+      break;
+    case "uninstall":
+      await cmdUninstall();
+      break;
+    default:
+      console.log(`${bold("Installer for opencode-anthropic-auth")}
 
 ${dim("Installs:")}
   Plugin  ${dim("->")}  ~/.config/opencode/plugin/${PLUGIN_ENTRY}
@@ -314,6 +491,10 @@ ${dim("Usage:")}
   node scripts/install.mjs ${bold("link")}         Symlink both (development)
   node scripts/install.mjs ${bold("copy")}         Copy both (stable deployment)
   node scripts/install.mjs ${bold("uninstall")}    Remove both
+
+Add ${bold("--host=v2")} to install/remove the dual-host package under config/node_modules.
+The v2 mode prints configuration instructions without editing your configuration.
 `);
-    process.exit(command ? 1 : 0);
+      process.exit(command ? 1 : 0);
+  }
 }

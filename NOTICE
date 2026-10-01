@@ -22,15 +22,32 @@ Third-party dependencies
   Upstream: https://github.com/marco-jardim/claude-code-wire-compat
   Distributed with its own LICENSE and NOTICE inside the published artifact.
 
-  This package builds the outgoing Anthropic Messages request. It is currently
-  pinned to a release-candidate tarball; the exact artifact, its integrity hash,
-  the reason for the temporary pin, and the rollback procedure are recorded in
-  docs/shared-package-provenance.md.
+  This package builds the outgoing Anthropic Messages request. Its npm `latest`
+  specifier is resolved to an exact version and integrity hash by package-lock.json;
+  the protocol profile is explicitly pinned in lib/mimicry/wire-compat.mjs.
+  Provenance and rollback instructions are in docs/shared-package-provenance.md.
 
-xxhash-wasm
-  License: MIT
-  Upstream: https://github.com/jungomi/xxhash-wasm
+@ai-sdk/anthropic (3.0.111)
+@ai-sdk/provider
+@ai-sdk/provider-utils
+  AI SDK Anthropic provider and supporting interfaces/utilities.
+  License: Apache-2.0
+  Upstream: https://github.com/vercel/ai
+  Copyright 2023 Vercel, Inc. (from the provider packages' notices).
+  The complete Apache-2.0 text is supplied in licenses/Apache-2.0.txt.
+  Transitive versions are recorded in package-lock.json. The provider-utils
+  package also contains an ISC-licensed zod3-to-json-schema implementation;
+  its vendored copyright notice and license are included in standalone builds.
+  The Anthropic provider is used by the OpenCode v2 compatibility adapter.
 
-Development-only dependencies are not redistributed by this package: the "files"
-allowlist in package.json publishes only index.mjs, cli.mjs, lib/**/*.mjs,
-README.md, and LICENSE.
+The npm source package publishes its runtime entrypoints, lib/**/*.mjs, user
+documentation, licenses/, LICENSE and this NOTICE. Its dependencies retain their own
+license files in node_modules; development-only dependencies are not included
+by the package's files allowlist.
+
+Standalone builds inline runtime dependencies. scripts/build.mjs collects
+the dependency packages actually present in esbuild's input metadata and
+includes their available LICENSE/NOTICE files and the complete Apache-2.0
+text in THIRD_PARTY_NOTICES. That
+document ships beside the dual-host bundle and is also embedded as comments
+in each standalone JavaScript file so legacy single-file copies retain it.
