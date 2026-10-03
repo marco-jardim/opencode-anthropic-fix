@@ -101,6 +101,6 @@ citing an `index.mjs` line for any of these would be wrong. Full derivation:
 
 ## Syncing a new Claude Code version
 
-When `worker/sync-watcher` detects a new Claude Code version, reconcile the observed registry and default set, then
+When a new Claude Code version is released or the wire-compat package is updated, reconcile the observed registry and default set, then
 update this table, `docs/mimese-http-header-system-prompt.md`, and `test/conformance/regression.test.mjs` together.
 Treat those three artifacts as one mimicry-contract change.

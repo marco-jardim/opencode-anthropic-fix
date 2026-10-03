@@ -22,7 +22,6 @@ nul
 RESEARCH_SUMMARY.txt
 .claude/
 .opencode/
-.wrangler/
 
 # debug / diagnostic artifacts (may contain request/response data)
 debug-headers.log

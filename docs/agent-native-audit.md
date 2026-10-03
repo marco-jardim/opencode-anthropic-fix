@@ -11,6 +11,8 @@
 >
 > **Update log:**
 >
+> - _2026-10-03_ — `worker/sync-watcher` was decommissioned and removed from the repository; references below
+>   describe the historical audit, not the current project layout.
 > - _2026-07-07_ — Applied ahead of the formal plan: (1) secret-redaction layer `lib/redact.mjs`
 >   wired into all debug sinks + a new masked outgoing-header dump (Axis 3, Rank 2 partial); (2) removed
 >   the unrelated nested `.opencode/` project (§5 hygiene). The original 🔴 "bearer leak" finding was

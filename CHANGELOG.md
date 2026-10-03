@@ -15,6 +15,12 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 - Managed v2 models use the pinned Anthropic AI SDK 3.0.111 and the shared request executor. Tool aliases are restored per request, including JSON responses.
 
+### Removed
+
+- `worker/sync-watcher`: the upstream-version watcher Worker. Its cron had been disabled since the wire-compat
+  migration, and its only remaining trigger was an unauthenticated `/run` endpoint. The deployed Worker was
+  deleted from Cloudflare on 2026-10-03.
+
 ## [2.1.1] — 2026-09-26
 
 ### Fixed
