@@ -41,9 +41,6 @@ rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
   `conformance/regression.test.mjs` (40 tests validating mimicry against
   `docs/claude-code-reverse-engineering.md`). Do not delete these when
   refactoring mimicry code — they are the contract.
-- `worker/sync-watcher/` — **separate Cloudflare Workers subproject** with its
-  own `package.json`, `vitest`, and `wrangler` deploy. Unrelated to the plugin
-  runtime. Its tests run as part of the root `npm test` (vitest picks them up).
 - `scripts/build.mjs` — esbuild bundler (ESM, node20, `node:*` external only).
 - `scripts/install.mjs` — `link` | `copy` | `uninstall` for
   `~/.config/opencode/plugin/` and `~/.local/bin/`.
@@ -53,7 +50,7 @@ rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
 ## Commands
 
 ```
-npm test              # full suite (root + worker/sync-watcher, ~14s)
+npm test              # full suite (~16s wall time measured on Windows)
 npm run test:watch
 npx vitest run <name> # single file by name substring
 npm run lint          # eslint flat config
@@ -67,8 +64,8 @@ npm run install:copy  # build + copy standalone files
 
 Do not run `git commit` manually for small edits — `pre-commit` runs
 `npm test` + `lint-staged` (prettier + eslint --fix on staged files).
-`pre-push` runs `npm test` + `prettier --check .` + `eslint .`. Both are slow
-(~13s minimum) because of the full test suite; budget for it.
+`pre-push` runs `npm test` + `prettier --check .` + `eslint .`. Both run the full
+test suite (~16s wall time measured on Windows), plus their other checks; budget for it.
 
 ## Repo-specific conventions
 
@@ -167,9 +164,8 @@ Start from evidence in the host log, not from the user's pasted snippet:
 - Tests mock `node:fs` and `node:https` extensively. Mock **before** importing
   the module under test (see existing patterns in `cli.test.mjs`,
   `index.test.mjs`).
-- `worker/sync-watcher/test/registry.test.mjs` intentionally sleeps ~3s
-  (AbortError timeout test). `test/conformance/regression.test.mjs` has 529
-  backoff tests that sleep 2-3s each. Suite total ~13s — not flaky, just slow.
+- `test/conformance/regression.test.mjs` has 529 backoff tests that sleep 2-3s
+  each. Not flaky, just slow.
 - `test/phase*/` directories are feature-specific integration tests; keep them
   named after the feature they guard.
 - Many tests emit stdout from the CLI's account listing — that's expected, not

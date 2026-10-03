@@ -9,16 +9,7 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "json-summary", "html"],
       include: ["lib/**/*.mjs", "index.mjs", "cli.mjs"],
-      exclude: [
-        "**/*.test.mjs",
-        "worker/**",
-        "scripts/**",
-        "docs/**",
-        "dist/**",
-        "test/**",
-        "node_modules/**",
-        ".opencode/**",
-      ],
+      exclude: ["**/*.test.mjs", "scripts/**", "docs/**", "dist/**", "test/**", "node_modules/**", ".opencode/**"],
       thresholds: {
         "lib/**": {
           statements: 85,

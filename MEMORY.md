@@ -183,3 +183,5 @@ single seam. Decisions taken along the way, and what each one closes off:
    Re-pointing it at `@tormentalabs/claude-code-wire-compat` (and re-enabling the
    cron) remains open work. The trigger also lives in Cloudflare's server-side
    state — the repo change only takes effect after a `wrangler deploy`.
+
+   **2026-10-03:** The worker was deleted from Cloudflare and removed from the repository.

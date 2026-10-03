@@ -2,6 +2,14 @@
 
 All notable changes to `opencode-anthropic-fix` are documented here.
 
+## [Unreleased]
+
+### Removed
+
+- `worker/sync-watcher`: the upstream-version watcher Worker. Its cron had been disabled since the wire-compat
+  migration, and its only remaining trigger was an unauthenticated `/run` endpoint. The deployed Worker was
+  deleted from Cloudflare on 2026-10-03.
+
 ## [2.1.1] — 2026-09-26
 
 ### Fixed
