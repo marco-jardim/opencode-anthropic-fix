@@ -58,6 +58,5 @@ Use `node cli.mjs diagnose` (or `dg`) to create a redacted diagnostic bundle; pa
 | OAuth, fetch interceptor, retry/overload loop, request/response mimicry, and token-economy state machines                    | `index.mjs`                            |
 | Standalone CLI; `/anthropic` dispatches in-process                                                                           | `cli.mjs`                              |
 | OAuth, accounts, rotation, backoff, config, storage, refresh-lock, cc-credentials, account-state, redact, and tuning modules | `lib/*.mjs`                            |
-| Separate Cloudflare Workers subproject and upstream Claude Code version watcher                                              | `worker/sync-watcher/`                 |
 | Research and the mimicry contract                                                                                            | `docs/`                                |
 | Mimicry regression oracle                                                                                                    | `test/conformance/regression.test.mjs` |
