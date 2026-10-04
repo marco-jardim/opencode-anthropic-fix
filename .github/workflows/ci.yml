@@ -65,3 +65,43 @@ jobs:
           echo "Passing-test count $passed meets the required floor of 1414"
       - run: npm run coverage
       - run: npm run build
+
+  host-compatibility:
+    name: host (${{ matrix.os }}, ${{ matrix.host }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        host: ["1.2.27", "1.18.29", "1.18.34"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Plugin entry contract
+        run: npx vitest run test/conformance/plugin-entry-exports.test.mjs
+      - name: Load the official host with isolated fake credentials
+        env:
+          OPENCODE_HOST_SMOKE_DIR: ${{ runner.temp }}/host-smoke
+          OPENCODE_HOST_SMOKE_INIT_TIMEOUT_MS: "120000"
+        run: node scripts/run-host-smoke.mjs "${{ matrix.host }}"
+      - name: Upload host smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-smoke-${{ matrix.os }}-${{ matrix.host }}
+          # Only diagnostics from the isolated fake-credential host, not its
+          # dependency cache, binary, or auth/account stores (even fake ones).
+          path: |
+            ${{ runner.temp }}/host-smoke/**/host.log
+            ${{ runner.temp }}/host-smoke/**/report.json
+            ${{ runner.temp }}/host-smoke/**/probes.json
+            ${{ runner.temp }}/host-smoke/**/matrix.json
+            ${{ runner.temp }}/host-smoke/**/provenance.json
+            !${{ runner.temp }}/host-smoke/**/auth*.json
+            !${{ runner.temp }}/host-smoke/**/anthropic-auth*.json
+            !${{ runner.temp }}/host-smoke/**/anthropic-accounts*.json
