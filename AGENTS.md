@@ -16,8 +16,9 @@ rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
 
 ## Layout (what matters)
 
-- `index.mjs` — plugin entry (OAuth, fetch interceptor, retry loop, `/anthropic`
-  slash command). Large file; prefer `grep` over reading end-to-end. **It must
+- `index.mjs` — thin plugin entry; the per-instance implementation (OAuth, fetch
+  interceptor, retry loop, `/anthropic` slash command) lives in
+  `lib/host/runtime.mjs`. Prefer `grep` over reading that file end-to-end. **The entry must
   export only `AnthropicAuthPlugin` and `default`**: opencode calls every export
   of the entry module as a plugin factory, so any helper exported here breaks
   with `failed to load plugin …` on every start.

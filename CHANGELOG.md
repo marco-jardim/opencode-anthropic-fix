@@ -4,6 +4,13 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The plugin core now runs as a disposable per-instance runtime.** `index.mjs` is a thin entry for
+  `lib/host/runtime.mjs`; each instance owns its configuration, metrics, and request lifecycle. Disposal
+  cancels requests, removes telemetry listeners, and flushes pending account updates without affecting
+  other plugin instances.
+
 ### Removed
 
 - `worker/sync-watcher`: the upstream-version watcher Worker. Its cron had been disabled since the wire-compat
