@@ -4,23 +4,18 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
-### Fixed
-
-- Custom tool names such as `constructor` and `__proto__` now round-trip without inherited-property collisions or request failures.
-- Administrative command output redacts OAuth completion codes even when command tokens are quoted or the input is a callback URL.
-- Large command output truncates at grapheme boundaries without walking every preceding character, avoiding Node 20 timeouts.
-- Package exports preserve previously published README, license, package metadata, and library subpaths.
-- The v2 installer refuses to replace or remove foreign CLI files and symlinks unless explicitly given `--force`.
-
 ### Added
 
-- OpenCode v2 server and TUI entries, with a separate adapter targeting 2.0.21 and the existing v1 factory preserved.
-- Administrative `/anthropic` commands through v2 RPC and TUI, OAuth method registration, per-tier model costs, and explicit summary compaction for the compatibility route.
-- Dual-package builds and explicit `--host=v2` installation. See `docs/opencode-v2.md` for configuration, tested versions, and limitations.
+- OpenCode v2 server and TUI entries, with a separate adapter tested against 2.0.21 and 2.0.22 and the existing v1 factory preserved.
+- Administrative `/anthropic` commands through v2 RPC and TUI, OAuth method registration, per-tier model costs, and explicit summary compaction for the compatibility route. Command output redacts OAuth completion codes in every accepted command form.
+- Dual-package builds and explicit `--host=v2` installation. The installer refuses to replace or remove foreign CLI files and symlinks unless given `--force`. See `docs/opencode-v2.md` for configuration, tested versions, and limitations.
 
 ### Changed
 
-- Managed v2 models use the pinned Anthropic AI SDK 3.0.111 and the shared request executor. Tool aliases are restored per request, including JSON responses.
+- Managed v2 models load the bundled Anthropic AI SDK 3.0.111 from a local factory (no host-side npm install) and use the shared request executor. Thinking/effort options and signed reasoning metadata use the host's `anthropic` key. Tool aliases are restored per request, including JSON responses, and prototype-like tool names such as `constructor` round-trip safely.
+- Managed v2 providers disable the host's five-minute header/chunk timers (2.0.22+) so account rotation and Retry-After waits are not cut off. Auxiliary v2 requests (title, generate) have a ten-minute deadline, because the host does not propagate their cancellation.
+- `package.json` `exports` keeps every previously published path resolvable, including `README.md` and `LICENSE`.
+- `truncateGraphemes` finds the cut point directly instead of walking every preceding grapheme.
 - Canceling a request no longer aborts an in-flight token refresh; rotated tokens are still saved even when every caller stops waiting.
 
 - **The plugin core now runs as a disposable per-instance runtime.** `index.mjs` is a thin entry for
