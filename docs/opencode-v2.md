@@ -12,16 +12,31 @@ integrity verification. All smoke configurations and credentials were temporary.
 | 1.18.29 | Passed | Dual entry, OAuth registration, one administrative command, 16 OAuth models with zero costs.                                                                                             |
 | 1.18.34 | Passed | Dual entry and public provider model hook, OAuth/command registration, 19 OAuth models with zero costs.                                                                                  |
 | 2.0.21  | Passed | Server load, OAuth registration, 19 models, RPC without model invocation, chat, auxiliary generation, title, summary compaction, cancellation before response headers and plugin reload. |
+| 2.0.22  | Passed | Same local Windows smoke scope as 2.0.21, including managed timeout settings and plugin reload.                                                                                          |
 
-The complete automated suite passed **2,286 tests across 113 files**, with two
+The original complete automated suite passed **2,286 tests across 113 files**, with two
 platform skips on Windows. Build, ESLint, formatting and invariant checks passed;
 the invariant check retains the existing warning about differing reverse-engineering
 documentation baselines. Installer and standalone package tests run in temporary
 directories. The v2 host smoke uses a local Anthropic simulator and blocks direct
 Anthropic API access. The v1 host smoke checks loading and registration, not inference.
 
-Run a pinned host again with `node scripts/run-host-smoke.mjs 2.0.21` (or one of
-the v1 versions above). CI now runs these four hosts on Linux and Windows; the
+The v2 host-contract review reran both 2.0.21 and 2.0.22 Windows smokes with the
+option/metadata adapter and host timeout fixes. Auxiliary orphan bounds are
+tested with interrupted Effect fibers and loopback HTTP, not claimed as immediate
+auxiliary cancellation by those host binaries.
+
+Review verification: `npm test` and `npm run coverage` passed **2,057 tests in
+103 files**, with the same two platform skips. Coverage thresholds were unchanged;
+the new language adapter had 100% statement/branch/function/line coverage.
+ESLint, formatting, build and invariants passed (the existing baseline warning
+remains). Negative controls temporarily removed the language wrapper, auxiliary
+deadline and timeout settings and restored the inaccurate checkpoint wording:
+six regression cases failed, then passed after restoring the fixes.
+
+Run a pinned host again with `node scripts/run-host-smoke.mjs 2.0.21` or
+`node scripts/run-host-smoke.mjs 2.0.22` (or one of the v1 versions above).
+CI runs these five hosts on Linux and Windows; the
 Linux jobs have not been run locally. Real OAuth login, real Anthropic inference
 and interactive TUI rendering still require manual validation before release.
 The TUI behavior is covered by deterministic tests, and its RPC runs in the real
@@ -61,12 +76,17 @@ standalone v1 behavior.
 
 ## Transport and version boundary
 
-The adapter targets the public OpenCode **2.0.21** contract. It routes managed
+The adapter targets the public OpenCode **2.0.21 and 2.0.22** contracts. It routes managed
 Anthropic models through `aisdk:@ai-sdk/anthropic@3.0.111`;
 the public SDK hook supplies the pinned `@ai-sdk/anthropic` **3.0.111** provider.
 The versioned specifier prevents the host from rewriting the SDK name back to its
 native provider and lets its built-in package loader resolve the SDK before the
-plugin hook executes. The shared plugin executor keeps account rotation,
+plugin hook executes. Because the host derives its option and persisted metadata
+key as `anthropic@3.0.111`, the language-model adapter maps that key to the SDK's
+`anthropic` input and maps SDK response metadata back, including reasoning
+signatures and finish metadata. Selected thinking/effort variants and signed
+thinking replay therefore use the same key the host persists.
+The shared plugin executor keeps account rotation,
 wire construction, backoff and the response compatibility shim on the same
 path as v1. Explicitly selected API-key or unrelated OAuth connections retain
 their own provider settings. A connection owned by this plugin is disabled
@@ -82,18 +102,43 @@ the shared executor and streams the response back. It does not accept an
 arbitrary target URL from incoming HTTP requests. The host's normal HTTP
 middleware remains in place; no functions are stored in model settings.
 
-The host also does not forward its cancellation signal to the AI SDK call.
+Neither host forwards its fiber cancellation signal to the AI SDK call (also
+verified in upstream revision `f74512b`).
 The adapter therefore associates tickets with session IDs and listens
 for the public `session.execution.interrupted` event. Interrupting a session or
 unloading the plugin aborts its requests; a lost event stream aborts outstanding
 requests and prevents new ones. A disconnected loopback request also cancels
-its upstream operation. The correlation header is removed before the shared
+its upstream operation. An SDK `abortSignal`, when supplied by a caller, reaches
+the upstream through that disconnect path. **Auxiliary `session.generate` fiber
+interruption alone does not emit a primary-execution event or disconnect HTTP.**
+The bridge bounds `generate` and `title` requests to **10 minutes total**, starting
+at the HTTP hook, including retries and streaming. This is an orphan-work bound,
+not immediate cancellation; a legitimately long auxiliary call can also hit it.
+Primary and compaction streams do not have this auxiliary deadline. Immediate
+auxiliary cancellation requires upstream to pass the Effect interruption signal
+as `abortSignal` into `doStream` and preserve it through fetch/middleware.
+The correlation header is removed before the shared
 executor sends a request to Anthropic. Plugin cleanup closes the local listener.
 
-The compatibility route uses summary compaction. Existing native-provider
-checkpoint history must not be treated as ordinary AI SDK message history.
+OpenCode 2.0.22 (and inspected HEAD) defaults `headerTimeout` and `chunkTimeout`
+to 300,000 ms. Managed provider settings set those and `timeout` to `false` so
+host timers cannot cut off the shared executor's retry/rotation waits. The
+executor has attempt budgets, not a finite total retry deadline: account slots
+are bounded by the pool, service errors normally get two retries, forced
+`x-should-retry` normally gets three, but Retry-After waits and repeated transient
+429s can exceed five minutes. Primary cancellation/disconnect/disposal remain
+available; auxiliary work has the separate bound above. 2.0.21 ignores the new
+header setting; its number-only chunk schema requires `chunkTimeout: 0` to
+disable that timer, while `timeout: false` is accepted on both hosts.
+
+The compatibility route uses summary compaction. When switching from a native
+provider, the host skips incompatible native checkpoints and re-expands the
+original transcript (`session/history.ts:23-26,99-107` at `v2.0.21`). A new session
+is not required and history is not corrupted, but context may grow substantially.
+The adapter's rejection guard applies only if opaque checkpoint parts are
+explicitly supplied to it; it does not describe normal host history loading.
 Validation against other OpenCode versions is required before widening the
-support claim. Tests against the actual 2.0.21 host exercise boot, RPC, streaming
+support claim. Host smoke tests exercise boot, RPC, streaming
 generation and cancellation using a local mock upstream. They do not constitute
 an authenticated end-to-end certification against Anthropic.
 

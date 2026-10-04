@@ -10,7 +10,7 @@ import { createHostProbe, hostLogTail } from "./host-smoke-probes.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary = process.argv[2];
-if (!binary) throw new Error("Usage: node scripts/smoke-host-v2.mjs <OpenCode-2.0.21-binary>");
+if (!binary) throw new Error("Usage: node scripts/smoke-host-v2.mjs <OpenCode-2.0.21-or-2.0.22-binary>");
 async function waitFor(predicate, label, timeout = 10000) {
   const deadline = Date.now() + timeout;
   while (!(await predicate())) {
@@ -200,7 +200,8 @@ try {
     }
   }
   assert.ok(info, "Host did not become ready");
-  assert.equal(info.version, "2.0.21", "This smoke certifies the pinned OpenCode host version");
+  assert.ok(["2.0.21", "2.0.22"].includes(info.version), "This smoke certifies only the pinned OpenCode hosts");
+  if (process.argv[3]) assert.equal(info.version, process.argv[3], "Downloaded host version must match");
   stage = "plugin initialization";
   initializationProbe = createHostProbe();
   const plugins = await client.plugin.list({ location });
@@ -208,7 +209,11 @@ try {
   console.log(JSON.stringify({ scratch, version: info.version, initialPluginCount: plugins.data.length }));
   const integrations = await client.integration.list({ location });
   const providers = await client.provider.list({ location });
-  assert.ok(providers.data.some((item) => item.id === "anthropic" && item.activation === "enabled"));
+  const managedProvider = providers.data.find((item) => item.id === "anthropic");
+  assert.equal(managedProvider?.activation, "enabled");
+  assert.equal(managedProvider.settings.timeout, false);
+  assert.equal(managedProvider.settings.headerTimeout, false);
+  assert.equal(managedProvider.settings.chunkTimeout, info.version === "2.0.21" ? 0 : false);
   const models = await client.model.list({ location });
   const finalPlugins = await client.plugin.list({ location });
   const plugin = finalPlugins.data.find((item) => item.id === "opencode-anthropic-fix");
