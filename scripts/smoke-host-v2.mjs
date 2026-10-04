@@ -20,8 +20,16 @@ async function waitFor(predicate, label, timeout = 10000) {
 }
 let hold = false;
 let disconnected = 0;
+let registryRequests = 0;
 const requests = [];
 const mock = createHttpServer(async (request, response) => {
+  if (request.url.startsWith("/registry/")) {
+    registryRequests++;
+    response
+      .writeHead(403, { "content-type": "application/json" })
+      .end('{"error":"SDK registry access forbidden by smoke fixture"}');
+    return;
+  }
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   if (request.method !== "POST" || chunks.length === 0) {
@@ -89,12 +97,15 @@ Object.assign(env, {
   OPENCODE_CONFIG_DIR: workspace,
   OPENCODE_TEST_HOME: join(scratch, "home"),
   OPENCODE_MITM_BASE_URL: `http://127.0.0.1:${mock.address().port}`,
+  // The plugin ships its SDK. A cold model initialization must not install a
+  // second copy through the host's npm transport (including after reload).
+  npm_config_registry: `http://127.0.0.1:${mock.address().port}/registry/`,
   TEMP: join(scratch, "tmp"),
   TMP: join(scratch, "tmp"),
 });
 // Only the fixture host receives this guard. Background quota probes use a
 // hardcoded Anthropic URL; refuse them locally instead of sending fake tokens.
-// Registry/host catalog downloads can still occur during a first cold start.
+// Host catalog downloads can still occur during a first cold start.
 await writeFile(join(networkGuard, "package.json"), JSON.stringify({ type: "module", main: "server.mjs" }));
 await writeFile(
   join(networkGuard, "server.mjs"),
@@ -222,7 +233,8 @@ try {
   assert.ok(integration.methods.some((item) => item.id === "opencode-anthropic-fix"));
   const anthropicModels = models.data.filter((item) => item.providerID === "anthropic");
   assert.ok(anthropicModels.length > 0);
-  assert.ok(anthropicModels.every((item) => item.package === "aisdk:@ai-sdk/anthropic@3.0.111"));
+  const sdkPackage = `aisdk:${new URL("../lib/host/v2-sdk.mjs", import.meta.url).href}`;
+  assert.ok(anthropicModels.every((item) => item.package === sdkPackage));
   assert.ok(anthropicModels.every((item) => item.cost.every((tier) => tier.input === 0 && tier.output === 0)));
   const session = await client.session.create({
     location,
@@ -237,7 +249,7 @@ try {
   });
   assert.equal(typeof rpc.output?.output, "string", "Administrative RPC must return its command output");
   assert.equal(requests.length, 0, "Administrative RPC must not call a model");
-  stage = "primary generation (including a cold SDK install)";
+  stage = "primary generation (cold SDK initialization, registry denied)";
   await client.session.prompt({ sessionID: session.id, text: "Hello." });
   await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(90000) });
   const history = await client.session.context({ sessionID: session.id });
@@ -288,6 +300,7 @@ try {
   }, "plugin after location reload");
   const reloadedModels = await client.model.list({ location });
   assert.equal(reloadedModels.data.filter((item) => item.providerID === "anthropic").length, anthropicModels.length);
+  assert.equal(registryRequests, 0, "Managed models must use the shipped SDK without a registry install");
   const report = {
     version: info.version,
     plugin,
@@ -301,6 +314,7 @@ try {
     upstreamRequests: requests.length,
     interruptedBeforeHeaders: true,
     reloaded: true,
+    registryRequests,
   };
   await writeFile(join(scratch, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
@@ -310,6 +324,7 @@ try {
     failedStage: stage,
     elapsedMs: Date.now() - started,
     upstreamRequests: requests.length,
+    registryRequests,
     error: String(error),
   };
   await writeFile(join(scratch, "report.json"), JSON.stringify(report, null, 2));

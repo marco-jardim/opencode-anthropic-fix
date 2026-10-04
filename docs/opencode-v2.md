@@ -63,8 +63,8 @@ The explicit v2 mode installs the package in
 `~/.config/opencode/node_modules/opencode-anthropic-fix`. Development links use
 a directory junction on Windows. The copy contains bundled server, TUI, RPC,
 legacy plugin and CLI entries and requires no `npm install` at its destination.
-The host may still resolve or download the pinned AI SDK package into its own
-cache when initializing the provider.
+The copy also contains a local SDK factory; initializing a managed model does
+not resolve or download another AI SDK package into the host's cache.
 The installer prints the exact configuration to add and leaves existing
 configuration untouched. It reports old standalone plugin entries that could
 cause duplicate loading; remove those entries before enabling the new package.
@@ -77,15 +77,16 @@ standalone v1 behavior.
 ## Transport and version boundary
 
 The adapter targets the public OpenCode **2.0.21 and 2.0.22** contracts. It routes managed
-Anthropic models through `aisdk:@ai-sdk/anthropic@3.0.111`;
-the public SDK hook supplies the pinned `@ai-sdk/anthropic` **3.0.111** provider.
-The versioned specifier prevents the host from rewriting the SDK name back to its
-native provider and lets its built-in package loader resolve the SDK before the
-plugin hook executes. Because the host derives its option and persisted metadata
-key as `anthropic@3.0.111`, the language-model adapter maps that key to the SDK's
-`anthropic` input and maps SDK response metadata back, including reasoning
-signatures and finish metadata. Selected thinking/effort variants and signed
-thinking replay therefore use the same key the host persists.
+Anthropic models through `aisdk:file://…/v2-sdk.mjs`;
+the shipped factory and public SDK hook use the pinned `@ai-sdk/anthropic`
+**3.0.111** provider. The local specifier prevents the native-provider rewrite
+and avoids a redundant registry install by the host's built-in dynamic hook,
+which runs **before** external plugin hooks. This is also true in the standalone
+bundle, where `v2-sdk.mjs` is self-contained. Core now uses `anthropic` for both
+options and persisted metadata, matching the SDK. The language adapter still
+accepts the former `anthropic@3.0.111` input key for signed reasoning replay.
+See [the cold-initialization investigation](opencode-v2-sdk-initialization.md)
+for the host npm failure, mitigation, negative control and repeated smoke results.
 The shared plugin executor keeps account rotation,
 wire construction, backoff and the response compatibility shim on the same
 path as v1. Explicitly selected API-key or unrelated OAuth connections retain

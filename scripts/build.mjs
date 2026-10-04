@@ -63,6 +63,7 @@ const bundles = await Promise.all([
     tui: "tui.mjs",
     cli: "cli.mjs",
     rpc: "lib/host/command-rpc.mjs",
+    "v2-sdk": "lib/host/v2-sdk.mjs",
   }).map(([name, entry]) => build({ ...shared, entryPoints: [entry], outfile: join(packageRoot, `${name}.mjs`) })),
 ]);
 

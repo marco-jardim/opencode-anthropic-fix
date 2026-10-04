@@ -78,6 +78,7 @@ describe("dual-host distribution", () => {
         "tui.mjs",
         "cli.mjs",
         "rpc.mjs",
+        "v2-sdk.mjs",
         "package.json",
         "LICENSE",
         "NOTICE",
@@ -107,7 +108,10 @@ describe("dual-host distribution", () => {
 
   it("loads the built legacy/server/TUI/RPC entries outside the repository and its node_modules", () => {
     const urls = Object.fromEntries(
-      ["index", "server", "tui", "rpc", "cli"].map((name) => [name, pathToFileURL(join(bundle, `${name}.mjs`)).href]),
+      ["index", "server", "tui", "rpc", "cli", "v2-sdk"].map((name) => [
+        name,
+        pathToFileURL(join(bundle, `${name}.mjs`)).href,
+      ]),
     );
     const output = execFileSync(
       process.execPath,
@@ -123,6 +127,8 @@ describe("dual-host distribution", () => {
            dualServer: [typeof modules.server.default.server, typeof modules.server.default.setup],
            dualTui: [typeof modules.tui.default.tui, typeof modules.tui.default.setup],
            rpc: modules.rpc.anthropicCommandRpc.id,
+           sdkExports: Object.keys(modules["v2-sdk"]),
+           sdkVersion: modules["v2-sdk"].createAnthropic({ authToken: "fixture" }).languageModel("claude-sonnet-4-5").specificationVersion,
          }));`,
       ],
       { cwd: temporaryRoot, env: environment, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 },
@@ -134,6 +140,8 @@ describe("dual-host distribution", () => {
       dualServer: ["function", "function"],
       dualTui: ["function", "function"],
       rpc: "opencode-anthropic-fix",
+      sdkExports: ["createAnthropic"],
+      sdkVersion: "v3",
     });
   });
 });

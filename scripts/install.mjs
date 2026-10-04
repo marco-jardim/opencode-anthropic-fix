@@ -69,6 +69,7 @@ const PACKAGE_FILES = [
   "tui.mjs",
   "cli.mjs",
   "rpc.mjs",
+  "v2-sdk.mjs",
   "package.json",
   "LICENSE",
   "NOTICE",

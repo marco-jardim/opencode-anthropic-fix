@@ -14,6 +14,7 @@ const fixtureFiles = [
   "tui.mjs",
   "cli.mjs",
   "rpc.mjs",
+  "v2-sdk.mjs",
   "LICENSE",
   "NOTICE",
   "THIRD_PARTY_NOTICES",
