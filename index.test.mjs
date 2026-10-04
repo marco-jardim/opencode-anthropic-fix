@@ -93,6 +93,15 @@ import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import { loadConfig, loadConfigFresh, saveConfig as saveRuntimeConfig, DEFAULT_CONFIG } from "./lib/config.mjs";
 
+describe("legacy tool identity", () => {
+  it("preserves prototype-like tool names through the legacy response hook", () => {
+    const names = ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"];
+    const response = { content: names.map((name) => ({ type: "tool_use", name, input: {} })) };
+    AnthropicAuthPlugin.__testing__.stripMcpPrefixFromParsedEvent(response);
+    expect(response.content.map((block) => block.name)).toEqual(names);
+  });
+});
+
 describe("debug correlation IDs", () => {
   it("uses one monotonic correlation ID across all debug records for an attempt", () => {
     const firstCorrelationId = createDebugCorrelationId();

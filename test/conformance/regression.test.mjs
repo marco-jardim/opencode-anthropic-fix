@@ -76,6 +76,15 @@ import { loadConfig } from "../../lib/config.mjs";
 
 const { authorize, refreshToken } = await import("../../lib/oauth.mjs");
 
+describe("prototype-safe tool response conformance", () => {
+  it("restores prototype-like tool names in JSON responses without changing inputs", () => {
+    const names = ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"];
+    const response = { content: names.map((name) => ({ type: "tool_use", name: `mcp_${name}`, input: { name } })) };
+    AnthropicAuthPlugin.__testing__.stripMcpPrefixFromParsedEvent(response);
+    expect(response.content).toEqual(names.map((name) => ({ type: "tool_use", name, input: { name } })));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -74,7 +74,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        host: ["1.2.27", "1.18.29", "1.18.34"]
+        host: ["1.2.27", "1.18.29", "1.18.34", "2.0.21", "2.0.22"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -84,6 +84,8 @@ jobs:
       - run: npm ci
       - name: Plugin entry contract
         run: npx vitest run test/conformance/plugin-entry-exports.test.mjs
+      - name: Dual distribution and installer contracts
+        run: npx vitest run test/conformance/dual-entry.test.mjs test/conformance/distribution.test.mjs test/installer.test.mjs
       - name: Load the official host with isolated fake credentials
         env:
           OPENCODE_HOST_SMOKE_DIR: ${{ runner.temp }}/host-smoke

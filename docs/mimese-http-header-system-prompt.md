@@ -1,5 +1,24 @@
 # Detailed Mimicry of HTTP Headers and System Prompt
 
+## OpenCode host compatibility
+
+The v1 entry and the OpenCode 2.0.21 adapter share `lib/host/runtime.mjs` and the
+same request builders, pinned wire profile, OAuth headers, beta policy and system
+prompt sanitization. Host adaptation does not introduce a second wire constructor.
+The v2 route pins `@ai-sdk/anthropic` 3.0.111, so the existing response compatibility
+shim is deliberately enabled for that SDK, independently of the host's version.
+
+Before the wire transform, v2 `shell` and `subagent` are mapped to the existing
+`bash` and `task` policies when those names are not occupied by custom tools.
+The outgoing Claude Code names are restored to the original host names using a
+map owned by that request. This applies to SSE and JSON responses; tool input
+objects are not renamed. Ambiguous names fail before a request is sent.
+Forward and reverse lookups use prototype-free `Map` tables. Valid custom names
+such as `constructor`, `toString`, `__proto__`, `hasOwnProperty`, and `valueOf`
+remain literal names in definitions, history, references, and responses; they
+never resolve to inherited JavaScript object properties.
+See [OpenCode v2 adapter](opencode-v2.md) for transport and lifecycle boundaries.
+
 > **Note on the production wire shape (updated for the `0.7.0` dependency bump).**
 > The composition that actually goes on the wire follows the `DEFAULT_PROFILE` the
 > plugin binds at `lib/mimicry/wire-compat.mjs`, which is now **Claude Code 2.1.280**

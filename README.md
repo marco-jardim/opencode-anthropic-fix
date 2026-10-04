@@ -32,6 +32,11 @@ If a document or comment claims this plugin branches on the provider, that claim
 
 **Prerequisites:** [OpenCode](https://github.com/anomalyco/opencode) installed, a Claude Pro or Max subscription, Node.js 18+.
 
+The commands below install the legacy v1 entry. For **OpenCode v2.0.21**, use the
+[v2 installation and compatibility guide](docs/opencode-v2.md). The dual adapter
+preserves the v1 entry and adds v2 server/TUI entries; authenticated end-to-end
+validation is still required before treating v2 as certified in production.
+
 ```bash
 # 1. Clone and install
 git clone https://github.com/marco-jardim/opencode-anthropic-fix.git
@@ -88,7 +93,15 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 
 ### From npm (recommended)
 
-Add to your `opencode.json`:
+For OpenCode v1, add to your `opencode.json`:
+
+```json
+{
+  "plugin": ["opencode-anthropic-fix@latest"]
+}
+```
+
+For OpenCode v2.0.21, use the `plugins` key:
 
 ```json
 {
@@ -97,6 +110,25 @@ Add to your `opencode.json`:
 ```
 
 OpenCode will install and load the plugin automatically on next start.
+
+The `./server` and `./tui` exports let modern hosts select their entrypoints;
+older v1 loaders retain `index.mjs`. The v2 `/anthropic` command shows results in
+a dialog and does not add administrative output or OAuth codes to model history.
+See [the v2 guide](docs/opencode-v2.md) for the explicit package installer,
+programmatic RPC interface, cancellation behavior and current validation limits.
+
+The explicit package installer (`node scripts/install.mjs link --host=v2`,
+`copy --host=v2`, or `uninstall --host=v2`) only replaces or removes CLI entries
+it owns: links into its installed package or wrappers with its installer marker.
+It refuses unrelated CLI files and symlinks before changing the package. Add
+`--force` to deliberately replace/remove a foreign CLI entry, for example:
+
+```bash
+node scripts/install.mjs copy --host=v2 --force
+```
+
+`--force` never deletes CLI directories or unmanaged package directories and is
+only supported with `--host=v2`.
 
 ### Development (symlink)
 
