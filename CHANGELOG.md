@@ -6,6 +6,8 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ### Changed
 
+- Canceling a request no longer aborts an in-flight token refresh; rotated tokens are still saved even when every caller stops waiting.
+
 - **The plugin core now runs as a disposable per-instance runtime.** `index.mjs` is a thin entry for
   `lib/host/runtime.mjs`; each instance owns its configuration, metrics, and request lifecycle. Disposal
   cancels requests, removes telemetry listeners, and flushes pending account updates without affecting

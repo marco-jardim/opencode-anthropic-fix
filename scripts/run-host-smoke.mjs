@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,9 @@ const platform = process.platform === "win32" ? "windows" : process.platform;
 assert.ok(["windows", "linux", "darwin"].includes(platform), `Unsupported host platform: ${platform}`);
 assert.ok(["x64", "arm64"].includes(process.arch), `Unsupported host architecture: ${process.arch}`);
 const packageName = `opencode-${platform}-${process.arch}`;
-const scratch = await mkdtemp(join(tmpdir(), `anthropic-host-${version}-`));
+const scratchRoot = process.env.OPENCODE_HOST_SMOKE_DIR ?? tmpdir();
+await mkdir(scratchRoot, { recursive: true });
+const scratch = await mkdtemp(join(scratchRoot, `anthropic-host-${version}-`));
 const metadataResponse = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/${version}`, {
   signal: AbortSignal.timeout(30_000),
 });

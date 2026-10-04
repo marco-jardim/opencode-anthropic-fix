@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, parse } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { createHostProbe, hostLogTail } from "./host-smoke-probes.mjs";
 
 // Real, official v1 host processes. This intentionally performs no inference:
 // all OAuth credentials are fake and all state lives below the printed scratch
@@ -17,7 +18,9 @@ const versions = process.argv.slice(2);
 const suppliedBinary = versions[0] && !/^1\.\d+\.\d+$/.test(versions[0]) ? resolve(versions.shift()) : null;
 if (versions.length === 0) versions.push("1.2.27", "1.18.29", "1.18.34");
 for (const version of versions) assert.match(version, /^1\.\d+\.\d+$/, "Pass exact v1 release versions");
-const scratch = await mkdtemp(join(tmpdir(), "anthropic-v1-host-smoke-"));
+const scratchRoot = process.env.OPENCODE_HOST_SMOKE_DIR ?? tmpdir();
+await mkdir(scratchRoot, { recursive: true });
+const scratch = await mkdtemp(join(scratchRoot, "anthropic-v1-host-smoke-"));
 const results = [];
 console.log(`Smoke artifacts: ${scratch}`);
 
@@ -174,14 +177,15 @@ async function smoke(version) {
   });
   const baseUrl = `http://127.0.0.1:${port}`;
   const authorization = `Basic ${Buffer.from("opencode:local-v1-smoke-password").toString("base64")}`;
+  const started = Date.now();
+  let activeProbe = "/global/health";
+  let probe;
+  let failed = false;
   async function get(path) {
-    const result = await fetch(
-      `${baseUrl}${path}${path.includes("?") ? "&" : "?"}directory=${encodeURIComponent(workspace)}`,
-      { headers: { authorization }, signal: AbortSignal.timeout(30_000) },
-    );
-    const text = await result.text();
-    assert.equal(result.ok, true, `${path}: HTTP ${result.status} ${text.slice(0, 1000)}`);
-    return JSON.parse(text);
+    activeProbe = path;
+    return probe(path, `${baseUrl}${path}${path.includes("?") ? "&" : "?"}directory=${encodeURIComponent(workspace)}`, {
+      headers: { authorization },
+    });
   }
   try {
     const deadline = Date.now() + 60_000;
@@ -207,6 +211,7 @@ async function smoke(version) {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     assert.ok(ready, `Host did not become ready: ${readinessDetail}`);
+    probe = createHostProbe();
     const loadedConfig = await get("/config");
     const methods = await get("/provider/auth");
     const providers = await get("/provider");
@@ -249,12 +254,17 @@ async function smoke(version) {
     };
     await writeFile(join(state, "report.json"), JSON.stringify(report, null, 2));
     return report;
+  } catch (error) {
+    failed = true;
+    console.error(`${version}: active probe ${activeProbe}, elapsed ${Date.now() - started}ms: ${error}`);
+    throw error;
   } finally {
     if (exit === undefined && !spawnError) {
       child.kill();
       await new Promise((resolve) => child.once("exit", resolve));
     }
     await writeFile(join(state, "host.log"), logs);
+    if (failed) console.error(`Host stdout/stderr/log tail (${version}):\n${hostLogTail(logs)}`);
   }
 }
 

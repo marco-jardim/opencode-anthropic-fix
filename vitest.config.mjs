@@ -11,13 +11,19 @@ export default defineConfig({
       include: ["lib/**/*.mjs", "index.mjs", "cli.mjs"],
       exclude: ["**/*.test.mjs", "scripts/**", "docs/**", "dist/**", "test/**", "node_modules/**", ".opencode/**"],
       thresholds: {
-        "lib/**": {
+        // Glob thresholds overlap, so explicitly keep the extracted entry out
+        // of the library aggregate (without excluding it from instrumentation).
+        "lib/**/!(runtime).mjs": {
           statements: 85,
           branches: 75,
         },
-        "index.mjs": {
+        "lib/host/runtime.mjs": {
           statements: 50,
           branches: 47,
+        },
+        "index.mjs": {
+          statements: 90,
+          branches: 90,
         },
         "cli.mjs": {
           statements: 70,
