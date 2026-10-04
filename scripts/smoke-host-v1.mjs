@@ -102,8 +102,8 @@ async function smoke(version) {
     TEMP: temporary,
     TMP: temporary,
   });
-  // Exercise package-root resolution through main (index.mjs), without a
-  // server export that would change the entry selected by newer v1 loaders.
+  // Exercise package-root resolution: legacy v1 uses main (index.mjs), while
+  // recent v1 selects the dual server export.
   const plugin = pathToFileURL(root).href;
   await writeFile(
     join(config, "opencode.json"),

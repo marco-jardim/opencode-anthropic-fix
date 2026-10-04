@@ -50,19 +50,28 @@ Git hooks enforce quality automatically:
 
 ```
 opencode-anthropic-auth/
-  index.mjs              Thin plugin shell (OAuth, fetch interceptor, effectful retry loop, slash commands)
+  index.mjs              Legacy v1 factory entry (named/default only)
+  server.mjs             Lazy dual entry: server() for recent v1, setup() for v2
+  tui.mjs                V2 administrative command UI; no-op entry for v1
   index.test.mjs         Plugin integration tests (lifecycle, fetch, transforms, slash commands)
   cli.mjs                Standalone CLI (17 subcommands, auth flows, live usage quotas)
   cli.test.mjs           CLI command tests (auth + account management + IO capture)
-  package.json           Dependencies: wire compatibility + xxhash (prod), esbuild + vitest + eslint + prettier (dev)
+  package.json           Dependencies: wire compatibility + pinned AI SDK Anthropic provider (prod)
   eslint.config.mjs      ESLint flat config
   .prettierrc            Prettier config
   .prettierignore        Prettier ignore patterns
   .husky/                Git hooks (pre-commit: lint-staged, pre-push: test + format check)
   lib/
+    host/
+      runtime.mjs        Per-instance OAuth, accounts, fetch/retry and slash-command runtime
+      v2.mjs             V2 integration/model/session adapters and lifecycle
+      v2-transport.mjs   AI SDK fetch bridge, per-request identity and cancellation
+      v2-context.mjs     Native message policy adapters and checkpoint validation
+      tool-names.mjs     Request-scoped reversible tool-name mapping
+      command-rpc.mjs    Validated administrative RPC and server command reservation
     mimicry/             Wire mimicry (models, cache, response stream, system prompt, request helpers/body, headers)
     token-economy/       Token transforms and microcompaction decisions
-    session-metrics.mjs  Shared token-economy session metrics singleton
+    session-metrics.mjs  Token-economy metrics factory and legacy compatibility accessor
     retry/
       overload-loop.mjs  Pure retry/overload decisions
     tuning.mjs           Retry and token-refresh tuning constants
@@ -83,11 +92,15 @@ opencode-anthropic-auth/
   dist/                  Build output (gitignored)
     opencode-anthropic-auth-plugin.js   Bundled plugin (self-contained)
     opencode-anthropic-auth-cli.mjs     Bundled CLI (self-contained)
+    opencode-anthropic-fix/            Dual-host bundle package (index/server/tui/rpc/cli + manifest)
 ```
 
 ## Architecture Overview
 
-`index.mjs` is the thin, effectful interceptor/OAuth/retry shell. It delegates
+`index.mjs` preserves the legacy factory contract and creates a shared runtime
+from `lib/host/runtime.mjs`. `server.mjs` lazily selects that v1 factory or the
+v2 adapter in `lib/host/v2.mjs`; importing one entry does not initialize both
+hosts. The shared runtime owns the effectful interceptor/OAuth/retry shell and delegates
 wire behavior to `lib/mimicry/*` (`models`, `cache`, `response-stream`,
 `system-prompt`, `request-helpers`, `request-body`, and `headers`), token economy
 to `lib/token-economy/*` (`transforms` and `microcompact`) plus
@@ -99,6 +112,21 @@ Keep top-level `index.mjs` exports function-valued. Test-only internals belong o
 Modules under `lib/` never import `index.mjs`; this dependency direction prevents
 cycles.
 
+The v2 adapter uses the public integration/provider/model/session APIs. Managed
+requests use the pinned `@ai-sdk/anthropic` provider with the shared executor;
+they retain host HTTP middleware and session interruption handling. Administrative
+commands use the portable JSON Schema RPC contract and the TUI entry, with no
+model submission. Server-only command dispatch returns guidance to use RPC
+because the v2 command callback cannot return output. See
+[the v2 guide](docs/opencode-v2.md) for compatibility boundaries.
+
+Keep v2 runtime imports out of the legacy entry path. `@opencode/plugin` is a
+development dependency used to verify public contracts; structural entry/RPC
+definitions do not require it at runtime. Test the package exports and both
+bundled and source entries. `test/installer.test.mjs` and
+`test/conformance/distribution.test.mjs` run with temporary home/config paths;
+never run installer checks against the maintainer's real configuration.
+
 ```mermaid
 graph TB
     subgraph OpenCode
@@ -107,7 +135,7 @@ graph TB
         OC -->|/anthropic| SlashCmd[Slash Command Handler]
     end
 
-    subgraph Plugin["index.mjs (Thin Plugin Shell)"]
+    subgraph Plugin["lib/host/runtime.mjs (Per-instance Runtime)"]
         Auth[Auth Methods]
         Loader[Auth Loader]
         FetchInterceptor[Fetch Interceptor]

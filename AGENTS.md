@@ -12,7 +12,8 @@ architecture, `README.md` for user-facing features, and
 OpenCode plugin + standalone CLI (`index.mjs` + `cli.mjs`, both ESM `.mjs`) that
 lets Claude Pro/Max subscribers use OpenCode over OAuth, with multi-account
 rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
-(typing is via JSDoc). Two production deps: `@tormentalabs/claude-code-wire-compat` and `xxhash-wasm`.
+(typing is via JSDoc). Two production deps: `@tormentalabs/claude-code-wire-compat`
+and the pinned `@ai-sdk/anthropic` 3.0.111 provider for v2.
 
 ## Layout (what matters)
 
@@ -24,6 +25,13 @@ rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
   with `failed to load plugin …` on every start.
   `test/conformance/plugin-entry-exports.test.mjs` enforces it; put helpers in
   `lib/` (e.g. `lib/debug-dump.mjs`).
+- `server.mjs` — lazy dual entry: `server()` for recent v1 and `setup()` for v2.
+  `tui.mjs` exposes v2 administrative commands via RPC/dialogs, not model history;
+  its v1 entry is a no-op. Keep v2 imports out of the legacy entry path.
+- `lib/host/v2*.mjs`, `tool-names.mjs`, `command-rpc.mjs` — v2 adapters, request-local
+  aliases and administrative RPC. They share the per-instance runtime, including
+  disposal and detached token refresh. See `docs/opencode-v2.md` and
+  `docs/plans/opencode-v1-v2-compatibility.md` for boundaries and validation limits.
 - `lib/mimicry/wire-compat.mjs` — the **only** import point for
   `@tormentalabs/claude-code-wire-compat`. Binds `WIRE_PROFILE` (currently
   `CLAUDE_CODE_2_1_280_PROFILE`) and passes it explicitly to every builder.
@@ -43,8 +51,11 @@ rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
   `docs/claude-code-reverse-engineering.md`). Do not delete these when
   refactoring mimicry code — they are the contract.
 - `scripts/build.mjs` — esbuild bundler (ESM, node20, `node:*` external only).
+  Also builds `dist/opencode-anthropic-fix/` with server/TUI/RPC entries and
+  bundled third-party license notices; distribution tests cover both layouts.
 - `scripts/install.mjs` — `link` | `copy` | `uninstall` for
-  `~/.config/opencode/plugin/` and `~/.local/bin/`.
+  `~/.config/opencode/plugin/` and `~/.local/bin/`. Explicit `--host=v2` installs
+  the dual-host package under config `node_modules`, not the discovery directory.
 - `docs/` — research + mimicry docs. Keep mimicry changes in sync with
   `docs/mimese-http-header-system-prompt.md`.
 

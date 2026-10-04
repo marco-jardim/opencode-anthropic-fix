@@ -11,12 +11,28 @@
     "url": "https://github.com/marco-jardim/opencode-anthropic-fix/issues"
   },
   "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./server": "./server.mjs",
+    "./tui": "./tui.mjs",
+    "./rpc": "./lib/host/command-rpc.mjs",
+    "./index.mjs": "./index.mjs",
+    "./cli.mjs": "./cli.mjs",
+    "./lib/*": "./lib/*",
+    "./package.json": "./package.json"
+  },
   "files": [
     "index.mjs",
+    "server.mjs",
+    "tui.mjs",
     "cli.mjs",
     "lib/**/*.mjs",
     "!lib/**/*.test.mjs",
     "README.md",
+    "docs/opencode-v2.md",
+    "docs/opencode-v2-architecture.md",
+    "licenses/",
+    "NOTICE",
     "LICENSE"
   ],
   "scripts": {
@@ -48,6 +64,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@opencode-ai/plugin": "^1.2.27",
+    "@opencode/plugin": "2.0.21",
     "@vitest/coverage-v8": "^4.0.18",
     "esbuild": "^0.27.3",
     "eslint": "^10.0.0",
@@ -57,6 +74,7 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "3.0.111",
     "@tormentalabs/claude-code-wire-compat": "latest"
   }
 }
