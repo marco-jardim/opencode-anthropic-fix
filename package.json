@@ -19,6 +19,8 @@
     "./index.mjs": "./index.mjs",
     "./cli.mjs": "./cli.mjs",
     "./lib/*": "./lib/*",
+    "./README.md": "./README.md",
+    "./LICENSE": "./LICENSE",
     "./package.json": "./package.json"
   },
   "files": [

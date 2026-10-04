@@ -13,6 +13,10 @@ Before the wire transform, v2 `shell` and `subagent` are mapped to the existing
 The outgoing Claude Code names are restored to the original host names using a
 map owned by that request. This applies to SSE and JSON responses; tool input
 objects are not renamed. Ambiguous names fail before a request is sent.
+Forward and reverse lookups use prototype-free `Map` tables. Valid custom names
+such as `constructor`, `toString`, `__proto__`, `hasOwnProperty`, and `valueOf`
+remain literal names in definitions, history, references, and responses; they
+never resolve to inherited JavaScript object properties.
 See [OpenCode v2 adapter](opencode-v2.md) for transport and lifecycle boundaries.
 
 > **Note on the production wire shape (updated for the `0.7.0` dependency bump).**

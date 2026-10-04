@@ -43,6 +43,17 @@ afterAll(async () => {
 });
 
 describe("dual-host distribution", () => {
+  it("resolves every previously published top-level and library path", async () => {
+    const inventory = JSON.parse(await readFile(join(repositoryRoot, "test/fixtures/published-v2.1.1.json"), "utf8"));
+    expect(inventory.files).toHaveLength(41);
+    for (const path of inventory.files) {
+      expect(import.meta.resolve(`opencode-anthropic-fix/${path}`)).toBe(
+        pathToFileURL(join(repositoryRoot, path)).href,
+      );
+      await expect(readFile(join(repositoryRoot, path))).resolves.toBeInstanceOf(Buffer);
+    }
+  });
+
   it("resolves public source entrypoints while preserving existing library subpaths", () => {
     for (const [specifier, path] of Object.entries({
       "opencode-anthropic-fix": "index.mjs",

@@ -29,7 +29,7 @@ import {
   lstat,
   rmdir,
 } from "node:fs/promises";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, relative, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 
 import { fileURLToPath } from "node:url";
@@ -371,13 +371,32 @@ function packageCliBin() {
   return join(getBinDir(), CLI_BIN_NAME + (process.platform === "win32" ? ".cmd" : ""));
 }
 
+/** Check ownership before changing either the package or its CLI entry. */
+async function managedCliState() {
+  const destination = packageCliBin();
+  const stat = await pathStat(destination);
+  if (!stat) return false;
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    throw new Error(`Refusing to replace a CLI directory: ${destination}`);
+  }
+  let managed = false;
+  if (stat.isSymbolicLink()) {
+    const target = resolve(dirname(destination), readlinkSync(destination));
+    const within = relative(getPackageDir(), target);
+    managed = within !== "" && !isAbsolute(within) && within !== ".." && !within.startsWith(`..${sep}`);
+  } else if (stat.isFile()) {
+    managed = /^(?:rem|#) opencode-anthropic-fix installer\r?$/m.test(await readFile(destination, "utf8"));
+  }
+  if (!managed && !force) {
+    throw new Error(`CLI is not managed by this installer: ${destination}. Use --force to replace or remove it.`);
+  }
+  return true;
+}
+
 async function installPackageCli() {
   const destination = packageCliBin();
   const target = join(getPackageDir(), "cli.mjs");
-  const existing = await pathStat(destination);
-  if (existing?.isDirectory() && !existing.isSymbolicLink()) {
-    throw new Error(`Refusing to replace a CLI directory: ${destination}`);
-  }
+  const existing = await managedCliState();
   await mkdir(dirname(destination), { recursive: true });
   if (existing) await unlink(destination);
   if (process.platform === "win32") {
@@ -413,16 +432,11 @@ async function reportPackageConfig() {
 
 async function cmdPackage(command) {
   const destination = getPackageDir();
+  const existingCli = await managedCliState();
   if (command === "uninstall") {
     const removed = await removeManagedPackage();
     const bin = packageCliBin();
-    const stat = await pathStat(bin);
-    if (
-      stat?.isSymbolicLink() ||
-      (stat?.isFile() && (await readFile(bin, "utf8")).includes(`${PACKAGE_NAME} installer`))
-    ) {
-      await unlink(bin);
-    }
+    if (existingCli) await unlink(bin);
     console.log(removed ? "Dual-host package removed." : "Dual-host package is not installed.");
     console.log("Remove its plugins entry from your OpenCode configuration if present.");
     return;
@@ -456,11 +470,19 @@ async function cmdPackage(command) {
 
 const command = process.argv[2];
 const options = process.argv.slice(3);
-if (options.some((option) => option !== "--host=v1" && option !== "--host=v2") || options.length > 1) {
-  console.error("Expected at most one host option: --host=v1 or --host=v2.");
+if (
+  options.some((option) => !["--host=v1", "--host=v2", "--force"].includes(option)) ||
+  options.filter((option) => option.startsWith("--host=")).length > 1
+) {
+  console.error("Expected at most one host option: --host=v1 or --host=v2, and optional --force.");
   process.exit(1);
 }
 const packageMode = options.includes("--host=v2");
+const force = options.includes("--force");
+if (force && !packageMode) {
+  console.error("--force is only supported with --host=v2.");
+  process.exit(1);
+}
 
 if (packageMode && ["link", "copy", "uninstall"].includes(command)) {
   try {
@@ -494,6 +516,8 @@ ${dim("Usage:")}
 
 Add ${bold("--host=v2")} to install/remove the dual-host package under config/node_modules.
 The v2 mode prints configuration instructions without editing your configuration.
+Add ${bold("--force")} with --host=v2 to replace/remove a foreign CLI file or symlink.
+CLI directories and unmanaged package directories are never force-deleted.
 `);
       process.exit(command ? 1 : 0);
   }

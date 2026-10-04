@@ -117,6 +117,19 @@ a dialog and does not add administrative output or OAuth codes to model history.
 See [the v2 guide](docs/opencode-v2.md) for the explicit package installer,
 programmatic RPC interface, cancellation behavior and current validation limits.
 
+The explicit package installer (`node scripts/install.mjs link --host=v2`,
+`copy --host=v2`, or `uninstall --host=v2`) only replaces or removes CLI entries
+it owns: links into its installed package or wrappers with its installer marker.
+It refuses unrelated CLI files and symlinks before changing the package. Add
+`--force` to deliberately replace/remove a foreign CLI entry, for example:
+
+```bash
+node scripts/install.mjs copy --host=v2 --force
+```
+
+`--force` never deletes CLI directories or unmanaged package directories and is
+only supported with `--host=v2`.
+
 ### Development (symlink)
 
 Best for active development. Edits to source files take effect immediately.

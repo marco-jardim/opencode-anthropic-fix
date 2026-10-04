@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile, copyFile, lstat, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, copyFile, lstat, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,6 +78,93 @@ afterEach(async () => {
 });
 
 describe("isolated installer", () => {
+  const cliBin = (test) =>
+    join(test.home, ".local/bin/opencode-anthropic-auth" + (process.platform === "win32" ? ".cmd" : ""));
+
+  it("replaces managed CLI wrappers", async () => {
+    const test = await fixture();
+    const bin = cliBin(test);
+    await mkdir(dirname(bin), { recursive: true });
+    await writeFile(bin, "@echo off\r\nrem opencode-anthropic-fix installer\r\necho old\r\n");
+    test.run("copy", "--host=v2");
+    expect(await readFile(bin, "utf8")).not.toContain("echo old");
+    test.run("uninstall", "--host=v2");
+    await expect(lstat(bin)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses foreign CLI wrappers before changing the package", async () => {
+    const test = await fixture();
+    const bin = cliBin(test);
+    await mkdir(dirname(bin), { recursive: true });
+    await writeFile(bin, "foreign CLI");
+    expect(() => test.run("copy", "--host=v2")).toThrow(/CLI.*not managed.*--force/);
+    expect(await readFile(bin, "utf8")).toBe("foreign CLI");
+    await expect(lstat(test.destination)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(() => test.run("uninstall", "--host=v2")).toThrow(/CLI.*not managed.*--force/);
+    expect(await readFile(bin, "utf8")).toBe("foreign CLI");
+  });
+
+  it("refuses foreign CLI symlinks on uninstall and force removes only the link", async () => {
+    const test = await fixture();
+    const bin = cliBin(test);
+    const foreign = join(test.root, "foreign");
+    await mkdir(foreign);
+    await writeFile(join(foreign, "keep.txt"), "keep");
+    await mkdir(dirname(bin), { recursive: true });
+    // Junctions exercise ownership on Windows without requiring symlink privileges.
+    await symlink(foreign, bin, process.platform === "win32" ? "junction" : "dir");
+    expect(() => test.run("uninstall", "--host=v2")).toThrow(/CLI.*not managed.*--force/);
+    expect((await lstat(bin)).isSymbolicLink()).toBe(true);
+    test.run("uninstall", "--host=v2", "--force");
+    await expect(lstat(bin)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(foreign, "keep.txt"), "utf8")).toBe("keep");
+  });
+
+  it("force replaces and removes foreign CLI wrappers", async () => {
+    const test = await fixture();
+    const bin = cliBin(test);
+    await mkdir(dirname(bin), { recursive: true });
+    await writeFile(bin, "foreign CLI");
+    test.run("copy", "--host=v2", "--force");
+    expect(await readFile(bin, "utf8")).not.toBe("foreign CLI");
+    await rm(bin);
+    await writeFile(bin, "another foreign CLI");
+    test.run("uninstall", "--host=v2", "--force");
+    await expect(lstat(bin)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("removes managed CLI links even after their target disappears", async () => {
+    const test = await fixture();
+    const bin = cliBin(test);
+    const target = join(test.destination, "old-cli");
+    await mkdir(target, { recursive: true });
+    await mkdir(dirname(bin), { recursive: true });
+    await symlink(target, bin, process.platform === "win32" ? "junction" : "dir");
+    await rm(test.destination, { recursive: true });
+    test.run("uninstall", "--host=v2");
+    await expect(lstat(bin)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not mistake a sibling package path for a managed CLI link", async () => {
+    const test = await fixture();
+    const bin = cliBin(test);
+    const target = test.destination + "-foreign";
+    await mkdir(target, { recursive: true });
+    await mkdir(dirname(bin), { recursive: true });
+    await symlink(target, bin, process.platform === "win32" ? "junction" : "dir");
+    expect(() => test.run("copy", "--host=v2")).toThrow(/CLI.*not managed.*--force/);
+    expect((await lstat(bin)).isSymbolicLink()).toBe(true);
+  });
+
+  it("never force-removes a CLI directory", async () => {
+    const test = await fixture();
+    const bin = cliBin(test);
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "keep.txt"), "keep");
+    expect(() => test.run("uninstall", "--host=v2", "--force")).toThrow(/CLI directory/);
+    expect(await readFile(join(bin, "keep.txt"), "utf8")).toBe("keep");
+  });
+
   it("preserves the default v1 standalone copy", async () => {
     const test = await fixture();
     test.run("copy");

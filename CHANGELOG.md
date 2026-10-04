@@ -4,6 +4,14 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Custom tool names such as `constructor` and `__proto__` now round-trip without inherited-property collisions or request failures.
+- Administrative command output redacts OAuth completion codes even when command tokens are quoted or the input is a callback URL.
+- Large command output truncates at grapheme boundaries without walking every preceding character, avoiding Node 20 timeouts.
+- Package exports preserve previously published README, license, package metadata, and library subpaths.
+- The v2 installer refuses to replace or remove foreign CLI files and symlinks unless explicitly given `--force`.
+
 ### Added
 
 - OpenCode v2 server and TUI entries, with a separate adapter targeting 2.0.21 and the existing v1 factory preserved.
