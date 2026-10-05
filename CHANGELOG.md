@@ -6,9 +6,15 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ### Added
 
-- OpenCode v2 server and TUI entries, with a separate adapter tested against 2.0.21 and 2.0.22 and the existing v1 factory preserved.
+- OpenCode v2 server and TUI entries, with a separate adapter tested against 2.0.21 and 2.0.22 and the existing v1 factory preserved. The dual server entry exposes `server()` for recent v1 hosts and `setup()` for v2 (#39).
 - Administrative `/anthropic` commands through v2 RPC and TUI, OAuth method registration, per-tier model costs, and explicit summary compaction for the compatibility route. Command output redacts OAuth completion codes in every accepted command form.
 - Dual-package builds and explicit `--host=v2` installation. The installer refuses to replace or remove foreign CLI files and symlinks unless given `--force`. See `docs/opencode-v2.md` for configuration, tested versions, and limitations.
+- Runtime debugging guidance and a record of the 2.1.x Unicode, request-size, and plugin-loading incidents (#33).
+
+### Fixed
+
+- **The v2 TUI registers its keymap layer only when the app slot mounts.** OpenCode 2.0.21/2.0.22 runs plugin setup outside `Keymap.Provider`; registering there failed with `Keymap.Provider is missing`. The slot is removed on disposal, and disposal before mounting no longer registers a command.
+- **Adaptive models keep the caller's thinking display.** Normalization preserves `"summarized"` and `"omitted"` instead of dropping them and letting the wire builder apply the `"updates"` default. This fixes empty thinking text on models such as Opus 5.5 and Fable 5.1 when the host requests summaries; invalid display values are still dropped (#37).
 
 ### Changed
 
@@ -21,13 +27,13 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 - **The plugin core now runs as a disposable per-instance runtime.** `index.mjs` is a thin entry for
   `lib/host/runtime.mjs`; each instance owns its configuration, metrics, and request lifecycle. Disposal
   cancels requests, removes telemetry listeners, and flushes pending account updates without affecting
-  other plugin instances.
+  other plugin instances (#38).
 
 ### Removed
 
 - `worker/sync-watcher`: the upstream-version watcher Worker. Its cron had been disabled since the wire-compat
   migration, and its only remaining trigger was an unauthenticated `/run` endpoint. The deployed Worker was
-  deleted from Cloudflare on 2026-10-03.
+  deleted from Cloudflare on 2026-10-03 (#36).
 
 ## [2.1.1] — 2026-09-26
 
