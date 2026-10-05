@@ -4,6 +4,8 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-10-04
+
 ### Added
 
 - OpenCode v2 server and TUI entries, with a separate adapter tested against 2.0.21 and 2.0.22 and the existing v1 factory preserved. The dual server entry exposes `server()` for recent v1 hosts and `setup()` for v2 (#39).
