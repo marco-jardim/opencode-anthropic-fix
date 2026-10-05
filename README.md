@@ -2,6 +2,17 @@
 
 Use your Claude Pro or Max subscription with [OpenCode](https://github.com/anomalyco/opencode). Supports multiple accounts with automatic rotation when you hit rate limits.
 
+## Supported Hosts
+
+The plugin supports **both OpenCode v1 (1.x) and OpenCode v2 (2.x)** through separate host entries sharing the same OAuth, account rotation, and request runtime.
+
+| Host              | Supported entry and validated versions                                                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenCode v1 (1.x) | Legacy `index.mjs` factory and the recent-v1 `server()` entry. Host loading and registration tested on **1.2.27, 1.18.29, and 1.18.34**. |
+| OpenCode v2 (2.x) | `setup()` server adapter and `./tui` entry. The compatibility target starts at **2.0.21**, with **2.0.21 and 2.0.22** tested.            |
+
+These are validated versions, not a claim that every intervening or newer host release has been tested. The v2 smoke tests use a local Anthropic simulator; real OAuth login, real Anthropic inference, and interactive TUI rendering still require manual validation. See the [v2 compatibility guide](docs/opencode-v2.md) for the exact scope and limitations.
+
 ## Background
 
 [AnomalyCo](https://github.com/anomalyco/opencode-anthropic-auth) originally published this as a built-in plugin shipped with OpenCode itself. The repo was archived following a legal request from Anthropic. Before it was archived, [rmk40](https://github.com/rmk40/opencode-anthropic-auth) — a frequent contributor unrelated to AnomalyCo — had developed multi-account support that never made it upstream.
@@ -32,10 +43,8 @@ If a document or comment claims this plugin branches on the provider, that claim
 
 **Prerequisites:** [OpenCode](https://github.com/anomalyco/opencode) installed, a Claude Pro or Max subscription, Node.js 18+.
 
-The commands below install the legacy v1 entry. For **OpenCode v2.0.21**, use the
-[v2 installation and compatibility guide](docs/opencode-v2.md). The dual adapter
-preserves the v1 entry and adds v2 server/TUI entries; authenticated end-to-end
-validation is still required before treating v2 as certified in production.
+The commands below install the **OpenCode v1** entry. For **OpenCode v2**, use the
+[v2 package installation](#opencode-v2-package-installation) below instead.
 
 ```bash
 # 1. Clone and install
@@ -101,7 +110,7 @@ For OpenCode v1, add to your `opencode.json`:
 }
 ```
 
-For OpenCode v2.0.21, use the `plugins` key:
+For OpenCode v2 (tested on 2.0.21 and 2.0.22), use the `plugins` key:
 
 ```json
 {
@@ -112,7 +121,9 @@ For OpenCode v2.0.21, use the `plugins` key:
 OpenCode will install and load the plugin automatically on next start.
 
 The `./server` and `./tui` exports let modern hosts select their entrypoints;
-older v1 loaders retain `index.mjs`. The v2 `/anthropic` command shows results in
+older v1 loaders retain `index.mjs`. OpenCode v2 loads the package's `./tui` entry
+alongside its server entry; do not install `tui.mjs` as a legacy standalone plugin.
+The v2 `/anthropic` command calls the server through RPC and shows results in
 a dialog and does not add administrative output or OAuth codes to model history.
 See [the v2 guide](docs/opencode-v2.md) for the explicit package installer,
 programmatic RPC interface, cancellation behavior and current validation limits.
@@ -130,7 +141,32 @@ node scripts/install.mjs copy --host=v2 --force
 `--force` never deletes CLI directories or unmanaged package directories and is
 only supported with `--host=v2`.
 
-### Development (symlink)
+### OpenCode v2 Package Installation
+
+From a checkout with dependencies installed, choose a development link or a standalone copy:
+
+```bash
+# Development: link the dual-host package (directory junction on Windows)
+node scripts/install.mjs link --host=v2
+
+# Or: build and copy the standalone package, including server and TUI entries
+npm run build
+node scripts/install.mjs copy --host=v2
+```
+
+Both modes install under `$XDG_CONFIG_HOME/opencode/node_modules/opencode-anthropic-fix`,
+falling back to `~/.config/opencode/node_modules/opencode-anthropic-fix`, rather than
+the legacy `plugin/` discovery directory. The copy needs no dependencies installed
+at its destination. The installer prints the exact `plugins` configuration to add
+to `opencode.json` and does not change your configuration. Remove old standalone
+plugin entries it reports before enabling the package to avoid duplicate loading.
+Restart OpenCode after installing or changing the plugin.
+
+To uninstall the managed v2 package, run `node scripts/install.mjs uninstall --host=v2`
+and remove its `plugins` configuration entry. See [the v2 guide](docs/opencode-v2.md)
+for RPC commands, transport details, and validation limits.
+
+### OpenCode v1 Development (symlink)
 
 Best for active development. Edits to source files take effect immediately.
 
@@ -143,7 +179,7 @@ This creates:
 - **Plugin:** `~/.config/opencode/plugin/opencode-anthropic-auth-plugin.js` &rarr; `./index.mjs`
 - **CLI:** `~/.local/bin/opencode-anthropic-auth` &rarr; `./cli.mjs`
 
-### Stable (copy)
+### OpenCode v1 Stable (copy)
 
 Bundles the plugin and CLI into self-contained single files (via esbuild) and copies them. No symlinks, no `node_modules` needed at the destination.
 
@@ -156,7 +192,7 @@ This creates:
 - **Plugin:** `~/.config/opencode/plugin/opencode-anthropic-auth-plugin.js` (standalone, ~50KB)
 - **CLI:** `~/.local/bin/opencode-anthropic-auth` (standalone, ~35KB)
 
-### Uninstall
+### OpenCode v1 Uninstall
 
 ```bash
 npm run uninstall

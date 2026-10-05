@@ -30,7 +30,7 @@ export default {
       return session.id;
     }
 
-    context.keymap.layer(() => ({
+    const commandLayer = () => ({
       enabled: () => !disposed,
       commands: [
         {
@@ -70,10 +70,23 @@ export default {
           },
         },
       ],
-    }));
+    });
+
+    // OpenCode 2.0.21/2.0.22 calls setup outside the Solid provider owner.
+    // Register from the app slot so Keymap.Provider is available and the
+    // layer's reactive lifetime follows the mounted plugin contribution.
+    const removeSlot = context.ui.slot({
+      append: "app",
+      render() {
+        if (disposed) return null;
+        context.keymap.layer(commandLayer);
+        return null;
+      },
+    });
 
     return () => {
       disposed = true;
+      removeSlot();
       for (const controller of pending) controller.abort();
     };
   },

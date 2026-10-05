@@ -2,8 +2,11 @@ import { describe, it, expect, vi } from "vitest";
 import plugin from "./tui.mjs";
 import { anthropicCommandRpc } from "./lib/host/command-rpc.mjs";
 
-function harness() {
+function harness({ mount = true } = {}) {
   let layer;
+  let slot;
+  let rendering = false;
+  const removeSlot = vi.fn();
   const execute = vi.fn().mockResolvedValue({ output: "Account ready" });
   const context = {
     location: { type: "local", directory: "/project" },
@@ -24,10 +27,15 @@ function harness() {
     },
     keymap: {
       layer: vi.fn((get) => {
+        if (!rendering) throw new Error("Keymap.Provider is missing");
         layer = get();
       }),
     },
     ui: {
+      slot: vi.fn((contribution) => {
+        slot = contribution;
+        return removeSlot;
+      }),
       router: {
         current: vi.fn(() => ({ type: "session", sessionID: "ses_current" })),
         navigate: vi.fn(),
@@ -37,10 +45,50 @@ function harness() {
     },
   };
   const dispose = plugin.setup(context);
-  return { context, execute, layer, dispose, command: layer.commands[0] };
+  function render() {
+    rendering = true;
+    try {
+      return slot.render();
+    } finally {
+      rendering = false;
+    }
+  }
+  if (mount) render();
+  return {
+    context,
+    execute,
+    get layer() {
+      return layer;
+    },
+    dispose,
+    render,
+    removeSlot,
+    get command() {
+      return layer?.commands[0];
+    },
+  };
 }
 
 describe("dual TUI entry", () => {
+  it("defers keymap registration until the app slot renders under its provider", () => {
+    const test = harness({ mount: false });
+    expect(test.context.ui.slot).toHaveBeenCalledWith({ append: "app", render: expect.any(Function) });
+    expect(test.context.keymap.layer).not.toHaveBeenCalled();
+    expect(test.render()).toBeNull();
+    expect(test.context.keymap.layer).toHaveBeenCalledTimes(1);
+    expect(test.command.id).toBe("anthropic.manage");
+    test.dispose();
+    expect(test.removeSlot).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not register a command if disposed before the slot mounts", () => {
+    const test = harness({ mount: false });
+    test.dispose();
+    expect(test.removeSlot).toHaveBeenCalledTimes(1);
+    expect(test.render()).toBeNull();
+    expect(test.context.keymap.layer).not.toHaveBeenCalled();
+  });
+
   it("leaves v1 slash-command handling to the existing server hook", async () => {
     expect(plugin.id).toBe("opencode-anthropic-fix");
     const context = { client: {}, keymap: {} };
@@ -113,6 +161,7 @@ describe("dual TUI entry", () => {
     const running = test.command.run("usage");
     await started;
     test.dispose();
+    expect(test.removeSlot).toHaveBeenCalledTimes(1);
     expect(test.execute.mock.calls[0][1].signal.aborted).toBe(true);
     finish({ output: "Late output" });
     await running;
