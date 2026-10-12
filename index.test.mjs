@@ -4144,6 +4144,41 @@ describe("header handling", () => {
     expect(parsed.system.some((item) => item.text.startsWith("x-anthropic-billing-header:"))).toBe(false);
   });
 
+  it("keeps the message cache breakpoint off a trailing router-state block (exactly one message breakpoint)", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 8192,
+        messages: [
+          { role: "user", content: "warm up" },
+          { role: "assistant", content: "ok" },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "hello world" },
+              { type: "text", text: "<router-state>\n[router] In flight (background): 1\n</router-state>" },
+            ],
+          },
+        ],
+        system: [],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const parsed = JSON.parse(init.body);
+    const last = parsed.messages[parsed.messages.length - 1];
+    expect(last.content[last.content.length - 1].cache_control).toBeUndefined();
+    expect(last.content[last.content.length - 2].cache_control).toMatchObject({ type: "ephemeral" });
+    const marked = parsed.messages.flatMap((m) =>
+      Array.isArray(m.content) ? m.content.filter((b) => b && b.cache_control) : [],
+    );
+    expect(marked).toHaveLength(1);
+  });
+
   it("adds metadata.user_id to request body", async () => {
     delete process.env.OPENCODE_ANTHROPIC_SIGNATURE_USER_ID;
     process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
