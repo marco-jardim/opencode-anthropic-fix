@@ -1964,6 +1964,23 @@ describe("Opus 4.8", () => {
     expect(markedBlocks(body)).toEqual([[n - 2, body.messages[n - 2].content.length - 1]]);
   });
 
+  it("(h) router-state tail after string-content messages: the previous string message gets the breakpoint", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "answer" },
+        { role: "user", content: [{ type: "text", text: ROUTER_TAIL }] },
+      ],
+    });
+    const n = body.messages.length;
+    expect(body.messages[n - 1].content.at(-1).cache_control).toBeUndefined();
+    expect(body.messages[n - 2].content).toEqual([
+      { type: "text", text: "answer", cache_control: expect.objectContaining({ type: "ephemeral" }) },
+    ]);
+    expect(markedBlocks(body)).toEqual([[n - 2, 0]]);
+  });
+
   it("(h) a text block that merely mentions <router-state> keeps the breakpoint", async () => {
     const { body } = await sendRequest(fetchFn, {
       model: "claude-opus-4-8",
