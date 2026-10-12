@@ -1988,4 +1988,82 @@ describe("Opus 4.8", () => {
     });
     expect(body.messages[0].content[0].cache_control).toMatchObject({ type: "ephemeral" });
   });
+
+  it("(h) walk-back past an assistant message ending in thinking blocks: they stay byte-identical", async () => {
+    const redacted = { type: "redacted_thinking", data: "enc-walk-1" };
+    const thinking = { type: "thinking", thinking: "pondering", signature: "sig-walk-1" };
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "What is 2+2?" }] },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "partial answer" }, structuredClone(redacted), structuredClone(thinking)],
+        },
+        { role: "user", content: [{ type: "text", text: ROUTER_TAIL }] },
+      ],
+    });
+    const assistantMsg = body.messages[1];
+    expect(assistantMsg.content[1]).toStrictEqual(redacted);
+    expect(assistantMsg.content[2]).toStrictEqual(thinking);
+    expect(assistantMsg.content[0].cache_control).toMatchObject({ type: "ephemeral" });
+    expect(markedBlocks(body)).toEqual([[1, 0]]);
+  });
+
+  it("(h) walk-back skips blank text blocks", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "question" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "real answer" },
+            { type: "text", text: "  \n " },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "   " },
+            { type: "text", text: ROUTER_TAIL },
+          ],
+        },
+      ],
+    });
+    expect(body.messages[2].content[0].cache_control).toBeUndefined();
+    expect(body.messages[1].content[1].cache_control).toBeUndefined();
+    expect(markedBlocks(body)).toEqual([[1, 0]]);
+  });
+
+  it("(h) tail-only conversation: no message breakpoint, messages unchanged", async () => {
+    const messages = [{ role: "user", content: [{ type: "text", text: ROUTER_TAIL }] }];
+    const { body } = await sendRequest(fetchFn, { model: "claude-opus-4-8", messages: structuredClone(messages) });
+    expect(markedBlocks(body)).toEqual([]);
+    expect(body.messages).toStrictEqual(messages);
+  });
+
+  it("(h) only thinking and blank blocks before the tail: no message breakpoint, messages unchanged", async () => {
+    const messages = [
+      { role: "user", content: "   " },
+      {
+        role: "assistant",
+        content: [
+          { type: "redacted_thinking", data: "enc-only" },
+          { type: "thinking", thinking: "only thinking", signature: "sig-only" },
+          { type: "text", text: "" },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "  " },
+          { type: "text", text: ROUTER_TAIL },
+        ],
+      },
+    ];
+    const { body } = await sendRequest(fetchFn, { model: "claude-opus-4-8", messages: structuredClone(messages) });
+    expect(markedBlocks(body)).toEqual([]);
+    expect(body.messages).toStrictEqual(messages);
+  });
 });

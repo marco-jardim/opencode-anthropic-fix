@@ -276,21 +276,30 @@ response.`
 The plugin's per-message `cache_control` strip loop therefore **skips**
 `thinking`/`redacted_thinking` blocks entirely — it never deletes nor adds
 `cache_control` on them (`cache_control` is not a valid field on a thinking
-block in the first place). The `cache_control` breakpoint is placed only on the
-last **user**-message block. This guard is model-agnostic but is what makes Opus
+block in the first place). The `cache_control` breakpoint is normally placed on
+the last **user**-message block (see the router-state exception below). This guard is model-agnostic but is what makes Opus
 4.6/4.7/4.8 + Sonnet 4.6 tool-continuation turns work.
 
 **Router-state exception.** When that last user-message block is a text block
 holding only an opencode-model-router turn-state tail (trimmed text starts with
 `<router-state>` and ends with `</router-state>`), the breakpoint goes on the
-nearest earlier block instead: the remaining blocks of that message, then earlier
-messages, newest first, skipping `thinking`, `redacted_thinking`, blank text and
-other router-state blocks. An earlier message in Anthropic's string-content
-shorthand is normalized to one text block carrying the breakpoint (same tokens,
-so the cached prefix is unchanged). The tail is per-request state the host never persists,
+nearest earlier eligible block instead: the remaining blocks of that message, then
+earlier messages of any role (assistant messages included), newest first. A
+`thinking` or `redacted_thinking` block, a blank text block (empty or
+whitespace-only) or another router-state block is never eligible. The walk-back
+passes over these blocks and leaves them exactly as received, so the round-trip
+contract above still holds. Any other block (non-blank text, `tool_result`,
+`tool_use`, image, …) is eligible. When the chosen earlier message uses
+Anthropic's string-content shorthand (a non-blank string that is not itself a
+tail), its content is normalized to a single
+`[{type:"text", text, cache_control}]` block. The tokens are the same, so the
+cached prefix is unchanged. The tail is per-request state the host never persists,
 so a breakpoint on it would write a cache entry the next request can never read.
-Exactly one message breakpoint is still placed; a request without the tail is
-unchanged. Text that merely mentions the tag is not a tail.
+At most one message breakpoint is placed. When no eligible block precedes the
+tail (a tail-only conversation, or only thinking, redacted thinking, blank or
+router-state content before it), **no** message breakpoint is placed and the
+walk-back changes nothing. A request without the tail is unchanged. Text that
+merely mentions the tag is not a tail.
 
 ### 2.1.150 wire-level changes (non-beta)
 
