@@ -280,6 +280,18 @@ block in the first place). The `cache_control` breakpoint is placed only on the
 last **user**-message block. This guard is model-agnostic but is what makes Opus
 4.6/4.7/4.8 + Sonnet 4.6 tool-continuation turns work.
 
+**Router-state exception.** When that last user-message block is a text block
+holding only an opencode-model-router turn-state tail (trimmed text starts with
+`<router-state>` and ends with `</router-state>`), the breakpoint goes on the
+nearest earlier block instead: the remaining blocks of that message, then earlier
+messages, newest first, skipping `thinking`, `redacted_thinking`, blank text and
+other router-state blocks. An earlier message in Anthropic's string-content
+shorthand is normalized to one text block carrying the breakpoint (same tokens,
+so the cached prefix is unchanged). The tail is per-request state the host never persists,
+so a breakpoint on it would write a cache entry the next request can never read.
+Exactly one message breakpoint is still placed; a request without the tail is
+unchanged. Text that merely mentions the tag is not a tail.
+
 ### 2.1.150 wire-level changes (non-beta)
 
 - `x-stainless-package-version` bumped to `0.94.0` (was `0.81.0`) — SDK version in stainless headers.

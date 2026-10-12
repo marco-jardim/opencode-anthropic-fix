@@ -1918,4 +1918,74 @@ describe("Opus 4.8", () => {
     const lastBlock = lastUserMsg.content[lastUserMsg.content.length - 1];
     expect(lastBlock.cache_control).toMatchObject({ type: "ephemeral" });
   });
+
+  // ── (h) opencode-model-router appends a per-request `<router-state>` tail as the
+  //        last user content. A breakpoint on it writes a cache entry the next
+  //        request (without that tail) can never read, so it goes on the block
+  //        before the tail. ─────────────────────────────────────────────────────
+  const ROUTER_TAIL = "<router-state>\n[router] In flight (background): 1\n</router-state>";
+  const markedBlocks = (body) =>
+    body.messages.flatMap((m, mi) =>
+      Array.isArray(m.content) ? m.content.flatMap((b, bi) => (b.cache_control ? [[mi, bi]] : [])) : [],
+    );
+
+  it("(h) router-state tail in the last user message: the breakpoint goes on the block before it", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: "What is 2+2?" },
+        { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "calc", input: { expr: "2+2" } }] },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tu_1", content: "4" },
+            { type: "text", text: ROUTER_TAIL },
+          ],
+        },
+      ],
+    });
+    const last = body.messages[body.messages.length - 1];
+    expect(last.content[1].cache_control).toBeUndefined();
+    expect(last.content[0].cache_control).toMatchObject({ type: "ephemeral" });
+    expect(markedBlocks(body)).toEqual([[body.messages.length - 1, 0]]);
+  });
+
+  it("(h) router-state tail as its own last user message: the breakpoint goes on the previous message", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "answer" }] },
+        { role: "user", content: [{ type: "text", text: ROUTER_TAIL }] },
+      ],
+    });
+    const n = body.messages.length;
+    expect(body.messages[n - 1].content.at(-1).cache_control).toBeUndefined();
+    expect(markedBlocks(body)).toEqual([[n - 2, body.messages[n - 2].content.length - 1]]);
+  });
+
+  it("(h) router-state tail after string-content messages: the previous string message gets the breakpoint", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "answer" },
+        { role: "user", content: [{ type: "text", text: ROUTER_TAIL }] },
+      ],
+    });
+    const n = body.messages.length;
+    expect(body.messages[n - 1].content.at(-1).cache_control).toBeUndefined();
+    expect(body.messages[n - 2].content).toEqual([
+      { type: "text", text: "answer", cache_control: expect.objectContaining({ type: "ephemeral" }) },
+    ]);
+    expect(markedBlocks(body)).toEqual([[n - 2, 0]]);
+  });
+
+  it("(h) a text block that merely mentions <router-state> keeps the breakpoint", async () => {
+    const { body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: [{ type: "text", text: "explain the <router-state> tag" }] }],
+    });
+    expect(body.messages[0].content[0].cache_control).toMatchObject({ type: "ephemeral" });
+  });
 });
