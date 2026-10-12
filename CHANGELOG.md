@@ -4,6 +4,10 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The message cache breakpoint skips a trailing `<router-state>` block.** opencode-model-router appends per-request turn state (`<router-state>…</router-state>`) as the last user content; the host never persists it, so a breakpoint there wrote a cache entry the next request could not read, and every request carrying the tail re-wrote the conversation suffix. The breakpoint now goes on the nearest earlier block (never on thinking, redacted thinking or blank text). Requests without the tail are unchanged.
+
 ## [2.2.0] — 2026-10-04
 
 ### Added
