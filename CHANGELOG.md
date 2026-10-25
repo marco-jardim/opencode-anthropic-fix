@@ -6,6 +6,8 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ### Fixed
 
+- **OpenCode v2 bridge failures retain their original cause and report redacted diagnostics.** Console errors and `transport-errors.log` in the OpenCode config directory include the underlying error, nested cause, whether execution started or response headers were already sent, request kind, body byte count and elapsed time, without logging request bodies, headers or tokens. Diagnostic strings are capped at 2000 characters, and the structured JSON-lines file rotates to `.1` after 2 MiB; logging failures are reported to stderr without changing the bridge's 502 response.
+- **OpenCode v2 auxiliary requests survive primary completion while their body is uploading.** Session success/failure cleanup now keeps claimed tickets until the bridge finishes or cancels them, avoiding spurious 502 responses for concurrent title/generate work.
 - **The message cache breakpoint skips a trailing `<router-state>` block.** opencode-model-router appends per-request turn state (`<router-state>…</router-state>`) as the last user content; the host never persists it, so a breakpoint there wrote a cache entry the next request could not read, and every request carrying the tail re-wrote the conversation suffix. The breakpoint now goes on the nearest earlier block, walking back into earlier messages, assistant ones included. It never lands on thinking, redacted thinking or blank text. When that earlier message uses string-content shorthand, it becomes a single text block carrying the breakpoint (same tokens, so the cached prefix is unchanged). If no eligible block precedes the tail, no message breakpoint is placed. Requests without the tail are unchanged.
 
 ## [2.2.0] — 2026-10-04
