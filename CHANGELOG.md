@@ -4,6 +4,12 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+## [2.2.2] — 2026-10-25
+
+### Fixed
+
+- Retry OpenCode v2 executor initialisation after a loader failure, including account-file persistence errors, rather than caching the rejection indefinitely. Concurrent requests still share initialisation, and an older failure cannot clear a newer connection's loader.
+
 ## [2.2.1] — 2026-10-25
 
 ### Fixed
