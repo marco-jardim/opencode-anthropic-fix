@@ -4,6 +4,8 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-10-25
+
 ### Fixed
 
 - **Interrupted OpenCode v2 bridge failures are recorded in `transport-errors.log`.** Entries include an
