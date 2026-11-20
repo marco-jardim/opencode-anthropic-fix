@@ -11,14 +11,16 @@ document is enforced by
 
 ## Current specifier
 
-| Field                 | Value                                                                   |
-| --------------------- | ----------------------------------------------------------------------- |
-| Package               | `@tormentalabs/claude-code-wire-compat`                                 |
-| Specifier             | `latest` (dist-tag), in [`package.json`](../package.json)               |
-| Lock-resolved version | `0.7.0`                                                                 |
-| Origin                | npm registry                                                            |
-| Resolved by           | `package-lock.json` — version, registry tarball URL, `sha512` integrity |
-| License               | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                 |
+| Field                 | Value                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------ |
+| Package               | `@tormentalabs/claude-code-wire-compat`                                                                |
+| Specifier             | `latest` (dist-tag), in [`package.json`](../package.json)                                              |
+| Lock-resolved version | `0.8.0`                                                                                                |
+| Origin                | npm registry                                                                                           |
+| Resolved tarball      | `https://registry.npmjs.org/@tormentalabs/claude-code-wire-compat/-/claude-code-wire-compat-0.8.0.tgz` |
+| Integrity (`sha512`)  | `sha512-rd7OKU217CEI8OCiT0jyVJZ58y8yL1SA0pTAbt1ydDcAAgMKoyUg9SeyFFDN9THjzVqw064JmD6lZsTr7pR34Q==`      |
+| Resolved by           | `package-lock.json` — version, registry tarball URL, `sha512` integrity                                |
+| License               | `GPL-3.0-or-later`, compatible with this plugin's GPLv3                                                |
 
 The lockfile records the same version with its registry tarball URL and integrity hash, and the
 policy test fails if the two disagree. To read the version actually installed:
@@ -37,9 +39,9 @@ to 2.1.280 before the plugin was ready for it — against `0.6.0` the plugin's o
 (user agent and billing `cc_version` reporting 2.1.280, thinking going out as `display: "updates"`, the
 redact-thinking beta absent, the cache-diagnosis beta no longer strippable by the plugin's THEN-only
 retry latch). At the time that latch only filtered `custom_betas` (today's `sessionRejectedBetas` in
-`index.mjs`), and cache-diagnosis is a beta the 2.1.280 package composes BY DEFAULT — not a custom beta a
+`lib/host/runtime.mjs`), and cache-diagnosis is a beta the 2.1.280 package composes BY DEFAULT — not a custom beta a
 user configured — so that latch had no way to reach it. The adapter migration closed exactly that gap
-with a second, per-account, TTL'd latch that CAN reach a package-composed beta: `index.mjs`'s
+with a second, per-account, TTL'd latch that CAN reach a package-composed beta: `lib/host/runtime.mjs`'s
 `sentBetaSuppressionsByAccount`, fed by the API's own "Unexpected value(s)" rejection message
 (`adapter-input.mjs`'s `parseRejectedBetaNames` / `selectLatchableRejectedBetas`) and wired to the package
 through `buildSuppressBetas`'s `rejectedBetas` argument (see
@@ -48,10 +50,13 @@ what "Why the specifier is the `latest` dist-tag" below now closes: the plugin p
 explicitly on every entry point, so a repeat of the PROFILE half of this scenario can no longer happen
 merely by tracking `latest`.
 
-The plugin's wire port to 2.1.280 is what this pin was waiting for, and it has landed: `WIRE_PROFILE` in
-[`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs) now binds `CLAUDE_CODE_2_1_280_PROFILE`, and the
-adapter imports `BETA_REGISTRY_2_1_280`. With the port done, the specifier returns to `latest` (the
-lock resolves `0.7.0`) and the discipline this document exists to state moves from "held back" to
+The plugin's wire port to 2.1.280 is what this pin was waiting for, and it has landed; plugin 2.3.0 then
+repointed the wire to 2.1.329. `WIRE_PROFILE` in [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs) now
+binds `CLAUDE_CODE_2_1_329_PROFILE`, and the adapter imports `BETA_REGISTRY_2_1_329` and re-exports it
+under the profile-neutral name `WIRE_BETA_REGISTRY` (the package exports no profile-to-registry
+accessor, so that binding is explicit and moves together with `WIRE_PROFILE`). The plugin requires
+`0.8.0` or later, the first release carrying that profile. With the port done, the specifier is `latest`
+(the lock resolves `0.8.0`) and the discipline this document exists to state moves from "held back" to
 "tracked, with a guard": see "Keeping `latest` from drifting silently" below for the tooling that makes
 a stale lock impossible to miss, locally and at publish. The historical pins table at the end of this
 document keeps the `0.5.0` pin on record.
@@ -65,8 +70,8 @@ emulated client profile float with the dependency. `buildWireCompatibleRequest` 
 `buildClaudeCodeCountTokensRequest`, rather than omitting it and inheriting whatever the installed
 package declares as its `DEFAULT_PROFILE`. The package's own `0.6.0` CHANGELOG entry states why: "the
 pin has to be passed on every call to each of the three entry points that read the default seam —
-pinning the builders alone is not enough." `WIRE_PROFILE` currently binds `CLAUDE_CODE_2_1_280_PROFILE`
-— `claude-code-2.1.280-sdk-0.112.1`, the package's statement of "the newest genuine Claude Code client
+pinning the builders alone is not enough." `WIRE_PROFILE` currently binds `CLAUDE_CODE_2_1_329_PROFILE`
+— `claude-code-2.1.329-sdk-0.128.0`, the package's statement of "the newest genuine Claude Code client
 we have analysed and transcribed" as of the version this lock resolves — but that binding does not move
 on its own.
 
@@ -208,26 +213,35 @@ its suite against it, the lever is the same one-line fix as any other emergency:
 Two levers, in increasing order of blast radius. Neither is a runtime switch (see the next section).
 
 1. **Pin an exact version.** If a package release regresses the wire bytes, replace the specifier
-   with the last good exact version and re-lock:
+   with the last known-good exact version and re-lock. Plugin 2.3.0 requires `0.8.0` or later:
+   [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs) statically imports `CLAUDE_CODE_2_1_329_PROFILE`
+   and `BETA_REGISTRY_2_1_329`, which earlier releases do not export, so `0.8.0` (the version the
+   lockfile resolved at 2.3.0) is the oldest version the pin can target:
 
    ```bash
-   npm install --save-exact @tormentalabs/claude-code-wire-compat@0.3.0
+   npm install --save-exact @tormentalabs/claude-code-wire-compat@0.8.0
    npm test -- --run test/conformance/shared-package-parity.test.mjs
    ```
 
-   The policy test accepts an exact semver specifier for exactly this reason. Restore `latest` once
-   the regression is fixed upstream.
+   Substitute the last version you verified for `0.8.0` if a later one was already in use. The policy
+   test accepts an exact semver specifier for exactly this reason. Restore `latest` once the
+   regression is fixed upstream. Going below `0.8.0` is not a dependency change: it means releasing a
+   plugin version that targets that package, because this repository's suite pins the 2.1.329 profile
+   (`test/conformance/version-literals-retired.test.mjs`).
 
 2. **Override the profile without changing the package.** If the _profile_ is the problem but the
    builder is fine, `OPENCODE_ANTHROPIC_PROFILE_OVERRIDE` overrides fields of the profile the
    package composes against — see
    [`emergency-protocol-profile.md`](./emergency-protocol-profile.md). This is the cheaper lever when
-   a new default profile turns out to be wrong on the wire: the package still ships the previous
-   profile alongside the new default.
+   a profile field turns out to be wrong on the wire. It is not a profile-level rollback: the
+   override patches fields of `WIRE_PROFILE`, it does not select a different profile. Rolling the
+   emulated profile back (for example to 2.1.280, which the package still exports) is a source change
+   to the `WIRE_PROFILE` binding in [`wire-compat.mjs`](../lib/mimicry/wire-compat.mjs) and to the
+   guards that pin 2.1.329, shipped as a plugin release; there is no runtime switch for it.
 
    **Keep such an override to `{userAgent, cliVersion}`.** It is applied field by field, wholesale
-   per field with no deep merge, over the package's _current_ `DEFAULT_PROFILE` — which advances on
-   every package release. An override that also carries catalogue or policy data (`supportedModels`,
+   per field with no deep merge, over the profile the plugin passes explicitly (`WIRE_PROFILE`), so
+   it is frozen to the era it was written in whenever that binding is repointed. An override that also carries catalogue or policy data (`supportedModels`,
    `betaPolicy`, `sdkVersion`) pins that data to the era it was written in and goes stale silently on
    the next upgrade: the request stays structurally valid while announcing a new client over old
    data. The environment variable does not validate field contents by design, so that an emergency is
@@ -237,13 +251,13 @@ Two levers, in increasing order of blast radius. Neither is a runtime switch (se
 
 Kept as a record; none of these is the live policy.
 
-| Period                      | Specifier                                   | Note                                                                                                       |
-| --------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Pre-publication             | GitHub release tarball, `v0.1.0-rc.17` last | The only immutable public artifact before the package was published to npm                                 |
-| Phase 9 → 0.3.0 bump        | exact registry version `0.1.0`              | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==`          |
-| 0.3.0 → plugin 1.0.0        | `latest` dist-tag                           | Inherits the package's `DEFAULT_PROFILE`; reproducibility via `package-lock.json`                          |
-| Plugin 2.0.0 → this port    | exact registry version `0.5.0`              | Held back from `0.6.0`'s 2.1.280 default profile; see "The exact `0.5.0` pin has lifted" above             |
-| Current (post-2.1.280 port) | `latest` dist-tag (lock-resolved `0.7.0`)   | Pin lifted once the plugin's own wire port to 2.1.280 landed; guarded by `npm run check:wire-compat-drift` |
+| Period                      | Specifier                                   | Note                                                                                                                                       |
+| --------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Pre-publication             | GitHub release tarball, `v0.1.0-rc.17` last | The only immutable public artifact before the package was published to npm                                                                 |
+| Phase 9 → 0.3.0 bump        | exact registry version `0.1.0`              | `sha512-+BYniAAGj2mCv2MOCusIVueRphdfp4Pnse0641ruF3e4I/yz48kJ17KaFc4fp0OqbX8Z7FBQWzhACfLtJFbiRA==`                                          |
+| 0.3.0 → plugin 1.0.0        | `latest` dist-tag                           | Inherits the package's `DEFAULT_PROFILE`; reproducibility via `package-lock.json`                                                          |
+| Plugin 2.0.0 → this port    | exact registry version `0.5.0`              | Held back from `0.6.0`'s 2.1.280 default profile; see "The exact `0.5.0` pin has lifted" above                                             |
+| Current (post-2.1.329 port) | `latest` dist-tag (lock-resolved `0.8.0`)   | Pin lifted once the plugin's own wire port landed; wire repointed to 2.1.329 in plugin 2.3.0; guarded by `npm run check:wire-compat-drift` |
 
 The `0.1.0` era pinned the profile as a side effect: `0.1.0`'s default was `claude-code-2.1.195`, and
 moving to `0.3.0` moved the wire to `claude-code-2.1.233-sdk-0.112.1`. That coupling is the reason
@@ -337,13 +351,15 @@ through the table above, re-running the full gate after each step.
    npm ci
    ```
 
-   As of this document, `refactor/extract-wire-compat` is **not merged** into `master`, so the full
-   revert is safe on the branch. Once it is merged and released, prefer leaving the dependency
+   `refactor/extract-wire-compat` has been merged into `master` and released (plugin 1.0.0, see
+   [`CHANGELOG.md`](../CHANGELOG.md)), and 1.0.0 removed the in-repo construction path, so removing
+   the package would also unwind everything built on it. Prefer leaving the dependency
    installed over editing `package.json` on a hotfix branch: any `package.json` change merged to
    `master` triggers the publication workflow described in [`ci.md`](./ci.md).
 
    The construction swap has landed, so it is a distinct rollback step and it is the FIRST one to
-   consider. [`index.mjs`](../index.mjs) imports `buildWireCompatibleRequest` and calls it on the
+   consider. [`lib/host/runtime.mjs`](../lib/host/runtime.mjs) (the runtime behind the thin
+   [`index.mjs`](../index.mjs) entry) imports `buildWireCompatibleRequest` and calls it on the
    live request path for every first-party `/v1/messages` turn with signature emulation on.
 
    The package's SECOND surface is consumed too: `buildWireCompatibleCountTokensRequest` wraps
@@ -352,10 +368,14 @@ through the table above, re-running the full gate after each step.
    [`lib/mimicry/wire-compat.mjs`](../lib/mimicry/wire-compat.mjs), so a revert unwinds two entry
    points rather than one.
 
-   The legacy `buildRequestHeaders` construction survives beside them only as the fallback for the
-   requests the adapter declines (a bodiless request, or signature emulation off — on either
-   endpoint). Reverting `99f4844` therefore sends every turn back down the legacy path without
-   removing the package:
+   The legacy `buildRequestHeaders` construction survives beside them only as a frozen shim in
+   [`lib/mimicry/headers.mjs`](../lib/mimicry/headers.mjs) (`lib/request-headers.mjs` itself was
+   deleted in 1.0.0). With signature emulation on, it builds headers only for endpoints the package
+   has no surface for (files, models, gateway-prefixed routes). Signature emulation off no longer
+   reaches it (pass-through headers, `lib/passthrough-headers.mjs`), and a bodiless or unparsable
+   messages body is now a hard error rather than a fallback. Historically, reverting `99f4844` sent
+   every turn back down the legacy path without removing the package; 1.0.0 later removed that dual
+   path, so the step below is kept as a record of the chain, not as a current procedure:
 
    ```bash
    git revert --no-edit 99f4844
