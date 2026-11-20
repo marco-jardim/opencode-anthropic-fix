@@ -644,6 +644,9 @@ export async function cmdReauth(arg) {
   existing.access = credentials.access;
   existing.expires = credentials.expires;
   if (credentials.email) existing.email = credentials.email;
+  // The new grant replaces the old one; keeping the old scopes would make the
+  // next refresh request them again and undo the re-authorization.
+  if (credentials.scopes) existing.scopes = credentials.scopes;
 
   // Re-enable and reset failure tracking
   existing.enabled = true;

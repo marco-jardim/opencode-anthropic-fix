@@ -1176,6 +1176,55 @@ describe("auth commands", () => {
     }
   });
 
+  it("cmdReauth persists the scopes of the new grant, replacing the account's old ones", async () => {
+    const storage = makeStorage();
+    storage.accounts[0].scopes = ["user:profile", "user:inference"];
+    loadAccounts.mockResolvedValue(storage);
+    vi.mocked(exchange).mockResolvedValueOnce({
+      type: "success",
+      refresh: "refresh-reauth",
+      access: "access-reauth",
+      expires: Date.now() + 7200_000,
+      scopes: ["user:profile", "user:inference", "user:plugins"],
+    });
+
+    const restoreTTY = setStdinTTY(true);
+    mockReadlineAnswer("reauth-code#state");
+
+    try {
+      expect(await cmdReauth("1")).toBe(0);
+      expect(saveAccounts.mock.calls[0][0].accounts[0].scopes).toEqual([
+        "user:profile",
+        "user:inference",
+        "user:plugins",
+      ]);
+    } finally {
+      restoreTTY();
+    }
+  });
+
+  it("cmdReauth keeps the stored scopes when the exchange reports none", async () => {
+    const storage = makeStorage();
+    storage.accounts[0].scopes = ["user:profile"];
+    loadAccounts.mockResolvedValue(storage);
+    vi.mocked(exchange).mockResolvedValueOnce({
+      type: "success",
+      refresh: "refresh-reauth",
+      access: "access-reauth",
+      expires: Date.now() + 7200_000,
+    });
+
+    const restoreTTY = setStdinTTY(true);
+    mockReadlineAnswer("reauth-code#state");
+
+    try {
+      expect(await cmdReauth("1")).toBe(0);
+      expect(saveAccounts.mock.calls[0][0].accounts[0].scopes).toEqual(["user:profile"]);
+    } finally {
+      restoreTTY();
+    }
+  });
+
   it("cmdRefresh updates tokens and re-enables account", async () => {
     const storage = makeStorage();
     storage.accounts[2].enabled = false;
