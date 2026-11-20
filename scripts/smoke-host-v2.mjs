@@ -100,6 +100,11 @@ Object.assign(env, {
   // The plugin ships its SDK. A cold model initialization must not install a
   // second copy through the host's npm transport (including after reload).
   npm_config_registry: `http://127.0.0.1:${mock.address().port}/registry/`,
+  // Freeze the host's model catalog to the snapshot bundled in its binary. Without
+  // this the host fetches models.opencode.ai in the background at startup and swaps
+  // the catalog mid-run, so the listings before and after a reload can differ (seen
+  // in CI as one model added on one run and two removed on another).
+  OPENCODE_DISABLE_MODELS_FETCH: "true",
   TEMP: join(scratch, "tmp"),
   TMP: join(scratch, "tmp"),
 });
@@ -301,19 +306,18 @@ try {
   const reloadedModels = await client.model.list({ location });
   const reloadedAnthropicModels = reloadedModels.data.filter((item) => item.providerID === "anthropic");
   const inventory = compareModelInventories(anthropicModels, reloadedAnthropicModels);
+  // The catalog is frozen (OPENCODE_DISABLE_MODELS_FETCH), so a reload must list
+  // exactly the baseline set, and every model must still be managed by the plugin.
   assert.deepEqual(inventory.missing, [], "Models listed before the reload vanished after it");
-  // The host refreshes its own catalog in the background, so the reload can list
-  // models the baseline did not. The plugin cannot add models, so an addition is
-  // legitimate only if the plugin still manages it exactly like the baseline.
+  assert.deepEqual(inventory.added.map((item) => item.id).sort(), [], "The reload listed models the baseline did not");
   assert.ok(
     reloadedAnthropicModels.every((item) => item.package === sdkPackage),
-    "Every reloaded model must stay on the shipped SDK, including host-catalog additions",
+    "Every reloaded model must stay on the shipped SDK",
   );
   assert.ok(
     reloadedAnthropicModels.every((item) => item.cost.every((tier) => tier.input === 0 && tier.output === 0)),
-    "Every reloaded model must keep the zeroed subscription cost, including host-catalog additions",
+    "Every reloaded model must keep the zeroed subscription cost",
   );
-  const catalogAdditions = inventory.added.map((item) => item.id).sort();
   assert.equal(registryRequests, 0, "Managed models must use the shipped SDK without a registry install");
   const report = {
     version: info.version,
@@ -321,7 +325,6 @@ try {
     oauthRegistered: true,
     modelCount: anthropicModels.length,
     reloadedModelCount: reloadedAnthropicModels.length,
-    catalogAdditionsAfterReload: catalogAdditions,
     modelPackage: anthropicModels[0].package,
     administrativeRpcWithoutModel: true,
     generation: true,
