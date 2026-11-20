@@ -1610,13 +1610,16 @@ describe("E2E: systemPromptTailing default (A2)", () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: longText }],
     });
-    // With opt-in, the long block must have been truncated below its original size.
+    // With opt-in, the long block must have been truncated below its original
+    // size. The host block now opens with the genuine opening sentence and the
+    // empowerment blocks (the tailer keeps the first paragraph and the headers),
+    // so the block is found by its trim marker rather than by the X filler.
     const textBlock = body.system.find(
-      (b) => b.type === "text" && typeof b.text === "string" && b.text.startsWith("X".repeat(100)),
+      (b) => b.type === "text" && typeof b.text === "string" && b.text.includes("Verbose instructions trimmed"),
     );
     expect(textBlock).toBeDefined();
     expect(textBlock.text.length).toBeLessThan(longText.length);
-    expect(textBlock.text).toContain("Verbose instructions trimmed");
+    expect(textBlock.text).not.toContain("X".repeat(100));
   });
 });
 

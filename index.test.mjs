@@ -940,10 +940,12 @@ describe("fetch interceptor", () => {
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     const payloadText = body.system.map((item) => item.text);
-    expect(payloadText).toContain("You are Claude Code, an Claude assistant.");
+    // The host block carries the genuine opening sentence and the empowerment
+    // blocks ahead of the (rewritten) host text.
+    expect(payloadText.at(-1).endsWith("\nYou are Claude Code, an Claude assistant.")).toBe(true);
   });
 
-  it("redacts opencode mentions inside path-like text in system prompt", async () => {
+  it("preserves path-like and URL-like text in the system prompt by default (rewrite_scope base)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -951,7 +953,12 @@ describe("fetch interceptor", () => {
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
         max_tokens: 1024,
-        system: [{ type: "text", text: "Working dir: /Users/rmk/projects/opencode-auth" }],
+        system: [
+          {
+            type: "text",
+            text: "Working dir: /Users/rmk/projects/opencode-auth\nOpenCode docs: https://opencode.ai/docs",
+          },
+        ],
         messages: [],
       }),
     });
@@ -959,8 +966,12 @@ describe("fetch interceptor", () => {
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     const payloadText = body.system.map((item) => item.text);
-    expect(payloadText).toContain("Working dir: /Users/rmk/projects/Claude-auth");
-    expect(payloadText.join("\n")).not.toMatch(/opencode/i);
+    // Paths and URLs survive; the prose mention is still rewritten.
+    expect(
+      payloadText
+        .at(-1)
+        .endsWith("Working dir: /Users/rmk/projects/opencode-auth\nClaude Code docs: https://opencode.ai/docs"),
+    ).toBe(true);
   });
 
   it("compacts verbose system instructions in minimal mode (explicit opt-in)", async () => {
@@ -4034,7 +4045,8 @@ describe("header handling", () => {
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
       cache_control: { type: "ephemeral", ttl: "1h" },
     });
-    expect(parsed.system[2].text).toBe("Use Claude Code defaults");
+    expect(parsed.system[2].text.startsWith("You are an agent working with the user toward their goals")).toBe(true);
+    expect(parsed.system[2].text.endsWith("\n\nUse Claude Code defaults")).toBe(true);
   });
 
   it("redacts opencode mentions and compacts duplicated identity prefix", async () => {
@@ -4070,7 +4082,9 @@ describe("header handling", () => {
     // original block is compacted and redacted
     expect(parsed.system[2].text.startsWith("You are Claude Code, Anthropic's official CLI for Claude.")).toBe(false);
     expect(parsed.system[2].text).toContain("Use Claude Code defaults");
-    expect(parsed.system[2].text).not.toMatch(/opencode/i);
+    // The prose is rewritten; the URL and path-like tokens are left as written.
+    expect(parsed.system[2].text).toContain("See https://opencode.ai/docs and github.com/anomalyco/opencode");
+    expect(parsed.system[2].text.replace(/\S*[/\\]\S*/g, "")).not.toMatch(/opencode/i);
     expect(parsed.system[2].text).not.toContain("\n\n\n");
   });
 
