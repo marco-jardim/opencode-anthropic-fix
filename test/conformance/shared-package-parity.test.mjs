@@ -871,7 +871,8 @@ describe("shared package boundary - deferred plugin policy", () => {
     const adapterBody = JSON.parse(adapter.body);
 
     expect(existingBody.thinking).toEqual({ type: "adaptive", display: "updates" });
-    expect(existingBody.output_config).toEqual({ effort: "high" });
+    // The plugin's maintainer-chosen default effort is "medium" (`default_effort`).
+    expect(existingBody.output_config).toEqual({ effort: "medium" });
     expect(existingBody.temperature).toBeUndefined();
 
     expect(adapterBody.thinking).toBeUndefined();

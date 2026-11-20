@@ -236,11 +236,9 @@ const ALLOWED_FAMILY_REGEXES = {
     "/claude|sonnet|opus|haiku|gpt|gemini/i",
   ],
 
-  // Token-economy gates (adaptive tool set, MCP tool deferral) opt the oldest
-  // and smallest models out of schema deferral. This is a plugin cost policy,
-  // not a statement about what the model supports, so it does not belong on the
-  // seam. Note both occurrences are the SAME literal, deduplicated below.
-  "lib/mimicry/request-body.mjs": ["/claude-3-|haiku/i"],
+  // `lib/mimicry/request-body.mjs` used to carry `/claude-3-|haiku/i` here (the
+  // adaptive tool set and MCP tool deferral gates). It now asks the seam's
+  // `isClaude3Model`, so it has no family regex left and no entry.
 };
 
 describe("no local model-family regexes outside the allowlist", () => {

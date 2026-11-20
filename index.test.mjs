@@ -3546,7 +3546,7 @@ describe("header handling", () => {
     expect(parsed.output_config?.effort).toBeUndefined();
   });
 
-  it("injects default effort 'high' for adaptive models when effort is absent (v2.1.117+)", async () => {
+  it("injects the default effort 'medium' for adaptive models when effort is absent", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -3560,7 +3560,7 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.output_config).toEqual({ effort: "high" });
+    expect(parsed.output_config).toEqual({ effort: "medium" });
   });
 
   it("does not inject default effort for non-adaptive models", async () => {

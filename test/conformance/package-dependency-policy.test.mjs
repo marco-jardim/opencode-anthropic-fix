@@ -268,8 +268,12 @@ describe("shared wire package rollback documentation", () => {
     // reconciliation then added `BETA_REGISTRY_2_1_280`, which no production
     // path reads — `lib/betas.test.mjs` walks it to prove the host's literal
     // beta headers have not drifted from the genuine client's — for sixteen.
+    // The catalogue-gated model queries then replaced the raw
+    // `isAdaptiveThinkingModel` binding with an aliased one
+    // (`packageIsAdaptiveThinkingModel`, wrapped under `WIRE_PROFILE`) and added
+    // `modelCapability`, for seventeen.
     expect(adapter).toMatch(
-      /^import \{\n {2}BETA_REGISTRY_2_1_280,\n {2}buildClaudeCodeRequest,\n {2}buildClaudeCodeCountTokensRequest,\n {2}CLAUDE_CODE_2_1_280_PROFILE,\n {2}hasOneMillionContext,\n {2}isAdaptiveThinkingModel,\n {2}isClaude3Model,\n {2}isEligibleFor1MContext,\n {2}isFable5Model,\n {2}isHaikuModel,\n {2}isMythos5Model,\n {2}isOpus46Model,\n {2}isOpus47Model,\n {2}isOpus48Model,\n {2}supportsStructuredOutputs,\n {2}supportsWebSearch,\n\} from "@tormentalabs\/claude-code-wire-compat";$/m,
+      /^import \{\n {2}BETA_REGISTRY_2_1_280,\n {2}buildClaudeCodeRequest,\n {2}buildClaudeCodeCountTokensRequest,\n {2}CLAUDE_CODE_2_1_280_PROFILE,\n {2}hasOneMillionContext,\n {2}isAdaptiveThinkingModel as packageIsAdaptiveThinkingModel,\n {2}isClaude3Model,\n {2}isEligibleFor1MContext,\n {2}isFable5Model,\n {2}isHaikuModel,\n {2}isMythos5Model,\n {2}isOpus46Model,\n {2}isOpus47Model,\n {2}isOpus48Model,\n {2}modelCapability,\n {2}supportsStructuredOutputs,\n {2}supportsWebSearch,\n\} from "@tormentalabs\/claude-code-wire-compat";$/m,
     );
     expect(provenance).toMatch(/static[^\n]*import|import[^\n]*static/i);
   });

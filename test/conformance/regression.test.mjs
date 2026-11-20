@@ -1825,7 +1825,12 @@ describe("Opus 4.8", () => {
     expect(body.speed).toBe("fast");
   });
 
-  it("(e) fast mode enabled: speed:'fast' injected for claude-opus-4-7", async () => {
+  // Eligibility is the emulated catalogue's `fast_mode` capability; Opus 4.7 lost
+  // it, so it only gets `speed: "fast"` through the `fast_mode_legacy_models` opt-in.
+  it.each([
+    [false, undefined],
+    [true, "fast"],
+  ])("(e) fast mode enabled for claude-opus-4-7 with fast_mode_legacy_models=%s", async (legacy, expectedSpeed) => {
     const original = await vi.importActual("../../lib/config.mjs");
     loadConfig.mockImplementation(() => ({
       ...original.DEFAULT_CONFIG,
@@ -1838,10 +1843,11 @@ describe("Opus 4.8", () => {
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
       fast_mode: true,
+      fast_mode_legacy_models: legacy,
     }));
     const fastModeFetchFn = await setupFetchFn(makeClient());
     const { body } = await sendRequest(fastModeFetchFn, { model: "claude-opus-4-7" });
-    expect(body.speed).toBe("fast");
+    expect(body.speed).toBe(expectedSpeed);
   });
 
   // ── (f) Fast mode: anthropic-beta header must contain fast-mode-2026-02-01 ──

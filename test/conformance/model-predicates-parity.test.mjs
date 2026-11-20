@@ -71,7 +71,14 @@ const MATRIX = [
   // `isEligibleFor1MContextWire` binds `WIRE_PROFILE` instead of calling the
   // package bare: under the package's default profile (2.1.195) this model is
   // NOT eligible; under the 2.1.233+ / 2.1.280 profile the plugin emulates, it is.
-  ["claude-mythos-5", ["isMythos5Model", "isAdaptiveThinkingModel", "isEligibleFor1MContextWire"]],
+  //
+  // DIVERGENCE (5): `isAdaptiveThinkingModel` is false here although the package's
+  // own predicate says true. The seam now gates it on the emulated profile's
+  // catalogue capability `adaptive_thinking`, and the 2.1.280 entry for
+  // `claude-mythos-5` carries an EMPTY capability list ("a denial, not a gap").
+  // Sending `thinking: {type: "adaptive"}` or an effort to it would be a field
+  // the genuine client never sends for this id.
+  ["claude-mythos-5", ["isMythos5Model", "isEligibleFor1MContextWire"]],
 
   // --- dotted version separators (host tolerance) ---------------------------
   ["claude-opus-4.7", ["isOpus47Model", "isAdaptiveThinkingModel", "isEligibleFor1MContextWire"]],
@@ -83,7 +90,7 @@ const MATRIX = [
   ["claude-opus-4-8-20260528", ["isOpus48Model", "isAdaptiveThinkingModel", "isEligibleFor1MContextWire"]],
   ["claude-opus-4.7-EAP[foo]", ["isOpus47Model", "isAdaptiveThinkingModel", "isEligibleFor1MContextWire"]],
   ["claude-fable-5-20260101", ["isFable5Model", "isAdaptiveThinkingModel", "isEligibleFor1MContextWire"]],
-  ["claude-mythos-5-20260101", ["isMythos5Model", "isAdaptiveThinkingModel", "isEligibleFor1MContextWire"]],
+  ["claude-mythos-5-20260101", ["isMythos5Model", "isEligibleFor1MContextWire"]], // DIVERGENCE (5), see above
 
   // --- explicit 1M markers --------------------------------------------------
   // `hasOneMillionContext` is the STATIC "always 1M" answer and stays narrower

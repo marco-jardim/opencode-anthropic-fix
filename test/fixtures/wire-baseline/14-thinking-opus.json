@@ -58,7 +58,7 @@
       "display": "updates"
     },
     "output_config": {
-      "effort": "high"
+      "effort": "medium"
     },
     "metadata": {
       "user_id": "<generated>"
