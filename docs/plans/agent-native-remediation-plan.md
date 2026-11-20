@@ -4,7 +4,7 @@
 > **Date:** 2026-07-07
 > **Owner:** autonomous agent swarm (orchestrated)
 > **Source audit:** [`docs/agent-native-audit.md`](../agent-native-audit.md)
-> **Repo:** `opencode-anthropic-fix` @ `0.1.32`, on-disk root `D:\git\opencode-anthropic-fix`
+> **Repo:** `opencode-anthropic-fix` @ `0.1.32`, on-disk root `<repo-root>`
 
 This plan fills every gap in the audit. It is written to be executed by coding agents with minimal
 human intervention. Read §A (directives) before starting any wave.
@@ -70,7 +70,7 @@ Each task is tagged with the tier that should execute it:
 
 Rules: gather context with `[fast]` **before** any `[heavy]` dispatch. The orchestrator (if already
 opus) performs `[heavy]`-class _design/analysis_ itself instead of self-dispatching. Every dispatch
-carries the ENVIRONMENT block (`D:\git\opencode-anthropic-fix`, win32, pwsh) and a `CAP:N` read budget.
+carries the ENVIRONMENT block (`<repo-root>`, win32, pwsh) and a `CAP:N` read budget.
 
 ### A5. Per-phase ceremony (applies to _every_ phase)
 
@@ -172,7 +172,7 @@ tribal input. Lowest effort, highest attention-saved. Most of W0 is disjoint and
 - `git status --porcelain` clean (tree is clean at audit time; if not, STOP-class-2).
 - `npm test` green baseline (record pass count).
 - `node --version` ≥ 18.
-- Confirm on-disk root is `D:\git\opencode-anthropic-fix`.
+- Confirm on-disk root is `<repo-root>`.
 
 ---
 

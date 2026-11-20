@@ -4,7 +4,7 @@
 
 **Goal:** Eliminate three confirmed, high-ROI causes of cache churn in long opencode sessions — (1) `thinking: undefined` for `claude-opus-4-7`, (2) `systemPromptTailing` breaking cache over ~1MB of history at turn 6, (3) overflow-only (100%) auto-compact trigger — to cut per-turn input cost 30–40% on 20+ turn sessions.
 
-**Architecture:** Two repos. Plugin-side fixes (A1, A2) are one-line regex + default-flip edits in `D:\git\opencode-anthropic-fix\index.mjs` and `lib/config.mjs`, guarded by new regression tests. Fork-side fix (A3) adds a `compaction.threshold` config knob to `D:\git\opencode\packages\opencode` and uses it in `overflow.ts`.
+**Architecture:** Two repos. Plugin-side fixes (A1, A2) are one-line regex + default-flip edits in `index.mjs` and `lib/config.mjs`, guarded by new regression tests. Fork-side fix (A3) adds a `compaction.threshold` config knob to `..\opencode\packages\opencode` and uses it in `overflow.ts`.
 
 **Tech Stack:** Node.js (ESM), Vitest, Zod (opencode config), TypeScript (opencode), Bun (opencode runtime & tests).
 
@@ -19,14 +19,14 @@
 
 **Repos in scope:**
 
-- `D:\git\opencode-anthropic-fix` — plugin (Node.js)
-- `D:\git\opencode` — opencode fork (TypeScript/Bun)
+- `<repo-root>` — plugin (Node.js)
+- `..\opencode` — opencode fork (TypeScript/Bun)
 
 ---
 
 ## File Structure
 
-### Plugin repo (`D:\git\opencode-anthropic-fix`)
+### Plugin repo (`<repo-root>`)
 
 | File                                   | Role                       | Change                                                                                                                                                                |
 | -------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -36,7 +36,7 @@
 | `CHANGELOG.md`                         | Release notes              | Bump to v0.1.16 entry.                                                                                                                                                |
 | `package.json`                         | Plugin version             | Bump to v0.1.16.                                                                                                                                                      |
 
-### Opencode fork (`D:\git\opencode`)
+### Opencode fork (`..\opencode`)
 
 | File                                                     | Role                    | Change                                                   |
 | -------------------------------------------------------- | ----------------------- | -------------------------------------------------------- |
@@ -50,8 +50,8 @@
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\index.mjs:6133-6159`
-- Test: `D:\git\opencode-anthropic-fix\test\conformance\regression.test.mjs` (append to existing `describe("E2E: Thinking normalization")` block at line 1183)
+- Modify: `index.mjs:6133-6159`
+- Test: `test\conformance\regression.test.mjs` (append to existing `describe("E2E: Thinking normalization")` block at line 1183)
 
 **Why this matters:** Request dumps of the user's 1100-message session show `thinking: undefined` on every outbound request because `isAdaptiveThinkingModel(model)` returns `false` for `claude-opus-4-7`. This omits the `thinking: {type: "adaptive"}` field that real CC v2.1.114 sends, which (a) costs billing-header signature match and (b) means the `effort-2025-11-24` beta path is never taken for this model.
 
@@ -86,7 +86,7 @@ Expected: 2 tests fail with `expected undefined to deeply equal { type: 'adaptiv
 
 - [ ] **Step 1.3: Add `isOpus47Model` detector and extend `isAdaptiveThinkingModel`**
 
-In `D:\git\opencode-anthropic-fix\index.mjs`, locate the block at line 6133-6159. Insert a new detector function between `isOpus46Model` (line 6139) and `isSonnet46Model` (line 6146), and update `isAdaptiveThinkingModel` (line 6157) to include it:
+In `index.mjs`, locate the block at line 6133-6159. Insert a new detector function between `isOpus46Model` (line 6139) and `isSonnet46Model` (line 6146), and update `isAdaptiveThinkingModel` (line 6157) to include it:
 
 Replace:
 
@@ -182,7 +182,7 @@ Expected decision: most callsites (effort push, thinking normalization) should i
 - [ ] **Step 1.7: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add index.mjs test/conformance/regression.test.mjs
 git commit -m "fix(A1): recognize claude-opus-4-7 as adaptive-thinking model"
 ```
@@ -193,9 +193,9 @@ git commit -m "fix(A1): recognize claude-opus-4-7 as adaptive-thinking model"
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\index.mjs:7590`
-- Modify: `D:\git\opencode-anthropic-fix\lib\config.mjs` (add `token_economy_strategies` normalization)
-- Test: `D:\git\opencode-anthropic-fix\test\conformance\regression.test.mjs` (new `describe` block)
+- Modify: `index.mjs:7590`
+- Modify: `lib\config.mjs` (add `token_economy_strategies` normalization)
+- Test: `test\conformance\regression.test.mjs` (new `describe` block)
 
 **Why this matters:** Dumps show the plugin's system prompt is ~48KB. At turn 6, `systemPromptTailing` shrinks it to ~1.8KB. Because the system prompt block is a cache source, this re-creates a ~48KB cache block (billed 1.25× input) and invalidates the ~215k-token message-history suffix that was cached behind the old system hash. Net: one cache break loses more than the tailing saves.
 
@@ -276,7 +276,7 @@ Expected: the first test fails because, with today's code, the 5000-char block g
 
 - [ ] **Step 2.3: Add `token_economy_strategies` default to `lib/config.mjs`**
 
-In `D:\git\opencode-anthropic-fix\lib\config.mjs`, inside `DEFAULT_CONFIG`, add a new section right after the existing `token_economy` block (which ends around line 260 based on current layout — find the closing `}` of `token_economy: { ... }`). Insert:
+In `lib\config.mjs`, inside `DEFAULT_CONFIG`, add a new section right after the existing `token_economy` block (which ends around line 260 based on current layout — find the closing `}` of `token_economy: { ... }`). Insert:
 
 ```js
   /** Advanced strategies that may trade cache stability for verbosity reduction.
@@ -371,7 +371,7 @@ Expected: all tests pass. Pay attention to `test/phase3/task-3-6-token-economy.t
 - [ ] **Step 2.7: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add index.mjs lib/config.mjs test/conformance/regression.test.mjs
 git commit -m "fix(A2): default token_economy_strategies.system_prompt_tailing to false"
 ```
@@ -382,8 +382,8 @@ git commit -m "fix(A2): default token_economy_strategies.system_prompt_tailing t
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\CHANGELOG.md`
-- Modify: `D:\git\opencode-anthropic-fix\package.json`
+- Modify: `CHANGELOG.md`
+- Modify: `package.json`
 
 - [ ] **Step 3.1: Append changelog entry**
 
@@ -423,7 +423,7 @@ Expected: `dist/opencode-anthropic-auth-plugin.js` rebuilt successfully.
 - [ ] **Step 3.4: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add CHANGELOG.md package.json dist/
 git commit -m "chore: release v0.1.16 (Phase A surgical fixes)"
 ```
@@ -434,15 +434,15 @@ git commit -m "chore: release v0.1.16 (Phase A surgical fixes)"
 
 **Files:**
 
-- Modify: `D:\git\opencode\packages\opencode\src\config\config.ts:202-213`
-- Modify: `D:\git\opencode\packages\opencode\src\session\overflow.ts`
-- Create: `D:\git\opencode\packages\opencode\src\session\overflow.test.ts`
+- Modify: `..\opencode\packages\opencode\src\config\config.ts:202-213`
+- Modify: `..\opencode\packages\opencode\src\session\overflow.ts`
+- Create: `..\opencode\packages\opencode\src\session\overflow.test.ts`
 
 **Why this matters:** `isOverflow` today only returns `true` when `count >= usable`, where `usable = model.limit.input - reserved`. This means auto-compaction triggers AT context overflow. Users observe the final request inflating to near-max-context before compaction kicks in. We want to trigger earlier — at ~85% of usable — so compaction reclaims slack before cost spikes. This is a pre-req for B3 (rolling summarizer) and mirrors CC's preemptive compaction behavior.
 
 - [ ] **Step 4.1: Write the failing test**
 
-Create `D:\git\opencode\packages\opencode\src\session\overflow.test.ts`:
+Create `..\opencode\packages\opencode\src\session\overflow.test.ts`:
 
 ```ts
 import { describe, expect, it } from "bun:test";
@@ -497,7 +497,7 @@ describe("isOverflow — compaction.threshold (A3)", () => {
 
 - [ ] **Step 4.2: Run the test to verify it FAILS**
 
-Run from `D:/git/opencode`:
+Run from `../opencode`:
 
 ```
 bun test packages/opencode/src/session/overflow.test.ts
@@ -507,7 +507,7 @@ Expected: 4 tests fail with messages indicating threshold is not applied.
 
 - [ ] **Step 4.3: Add `threshold` to the config schema**
 
-In `D:\git\opencode\packages\opencode\src\config\config.ts`, modify the `compaction` block (lines 202-213). Replace:
+In `..\opencode\packages\opencode\src\config\config.ts`, modify the `compaction` block (lines 202-213). Replace:
 
 ```ts
     compaction: z
@@ -551,7 +551,7 @@ With:
 
 - [ ] **Step 4.4: Apply `threshold` in `overflow.ts`**
 
-Replace the entire contents of `D:\git\opencode\packages\opencode\src\session\overflow.ts` with:
+Replace the entire contents of `..\opencode\packages\opencode\src\session\overflow.ts` with:
 
 ```ts
 import type { Config } from "@/config";
@@ -590,7 +590,7 @@ Expected: all 4 tests pass.
 
 - [ ] **Step 4.6: Run the opencode package test suite**
 
-Run from `D:/git/opencode`: `bun test packages/opencode`
+Run from `../opencode`: `bun test packages/opencode`
 Expected: all tests pass. If a snapshot test captures a config schema dump, regenerate it and inspect the diff — the new `threshold` field should appear under `compaction`.
 
 - [ ] **Step 4.7: Type-check the fork**
@@ -601,7 +601,7 @@ Expected: no new type errors.
 - [ ] **Step 4.8: Commit**
 
 ```bash
-cd D:/git/opencode
+cd ../opencode
 git checkout -b phase-a-a3-compaction-threshold
 git add packages/opencode/src/config/config.ts packages/opencode/src/session/overflow.ts packages/opencode/src/session/overflow.test.ts
 git commit -m "feat(session): add compaction.threshold to trigger auto-compact before overflow
@@ -621,11 +621,11 @@ opencode-anthropic-fix/docs/plans/2026-04-18-phase-a-surgical-fixes.md."
 
 **Files:**
 
-- Read: `C:\Users\Marquinho\.opencode\opencode-anthropic-fix\request-dumps` (session dumps)
+- Read: `%USERPROFILE%\.opencode\opencode-anthropic-fix\request-dumps` (session dumps)
 
 - [ ] **Step 5.1: Configure the user session for validation**
 
-Ensure `C:\Users\Marquinho\AppData\Roaming\opencode\anthropic-auth.json` contains:
+Ensure `%USERPROFILE%\AppData\Roaming\opencode\anthropic-auth.json` contains:
 
 ```json
 {
@@ -661,7 +661,7 @@ Expected observations (record into a validation note):
 
 - [ ] **Step 5.4: If validation passes, commit the validation notes**
 
-Create or append `D:\git\opencode-anthropic-fix\docs\plans\2026-04-18-phase-a-validation.md` with:
+Create or append `docs\plans\2026-04-18-phase-a-validation.md` with:
 
 - Session turn count
 - Model used
@@ -672,7 +672,7 @@ Create or append `D:\git\opencode-anthropic-fix\docs\plans\2026-04-18-phase-a-va
 Commit:
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add docs/plans/2026-04-18-phase-a-validation.md
 git commit -m "docs: Phase A validation results"
 ```
@@ -691,7 +691,7 @@ If a cache-break toast fires despite A2, or `cache_read` never dominates, or `th
 
 - **A1 and A2 are plugin-only**; they ship as part of v0.1.16. Users pulling the new plugin build get the fixes automatically.
 - **A3 is fork-only**; it ships to users of the custom fork. The plugin is ambivalent to whether the fork has the threshold — it just sees compaction happening earlier.
-- **Worktree strategy**: recommend one worktree per repo for this phase. Plugin worktree: `D:/git/opencode-anthropic-fix-phase-a`. Fork worktree: `D:/git/opencode-phase-a-a3`.
+- **Worktree strategy**: recommend one worktree per repo for this phase. Plugin worktree: `../opencode-anthropic-fix-phase-a`. Fork worktree: `../opencode-phase-a-a3`.
 - **Merge order**: A1 → A2 → A3 (independent but this preserves a clean bisect if something regresses).
 
 ---

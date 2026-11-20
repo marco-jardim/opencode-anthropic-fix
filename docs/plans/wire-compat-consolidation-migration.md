@@ -2,8 +2,8 @@
 
 > Status: PLANEJADO. Criado em 2026-08-16. Revisão senior (regressão +
 > dono-único-do-mimicry) aplicada em 2026-08-16 — ver §Histórico de revisão.
-> Repositórios: plugin `D:\git\opencode-anthropic-fix` (este repo) e pacote
-> `D:\git\claude-code-wire-compat` (`@tormentalabs/claude-code-wire-compat`).
+> Repositórios: plugin `<repo-root>` (este repo) e pacote
+> `..\claude-code-wire-compat` (`@tormentalabs/claude-code-wire-compat`).
 > Plataforma de execução: win32, pwsh.
 
 ## 1. Objetivo
@@ -217,7 +217,7 @@ está documentada sem ambiguidade. Corrigir apontamentos.
 
 ## WAVE 1 — Pacote: expor a superfície que falta
 
-> Repo: `D:\git\claude-code-wire-compat`. Governança: cada export novo exige
+> Repo: `..\claude-code-wire-compat`. Governança: cada export novo exige
 > atualizar `src/index.ts`, o array fechado de
 > `test/runtime/runtime-neutral.test.ts:68-78`, testes de validação com import
 > do entry público (`test/governance/public-path-coverage.test.ts`), e
@@ -326,7 +326,7 @@ qualquer item falhar.
 
 ## WAVE 2 — Plugin: adapter incondicional + built.url (∥ com Wave 1)
 
-> Repo: `D:\git\opencode-anthropic-fix`. Nenhuma task desta wave depende de
+> Repo: `<repo-root>`. Nenhuma task desta wave depende de
 > release novo do pacote — tudo funciona contra a versão do lockfile atual.
 
 ### Phase 2.1 — Adotar `built.url`
@@ -679,7 +679,7 @@ adicionado.
 
 ## Apêndice B — Comandos de verificação padrão
 
-Plugin (`D:\git\opencode-anthropic-fix`):
+Plugin (`<repo-root>`):
 
 ```
 npm test            # suite completa (~13s+, inclui worker/sync-watcher)
@@ -687,7 +687,7 @@ npx vitest run <nome>
 npm run lint ; npm run format:check
 ```
 
-Pacote (`D:\git\claude-code-wire-compat`):
+Pacote (`..\claude-code-wire-compat`):
 
 ```
 npm test ; npm run typecheck ; npm run lint
@@ -697,6 +697,6 @@ npm run pack:check ; npm run drift:check ; npm run fixtures:check
 Greps de aceitação (sempre com path absoluto; exemplos):
 
 ```
-rg "CLI_TO_SDK_VERSION|FALLBACK_CLAUDE_CLI_VERSION" D:\git\opencode-anthropic-fix --glob '!node_modules' --glob '!CHANGELOG.md'
-rg "from \"@tormentalabs/claude-code-wire-compat\"" D:\git\opencode-anthropic-fix --glob '!node_modules'
+rg "CLI_TO_SDK_VERSION|FALLBACK_CLAUDE_CLI_VERSION" <repo-root> --glob '!node_modules' --glob '!CHANGELOG.md'
+rg "from \"@tormentalabs/claude-code-wire-compat\"" <repo-root> --glob '!node_modules'
 ```

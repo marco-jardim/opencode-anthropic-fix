@@ -53,7 +53,7 @@ A precise mental model matters because the in-repo agent guidance is partly self
 | What it does      | lets Claude Pro/Max users auth via OAuth, rotates multiple accounts, and **mimics Anthropic's official Claude Code CLI** on the wire so the API accepts requests | mimicry is the crown jewel                                           |
 | Runtime           | Node 18+, ESM `.mjs`, JSDoc types (no TS)                                                                                                                        | one `script/publish.ts` violates this                                |
 | Prod deps         | `@tormentalabs/claude-code-wire-compat`, `xxhash-wasm`                                                                                                           | two                                                                  |
-| On-disk root      | `D:\git\opencode-anthropic-fix`                                                                                                                                  | tooling alias `Claude-anthropic-fix` is a sanitized display artifact |
+| On-disk root      | `<repo-root>`                                                                                                                                                    | tooling alias `Claude-anthropic-fix` is a sanitized display artifact |
 
 > ⚠️ **Naming hazard for agents.** The repo's own sanitization rule (`OpenCode` → `Claude Code` in
 > the _system prompt sent to Anthropic_) has leaked into the agent-facing context: `AGENTS.md` shows

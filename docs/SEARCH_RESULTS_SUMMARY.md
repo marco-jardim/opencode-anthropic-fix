@@ -1,6 +1,6 @@
 # System Prompt Search Results Summary
 
-**Directory:** `D:\git\opencode-anthropic-fix\tmp\src88\src`  
+**Directory:** `tmp\src88\src`  
 **Date:** 2026-04-01
 
 ## Overview
@@ -13,7 +13,7 @@ Comprehensive scan of TypeScript source files for system prompt-related content.
 
 ### Main Identity Variations (constants/system.ts)
 
-Located in: **D:\git\opencode-anthropic-fix\tmp\src88\src\constants\system.ts** (Lines 10-18)
+Located in: **tmp\src88\src\constants\system.ts** (Lines 10-18)
 
 Three identity prefixes used depending on runtime context:
 
@@ -44,14 +44,14 @@ Three identity prefixes used depending on runtime context:
 
 ### Alternative Identity (prompts.ts, Line 452)
 
-**Location:** `D:\git\opencode-anthropic-fix\tmp\src88\src\constants\prompts.ts:452`
+**Location:** `tmp\src88\src\constants\prompts.ts:452`
 
 - Used when `process.env.CLAUDE_CODE_SIMPLE` is truthy
 - Simple format with CWD and date: `"You are Claude Code, Anthropic's official CLI for Claude.\n\nCWD: ${getCwd()}\nDate: ${getSessionStartDate()}"`
 
 ### Interactive Agent Identity (prompts.ts, Line 180)
 
-**Location:** `D:\git\opencode-anthropic-fix\tmp\src88\src\constants\prompts.ts:180`
+**Location:** `tmp\src88\src\constants\prompts.ts:180`
 
 ```
 "You are an interactive agent that helps users [according to output style / with software engineering tasks].
@@ -64,7 +64,7 @@ Use the instructions below and the tools available to you to assist the user."
 
 ### Main System Prompt Builder
 
-**File:** `D:\git\opencode-anthropic-fix\tmp\src88\src\constants\prompts.ts:444-914`
+**File:** `tmp\src88\src\constants\prompts.ts:444-914`
 
 **Function:** `getSystemPrompt(tools, model, additionalWorkingDirectories, mcpClients)`
 
@@ -92,7 +92,7 @@ The system prompt is built from modular sections using the `systemPromptSection(
 
 ### System Prompt Type Definition
 
-**File:** `D:\git\opencode-anthropic-fix\tmp\src88\src\utils\systemPromptType.ts`
+**File:** `tmp\src88\src\utils\systemPromptType.ts`
 
 Branded type for type safety:
 
@@ -108,7 +108,7 @@ export type SystemPrompt = readonly string[] & {
 
 ### Attribution/Billing Header
 
-**File:** `D:\git\opencode-anthropic-fix\tmp\src88\src\constants\system.ts:73-95`
+**File:** `tmp\src88\src\constants\system.ts:73-95`
 
 **Function:** `getAttributionHeader(fingerprint: string)`
 
@@ -127,7 +127,7 @@ x-anthropic-billing-header: cc_version=${version}.${fingerprint}; cc_entrypoint=
 
 **References in codebase:**
 
-- Lines 339, 376, 418 in `D:\git\opencode-anthropic-fix\tmp\src88\src\utils\api.ts` - blocking/parsing logic
+- Lines 339, 376, 418 in `tmp\src88\src\utils\api.ts` - blocking/parsing logic
 - Multiple references in `cli/print.ts` (lines 2721, etc.) with threading comments
 - 103 total matches for "billing" or "Billing" across the codebase
 
@@ -135,7 +135,7 @@ x-anthropic-billing-header: cc_version=${version}.${fingerprint}; cc_entrypoint=
 
 ## 4. PROACTIVE/AUTONOMOUS AGENT MODE
 
-**File:** `D:\git\opencode-anthropic-fix\tmp\src88\src\constants\prompts.ts:466-489`
+**File:** `tmp\src88\src\constants\prompts.ts:466-489`
 
 When `feature('PROACTIVE')` or `feature('KAIROS')` is enabled:
 
@@ -159,7 +159,7 @@ Simplified sections:
 
 ## 5. COORDINATOR/ORCHESTRATION MODE
 
-**File:** `D:\git\opencode-anthropic-fix\tmp\src88\src\coordinator\coordinatorMode.ts:116`
+**File:** `tmp\src88\src\coordinator\coordinatorMode.ts:116`
 
 Alternative orchestration identity:
 
@@ -171,7 +171,7 @@ Alternative orchestration identity:
 
 ## 6. SYSTEM PROMPT SECTIONS MANAGEMENT
 
-**File:** `D:\git\opencode-anthropic-fix\tmp\src88\src\constants\systemPromptSections.ts`
+**File:** `tmp\src88\src\constants\systemPromptSections.ts`
 
 ### Section Types:
 
@@ -246,7 +246,7 @@ Includes:
 
 ## 9. API REQUEST BUILDING
 
-**File:** `D:\git\opencode-anthropic-fix\tmp\src88\src\services\api\claude.ts:1370-1379`
+**File:** `tmp\src88\src\services\api\claude.ts:1370-1379`
 
 ### System Prompt Processing:
 
@@ -269,7 +269,7 @@ Includes:
 
 ## 11. CYBER RISK INSTRUCTION
 
-**File:** `D:\git\opencode-anthropic-fix\tmp\src88\src\constants\cyberRiskInstruction.ts`
+**File:** `tmp\src88\src\constants\cyberRiskInstruction.ts`
 
 Imported and included in:
 

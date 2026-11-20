@@ -10,8 +10,8 @@
 
 **Repos in scope:**
 
-- `D:\git\opencode-anthropic-fix` (plugin) — edits to `index.mjs`, `lib/config.mjs`, new tests.
-- `D:\git\opencode` (fork) — edits to `packages/opencode/src/session/*.ts`, `packages/opencode/src/provider/transform.ts`, `packages/opencode/src/config/config.ts`.
+- `<repo-root>` (plugin) — edits to `index.mjs`, `lib/config.mjs`, new tests.
+- `..\opencode` (fork) — edits to `packages/opencode/src/session/*.ts`, `packages/opencode/src/provider/transform.ts`, `packages/opencode/src/config/config.ts`.
 
 ---
 

@@ -16,8 +16,8 @@
 
 **Repos in scope:**
 
-- `D:\git\opencode` — `packages/opencode/src/session/compaction.ts` (B1), `packages/opencode/src/session/system.ts` (B2), `packages/opencode/src/session/prompt.ts:1490` (B2 callsite).
-- `D:\git\opencode-anthropic-fix` — new `lib/rolling-summarizer.mjs` (B3), plugin trigger registration.
+- `..\opencode` — `packages/opencode/src/session/compaction.ts` (B1), `packages/opencode/src/session/system.ts` (B2), `packages/opencode/src/session/prompt.ts:1490` (B2 callsite).
+- `<repo-root>` — new `lib/rolling-summarizer.mjs` (B3), plugin trigger registration.
 
 ---
 
@@ -25,8 +25,8 @@
 
 **Files:**
 
-- Modify: `D:\git\opencode\packages\opencode\src\session\compaction.ts:31-123` (constants + `prune` loop).
-- Create test: `D:\git\opencode\packages\opencode\test\session\prune-per-tool.test.ts`.
+- Modify: `..\opencode\packages\opencode\src\session\compaction.ts:31-123` (constants + `prune` loop).
+- Create test: `..\opencode\packages\opencode\test\session\prune-per-tool.test.ts`.
 
 **Why this matters:** Today's `prune` pipeline has two constants: `PRUNE_MINIMUM = 20_000` (only prune if at least this much would be freed) and `PRUNE_PROTECT = 40_000` (protect the most recent 40k tokens of tool output from pruning). For sessions that spam Grep/Read/Glob, the 40k protection window is too generous — those outputs are trivially reproducible (re-run the search), so freeing them earlier is pure upside. Bash/Edit/Write outputs, by contrast, may represent non-idempotent state (executed commands, diffs that were applied) and should keep the 40k floor.
 
@@ -34,7 +34,7 @@
 
 - [ ] **B1.1: Write the failing test**
 
-Create `D:\git\opencode\packages\opencode\test\session\prune-per-tool.test.ts`. Import patterns and style should match `compaction.test.ts` in the same directory (use `testEffect`, `Instance`, `Session`, `Plugin`, etc.).
+Create `..\opencode\packages\opencode\test\session\prune-per-tool.test.ts`. Import patterns and style should match `compaction.test.ts` in the same directory (use `testEffect`, `Instance`, `Session`, `Plugin`, etc.).
 
 Assertion shape: build a session whose recent tool output stack is:
 
@@ -103,7 +103,7 @@ Run: `bun test test/session/` — expect all tests pass except the pre-existing 
 - [ ] **B1.6: Commit on branch `phase-b-b1-per-tool-prune`**
 
 ```bash
-cd D:/git/opencode
+cd ../opencode
 git checkout -b phase-b-b1-per-tool-prune
 git add packages/opencode/src/session/compaction.ts packages/opencode/test/session/prune-per-tool.test.ts
 git commit -m "feat(session): per-tool-class prune thresholds
@@ -122,9 +122,9 @@ Phase B work tracked in opencode-anthropic-fix/docs/plans/
 
 **Files:**
 
-- Modify: `D:\git\opencode\packages\opencode\src\session\system.ts` — turn `environment()` into a memoized-per-session function, with an invalidation hook.
-- Modify: `D:\git\opencode\packages\opencode\src\session\prompt.ts:1490` — ensure each session uses a cached env block instead of re-computing per request.
-- Create test: `D:\git\opencode\packages\opencode\test\session\env-snapshot.test.ts`.
+- Modify: `..\opencode\packages\opencode\src\session\system.ts` — turn `environment()` into a memoized-per-session function, with an invalidation hook.
+- Modify: `..\opencode\packages\opencode\src\session\prompt.ts:1490` — ensure each session uses a cached env block instead of re-computing per request.
+- Create test: `..\opencode\packages\opencode\test\session\env-snapshot.test.ts`.
 
 **Why this matters:** `sys.environment(model)` runs every outbound request and embeds `Today's date: ${new Date().toDateString()}`. Within a day this is stable, but a session that spans midnight rewrites the env block → one cache invalidation (on an already-hot prefix) = the expensive part of the prefix gets re-billed. When future fields land (git branch, open files), the stability requirement becomes critical.
 
@@ -185,7 +185,7 @@ bun test test/session/
 - [ ] **B2.6: Commit on branch `phase-b-b2-env-snapshot`**
 
 ```bash
-cd D:/git/opencode
+cd ../opencode
 git checkout -b phase-b-b2-env-snapshot
 git add packages/opencode/src/session/system.ts packages/opencode/src/session/prompt.ts packages/opencode/test/session/env-snapshot.test.ts
 # include any /refresh callsite file touched in B2.4
@@ -198,9 +198,9 @@ git commit -m "feat(session): cache env snapshot per session, invalidate on /ref
 
 **Files:**
 
-- Create: `D:\git\opencode-anthropic-fix\lib\rolling-summarizer.mjs`.
-- Modify: `D:\git\opencode-anthropic-fix\index.mjs` — register the plugin hook for `experimental.session.compacting` if not already wired.
-- Test: `D:\git\opencode-anthropic-fix\test\rolling-summarizer.test.mjs`.
+- Create: `lib\rolling-summarizer.mjs`.
+- Modify: `index.mjs` — register the plugin hook for `experimental.session.compacting` if not already wired.
+- Test: `test\rolling-summarizer.test.mjs`.
 
 **Why this matters:** Opencode's built-in compaction uses the session's own model + a SessionSummary agent. This works but has two issues: (a) a full Opus-4-7 pass is expensive, (b) it's non-deterministic — summaries drift across runs and the resulting cache is re-broken each compaction. We want a Haiku-based summarizer with `temperature: 0`, fixed template, no timestamps, no non-determinism sources — so two runs over the same messages produce byte-identical output. That way the post-compaction prefix hashes to the same value as the last time we compacted at this boundary, preserving whatever cache still lives server-side.
 
@@ -281,7 +281,7 @@ All 1008+ tests should still pass.
 - [ ] **B3.5: Commit on branch `phase-b-b3-rolling-summarizer` (plugin)**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git checkout -b phase-b-b3-rolling-summarizer
 git add lib/rolling-summarizer.mjs index.mjs test/rolling-summarizer.test.mjs
 git commit -m "feat(summarizer): deterministic Haiku rolling summary for compaction

@@ -1,7 +1,7 @@
 # Mimese/Fingerprint Fidelity Analysis - Code Extraction
 
 **Generated:** 2026-04-07 (updated 2026-04-14 for v2.1.107 changes)  
-**File:** D:\git\opencode-anthropic-fix\index.mjs  
+**File:** index.mjs  
 **Scope:** All functions related to HTTP header composition, system prompt building, metadata construction, and signature emulation for Claude Code mimicry.
 
 > **v2.1.107 NOTE (corrected):** In the **compiled Bun binary** distribution, `cch` was observed to be computed dynamically via `xxHash64(serializedBody, 0x6E52736AC806831E) & 0xFFFFF` → 5-hex-char hash, overwriting `"cch=00000"` in the serialized body bytes. **The plugin does NOT replicate this.** The plugin emits `cch=00000` as a static literal, and the xxHash machinery (`xxhash-wasm`, `computeAndReplaceCCH()`) has been removed from this repository — no such function exists in `index.mjs` or `lib/`. The dynamic computation lives in the compiled Bun binary, which is a _different distribution path_ from the JS bundle this plugin mimics; the JS bundle emits the static placeholder (see `lib/mimicry/system-prompt.mjs:118,140`). The section below is retained as reverse-engineering history, not as a description of plugin behavior.
@@ -893,7 +893,7 @@ function buildRequestHeaders(
 
 ### 3.1 mimese-http-header-system-prompt.md
 
-**Status:** Present at `D:\git\opencode-anthropic-fix\docs\mimese-http-header-system-prompt.md` (594 lines)
+**Status:** Present at `docs\mimese-http-header-system-prompt.md` (594 lines)
 
 **Key Sections:**
 
@@ -911,7 +911,7 @@ function buildRequestHeaders(
 
 ### 3.2 DIVERGENCE_ANALYSIS.md
 
-**Status:** Present at `D:\git\opencode-anthropic-fix\DIVERGENCE_ANALYSIS.md` (546 lines)
+**Status:** Present at `DIVERGENCE_ANALYSIS.md` (546 lines)
 
 **Key Findings:**
 
@@ -933,7 +933,7 @@ function buildRequestHeaders(
 
 ### 3.3 CODE_COMPARISON_REFERENCE.md
 
-**Status:** Present at `D:\git\opencode-anthropic-fix\CODE_COMPARISON_REFERENCE.md` (497 lines)
+**Status:** Present at `CODE_COMPARISON_REFERENCE.md` (497 lines)
 
 **Content:** Side-by-side comparison of real Claude Code implementation vs plugin:
 

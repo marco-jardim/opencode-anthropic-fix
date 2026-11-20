@@ -1130,7 +1130,7 @@ describe("fetch interceptor", () => {
     async (_role, extraHeaders, maxTokens, messageCount) => {
       // The live layout of the refused request's volatile block: MCP instructions,
       // a project instruction file, the date, the environment, the worktree hint.
-      const cwd = "D:\\git\\claude-code-wire-compat";
+      const cwd = "C:\\work\\claude-code-wire-compat";
       const liveVolatile = [
         "<mcp_instructions>\nUse the docs server for library questions.\n</mcp_instructions>",
         `Instructions from: ${cwd}\\AGENTS.md`,

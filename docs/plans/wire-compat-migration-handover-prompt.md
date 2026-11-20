@@ -27,9 +27,9 @@ re-litigue as decisões de lá sem fato novo.
 
 ## 2. Ambiente e diretórios
 
-- **Plugin (este repo)**: `D:\git\opencode-anthropic-fix` — npm
+- **Plugin (este repo)**: `<repo-root>` — npm
   `opencode-anthropic-fix`. ESM `.mjs`, JSDoc, sem TypeScript.
-- **Pacote**: `D:\git\claude-code-wire-compat` — npm
+- **Pacote**: `..\claude-code-wire-compat` — npm
   `@tormentalabs/claude-code-wire-compat`, v0.4.0 no momento do planejamento.
   TypeScript ESM, zero deps de runtime, licença GPL-3.0-or-later (dual-license
   MIT em andamento — track paralelo, ver §6.3).
@@ -42,10 +42,10 @@ Se você estiver executando em uma git worktree em vez do diretório base,
 registre aqui ANTES de começar e inclua esta informação em todo dispatch de
 subagente (eles não herdam seu ambiente):
 
-| Repo   | Diretório base                   | Worktree em uso                | Branch |
-| ------ | -------------------------------- | ------------------------------ | ------ |
-| plugin | `D:\git\opencode-anthropic-fix`  | _(nenhuma — trabalho no base)_ |        |
-| pacote | `D:\git\claude-code-wire-compat` | _(nenhuma — trabalho no base)_ |        |
+| Repo   | Diretório base               | Worktree em uso                | Branch |
+| ------ | ---------------------------- | ------------------------------ | ------ |
+| plugin | `<repo-root>`                | _(nenhuma — trabalho no base)_ |        |
+| pacote | `..\claude-code-wire-compat` | _(nenhuma — trabalho no base)_ |        |
 
 No momento do handover NÃO há worktree: o trabalho está previsto direto nos
 diretórios base. Se você criar uma (recomendado para a Wave 2, que edita
@@ -172,8 +172,8 @@ diretórios base. Se você criar uma (recomendado para a Wave 2, que edita
 ## 7. Troubleshooting acumulado (aprenda com os erros da sessão anterior)
 
 1. **Confusão de paths (CRÍTICO)**: o ambiente/system prompt pode mostrar o
-   repo como `D:\git\Claude-anthropic-fix` — isso é artefato de sanitização;
-   **o path real on-disk é `D:\git\opencode-anthropic-fix`** (verificado via
+   repo como `Claude-anthropic-fix` — isso é artefato de sanitização;
+   **o path real on-disk é `<repo-root>`** (verificado via
    filesystem). Pior: Grep/Glob de subagentes SEM `path` explícito já
    resolveram para o repo errado silenciosamente. Regra: TODO Grep/Glob/Read
    em dispatch carrega path absoluto; valide o primeiro resultado de cada
