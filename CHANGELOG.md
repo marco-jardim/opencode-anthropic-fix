@@ -4,6 +4,25 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`OPENCODE_ANTHROPIC_DISABLE_FAST_MODE` was inverted.** `=0`, `false` or `no` disabled fast mode and `=1` did not. It
+  is now a real kill switch: `1`, `true` or `yes` (case- and whitespace-insensitive) turn fast mode off, and `=0` no
+  longer disables it. With the switch on, neither `fast_mode` nor `token_economy.fast_mode_auto` applies, a host-sent
+  `speed: "fast"` is deleted, and `fast-mode-2026-02-01` is dropped from the host's `anthropic-beta` header, from
+  `custom_betas` and from the legacy forge. With signature emulation off nothing changes (passthrough).
+- **A host-sent `speed: "fast"` is now dropped on ineligible models and under the switch.** With emulation on, `speed`
+  from the host follows the same eligibility as the plugin's own fast mode (catalogue `fast_mode` capability, plus
+  Opus 4.6/4.7 with `fast_mode_legacy_models`); on any other model, under the kill switch, or while the account's fast
+  pool is cooling down it is removed, together with its beta (the wire library composes the beta from `speed` with no
+  per-model check). A fast-mode beta on the host header without `speed` in the body is no longer rescued. The fast-pool
+  429 fallback therefore retries without `speed` and without the beta even when the host sent `speed`.
+- `/anthropic set fast` no longer says "Opus 4.6 only"; the toast lists the catalogue's fast-mode models (and Opus
+  4.6/4.7 only with `fast_mode_legacy_models`).
+- `lib/diagnose.mjs` listed environment variables without their `OPENCODE_ANTHROPIC_` / `CLAUDE_CODE_` prefix (for
+  example `DISABLE_FAST_MODE`, `DISABLE_ADAPTIVE_THINKING`), so the diagnostic bundle never showed them when set. The
+  names now match the code that reads them.
+
 ### Documentation
 
 - Refreshed documentation after 2.3.0 so it matches the code: the wire-compat provenance and rollback procedure

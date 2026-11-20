@@ -1294,8 +1294,25 @@ This enables server-side fast-mode processing. `transformRequestBody`
   (`requestBody.includes('"speed":"fast"')`), so header and body cannot drift.
 
 There is no longer a pre-transform beta call site: `computedBetaHeader` and the
-session beta latch it fed were removed (see §11.6). Can be disabled via
-`OPENCODE_ANTHROPIC_DISABLE_FAST_MODE=1`.
+session beta latch it fed were removed (see §11.6).
+
+**Kill switch.** `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE` set to `1`, `true` or `yes`
+(case- and whitespace-insensitive, `isTruthyEnv`) disables fast mode entirely; `0`,
+`false`, `no`, an empty value or unset leave it as configured (it used to be inverted,
+so `=0` disabled it). With the switch on, `transformRequestBody` applies neither
+`fast_mode` nor `token_economy.fast_mode_auto` and deletes a host-sent `speed:"fast"`;
+`buildAdditionalBetas` (adapter path) drops `fast-mode-2026-02-01` from `custom_betas`
+and from the betas rescued off the host's `anthropic-beta` header; the legacy forge
+(`buildAnthropicBetaHeader`) drops it from the lockstep push, the incoming passthrough
+and `custom_betas`. With signature emulation off the request is passed through
+untouched and the switch has no effect.
+
+**Host-sent `speed`.** With emulation on, a `speed:"fast"` the host sent is subject to
+the same eligibility as one the plugin injects: it is deleted when the model is not
+eligible (see below) or while the account's fast pool is cooling down (which is what
+makes the fast-pool 429 fallback retry at standard speed even when the host sent
+`speed`). Without `speed:"fast"` in the transformed body, a fast-mode beta arriving on
+the host's header is not rescued, so the beta never travels without its body half.
 
 Eligibility follows the **catalogue**: a model is eligible when the pinned profile's
 catalogue entry carries the `fast_mode` capability (`supportsFastModeWire`,
