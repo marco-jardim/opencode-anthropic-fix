@@ -47,7 +47,7 @@ and the pinned `@ai-sdk/anthropic` 3.0.111 provider for v2.
   `storage`, `refresh-lock`, `cc-credentials`, `account-state`. Each has a
   colocated `*.test.mjs`.
 - `test/` — extra suites organized as `phase1..phase4/` and
-  `conformance/regression.test.mjs` (40 tests validating mimicry against
+  `conformance/regression.test.mjs` (80+ tests validating mimicry against
   `docs/claude-code-reverse-engineering.md`). Do not delete these when
   refactoring mimicry code — they are the contract.
 - `scripts/build.mjs` — esbuild bundler (ESM, node20, `node:*` external only).
@@ -176,7 +176,7 @@ Start from evidence in the host log, not from the user's pasted snippet:
 - Tests mock `node:fs` and `node:https` extensively. Mock **before** importing
   the module under test (see existing patterns in `cli.test.mjs`,
   `index.test.mjs`).
-- `test/conformance/regression.test.mjs` has 529 backoff tests that sleep 2-3s
+- `test/conformance/regression.test.mjs` has the HTTP 529 (overloaded) backoff tests that sleep 2-3s
   each. Not flaky, just slow.
 - `test/phase*/` directories are feature-specific integration tests; keep them
   named after the feature they guard.
