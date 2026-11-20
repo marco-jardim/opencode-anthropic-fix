@@ -532,6 +532,13 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
   // sent by your client always wins.
   "default_effort": "medium",
 
+  // Fast mode (speed: "fast" plus the fast-mode beta) on catalogue models that support
+  // it. Off by default, and so is token_economy.fast_mode_auto. On subscription accounts
+  // fast mode is billed to usage credits, not to the plan: without credits the API
+  // answers 429 "Usage credits are required for fast mode." and the plugin retries the
+  // turn at standard speed. Also: /anthropic set fast on|off.
+  "fast_mode": false,
+
   // Keep fast mode available on Opus 4.6/4.7 even when the model catalogue does not
   // advertise it. Opt-in.
   "fast_mode_legacy_models": false,

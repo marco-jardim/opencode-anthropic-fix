@@ -34,6 +34,10 @@ All notable changes to `opencode-anthropic-fix` are documented here.
   and a row in the environment-variable table for each documented variable that was missing. `CLAUDE.md` no longer
   describes `index.mjs` as the runtime or lists a dependency the package does not have; `AGENTS.md` carries the current
   regression-test count and names the HTTP 529 backoff tests unambiguously.
+- Fast mode is verified as functional on the wire and stays off by default (`fast_mode`, `token_economy.fast_mode_auto`
+  and `fast_mode_legacy_models` are `false`, now pinned by a test). README documents `fast_mode`: on subscription
+  accounts it is billed to usage credits, and without credits the API answers 429 "Usage credits are required for fast
+  mode." and the plugin retries at standard speed.
 
 ## [2.3.0] — 2026-11-20
 
