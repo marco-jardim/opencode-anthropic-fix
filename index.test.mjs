@@ -5608,6 +5608,9 @@ describe("runtime integration: session key, refused scope, native 1M, pinned ver
     adaptive_context: { ...DEFAULT_CONFIG.adaptive_context, enabled: false },
     custom_betas: [],
     cache_policy: { ...DEFAULT_CONFIG.cache_policy, boundary_marker: true },
+    // DEFAULT_CONFIG.preconnect.enabled is true; the file-level config mock turns it off, and so must this
+    // config, or the loader fires a fire-and-forget HEAD (no headers, no body) through the fetch mock.
+    preconnect: { ...DEFAULT_CONFIG.preconnect, enabled: false },
   });
   const useConfig = (cfg) => {
     vi.mocked(loadConfig).mockReturnValue(cfg);
@@ -5655,6 +5658,8 @@ describe("runtime integration: session key, refused scope, native 1M, pinned ver
       .get("anthropic-beta")
       .split(",")
       .map((s) => s.trim());
+  // Select the Messages API calls by URL; never assume the first fetch is the request under test.
+  const messageCalls = () => mockFetch.mock.calls.filter((call) => String(call[0]).includes("/v1/messages"));
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -5666,8 +5671,9 @@ describe("runtime integration: session key, refused scope, native 1M, pinned ver
     const fn = await setupFetchFn(makeClient());
     mockFetch.mockResolvedValueOnce(ok200());
     await send(fn);
-    expect(mockFetch.mock.calls[0][1].body).toContain('"scope":"global"');
-    expect(betasOf(mockFetch.mock.calls[0])).toContain(SCOPE_BETA);
+    expect(messageCalls()).toHaveLength(1);
+    expect(messageCalls()[0][1].body).toContain('"scope":"global"');
+    expect(betasOf(messageCalls()[0])).toContain(SCOPE_BETA);
   });
 
   it("a latched rejection of the scope beta drops scope:global from the retry body", async () => {
@@ -5678,11 +5684,12 @@ describe("runtime integration: session key, refused scope, native 1M, pinned ver
 
     await send(fn);
 
-    expect(mockFetch.mock.calls).toHaveLength(2);
-    expect(betasOf(mockFetch.mock.calls[0])).toContain(SCOPE_BETA);
-    expect(mockFetch.mock.calls[0][1].body).toContain('"scope":"global"');
-    expect(betasOf(mockFetch.mock.calls[1])).not.toContain(SCOPE_BETA);
-    expect(mockFetch.mock.calls[1][1].body).not.toContain('"scope":"global"');
+    const calls = messageCalls();
+    expect(calls).toHaveLength(2);
+    expect(betasOf(calls[0])).toContain(SCOPE_BETA);
+    expect(calls[0][1].body).toContain('"scope":"global"');
+    expect(betasOf(calls[1])).not.toContain(SCOPE_BETA);
+    expect(calls[1][1].body).not.toContain('"scope":"global"');
   });
 
   it("round-robin with boundary_marker emits no scope in the body and no scope beta", async () => {
@@ -5690,8 +5697,9 @@ describe("runtime integration: session key, refused scope, native 1M, pinned ver
     const fn = await setupFetchFn(makeClient());
     mockFetch.mockResolvedValueOnce(ok200());
     await send(fn);
-    expect(mockFetch.mock.calls[0][1].body).not.toContain('"scope"');
-    expect(betasOf(mockFetch.mock.calls[0])).not.toContain(SCOPE_BETA);
+    expect(messageCalls()).toHaveLength(1);
+    expect(messageCalls()[0][1].body).not.toContain('"scope"');
+    expect(betasOf(messageCalls()[0])).not.toContain(SCOPE_BETA);
   });
 
   it("passes the session key (x-opencode-session, then x-session-id, then the plugin session) to transformRequestBody", async () => {
@@ -5711,8 +5719,11 @@ describe("runtime integration: session key, refused scope, native 1M, pinned ver
     expect(keys[2]).not.toBe("");
     expect(keys[2]).toBe(vi.mocked(transformRequestBody).mock.calls[2][2].sessionId);
     // The host's session headers still never reach the wire.
-    expect(mockFetch.mock.calls[0][1].headers.get("x-opencode-session")).toBeNull();
-    expect(mockFetch.mock.calls[0][1].headers.get("x-session-id")).toBeNull();
+    expect(messageCalls()).toHaveLength(3);
+    for (const call of messageCalls()) {
+      expect(call[1].headers.get("x-opencode-session")).toBeNull();
+      expect(call[1].headers.get("x-session-id")).toBeNull();
+    }
   });
 
   it("an npm-fetched claude-code version never changes the user agent or cc_version", async () => {
@@ -6253,6 +6264,9 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
     idle_refresh: { ...DEFAULT_CONFIG.idle_refresh, enabled: false },
     adaptive_context: { ...DEFAULT_CONFIG.adaptive_context, enabled: false },
     custom_betas: ["afk-mode-2026-01-31"],
+    // The file-level config mock disables the preconnect HEAD; keep it off here too so no
+    // test depends on mockReset() racing the loader's fire-and-forget fetch.
+    preconnect: { ...DEFAULT_CONFIG.preconnect, enabled: false },
   };
 
   let fetchFn;
