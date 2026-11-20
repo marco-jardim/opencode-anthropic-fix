@@ -23,7 +23,7 @@
 > segments). The plugin-side work that did not need the new profile is in §3; the repoint, session correlation and
 > per-turn effort are in §5, "Implemented". It requires `@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later
 > (a prerelease; see §6). The `check:invariants` gate compares this document (2.1.329) with the bound profile and
-> passes.
+> passes. The live wire validation of 2026-11-20, its two fixes and the divergences it left are in §7.
 >
 > **Evidence tags** reuse the library's own convention: `[BIN]` transcribed from the binary, `[DER]` derived from
 > `[BIN]` under stated default conditions, `[UNR]` located but unresolved, `[LIVE]` observed in a local
@@ -204,7 +204,8 @@ The genuine 2.1.329 shared static block opens with "You are an agent working wit
 using your own judgment along the way." (lib §9.4). The rest of the static prompt is byte-identical to 2.1.280.
 The plugin's host system block (`lib/mimicry/system-prompt.mjs`, `lib/system-prompt-empowerment.mjs`) is **host
 content placed after the identity block**; per the library's evidence it is not checked server-side, so these
-changes are neutral for the fingerprint and exist for correctness and cache stability.
+changes are neutral for the fingerprint and exist for correctness and cache stability. One exception was found live:
+OpenCode's env preamble in that content is read by the server, and it must be rewritten wherever it sits (§7.1).
 
 1. **Segment-aware rewrite** (`system_prompt.rewrite_scope`, default `base`). The OpenCode → Claude Code branding
    rewrite applies only to the opencode base prompt and the `<env>` header. It never touches file paths, URLs,
@@ -310,7 +311,8 @@ false` keeps host-driven changes only.
 - **`cch` is not reproducible.** The genuine client sends a per-request 5-hex value substituted below the JS; the
   algorithm is not recoverable from the bundle (lib §4.1, `[UNR]`). The plugin sends `cch=00000` and is accepted,
   but the request is distinguishable. The library carries an optional `cch` seam; the plugin deliberately leaves it
-  unset (no host source), so the library default goes out.
+  unset (no host source), so the library default goes out. A replay of the genuine body with `cch=00000` was also
+  accepted (200, §7.4).
 - **Residual transport signal.** `Content-Length`, `Host`, `Connection` (genuine: `Connection: close`) and header
   case and position on the OAuth token calls are set by the runtime, not by `fetch` options. The same holds for the
   main request: the library returns header pairs in the genuine capitalisation and order, but the plugin hands them to
@@ -329,3 +331,74 @@ false` keeps host-driven changes only.
   always sends the catalogue default.
 - **No genuine capture of** the idle-compaction, cache-keepalive or resumption features; they are off by default
   upstream and `[BIN]`-only.
+
+---
+
+## 7. Live validation (2026-11-20)
+
+The plugin on this branch was run as `opencode serve` behind mitmproxy with an OAuth account, three turns per model
+(`hello`, `quanto e 2+2?` and a long question), on Sonnet 5.5 and Opus 5.5. The wire stays pinned to the 2.1.329
+profile (§5). The validation found one refusal trigger and one correlation defect, both fixed on this branch, and the
+divergences of §7.4. No identifier, token, account value or local path from these captures appears here.
+
+### 7.1 Billing classifier trigger (fixed in `d12f2d5`)
+
+- **Symptom.** With commit `3d57144`, main requests got HTTP 400 `You're out of extra usage`. The organization has
+  extra usage disabled (`overage-disabled-reason: org_level_disabled`), and the server routed the requests to extra
+  usage, that is, it classified them as third-party.
+- **Bisection.** The captured request was replayed with the same OAuth token as the genuine client, removing or
+  replacing one part at a time.
+  - The sole trigger was OpenCode's literal env preamble in the volatile system block:
+    `Here is some useful information about the environment you are running in:`.
+  - With only that sentence replaced by the Claude Code wording
+    `Here is useful information about the environment you are running in:`, the identical request returned 200.
+  - Not triggers: OpenCode brand mentions, `opencode_console` and paths (13 occurrences in `system[2]` passed), the
+    tools, the billing fields, `context_management` and `diagnostics`, and the model.
+- **Root cause and fix.** The segmenter (`segmentSystemText`, `lib/mimicry/system-prompt.mjs`) treated the preamble as
+  instruction-file text when it followed an `Instructions from:` file, so the `rewrite_scope: "base"` rewrite (§4)
+  skipped it. The preamble on a line of its own, directly followed by the `<env>` line, now opens an env segment even
+  inside an instruction file. A table-driven test over host-identifying phrases × block positions × request roles
+  guards it (`lib/mimicry/system-prompt.test.mjs`).
+- **Open decision.** An instruction file that merely quotes the preamble (without a following `<env>`) is left
+  unchanged by design. It remains a possible trigger (divergence row 21).
+- **Consequence for §4.** Host content after the identity block is not neutral as a whole: this one literal is read by
+  the server. Brand mentions and paths were not.
+
+### 7.2 Title requests (fixed in `262e609`)
+
+The v2 title request was classified `main` and advanced the prompt index: the first typed prompt went out with
+`cc_prompt_index=2`. The runtime now uses the host kind label `x-opencode-request-kind`, which the v2 transport sets on
+each managed request and which is stripped before the wire with the other `x-opencode-*` headers (§3, finding 8).
+Title requests carry the side-query beta and no `cc_prompt_index`, and the first typed prompt is index 1. Their
+request class is still `main` (§7.4).
+
+### 7.3 Results after the fixes
+
+- Sonnet 5.5 and Opus 5.5: all requests returned 200.
+- Billing: `cc_turn_origin=human`, `cc_prompt_index` 1, 2 and 3 on the three turns, `cc_turn_index=1`.
+- Per-turn effort (§5): a `role: "system"` control `{effort: "low"}` before turn 2. On turn 3 the earlier `low`
+  control stays in place and a `{effort: "medium"}` control precedes turn 3. The top-level `output_config.effort`
+  stays `medium`.
+- Prefix stability: the system blocks after the billing block, the tools and all earlier messages are byte-identical
+  between consecutive requests.
+- Cache usage, `cache_read` / `cache_creation` in tokens:
+
+| Model  | Turn 1       | Turn 2     | Turn 3      |
+| ------ | ------------ | ---------- | ----------- |
+| Sonnet | 16062 / 4624 | 20686 / 40 | 20726 / 151 |
+| Opus   | 0 / 20682    | 20682 / 73 | 20755 / 152 |
+
+### 7.4 Remaining divergences against genuine 2.1.329
+
+From the same captures. Each is a row of `docs/mimicry/wire-compat-divergences.md`.
+
+- `Accept-Encoding` is sent second, not last. This comes from the host runtime's `fetch` (row 17).
+- System cache layout: the plugin caches `system[1]` (1h) and `system[2]` (1h, no scope); genuine leaves `system[1]`
+  uncached and gives `system[2]` `scope: global` (row 18).
+- Account-served items are absent by decision (opt-in, §5): `anthropic-dispatch-id`, the `inline-tools`,
+  `advanced-tool-use`, `afk-mode`, `dangerous-tool-use` and `message-threads` betas, and the `safeguards` and `thread`
+  body fields. Genuine sends them for the captured account (row 19).
+- The host adds `web-search-2025-03-05` and `advisor-tool-2026-03-01` at the end of the beta list (rows 2 and 3).
+- Title requests still carry request class `main`. The genuine side-query class value is not established (row 20).
+- `cch=00000` is kept by decision (§6). Genuine sends a computed value; a replay of the genuine body with `cch=00000`
+  was accepted (200) (row 9).

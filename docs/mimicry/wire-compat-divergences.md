@@ -103,6 +103,11 @@ forward from 2.1.233 rather than freshly confirmed.
 | 14  | Prompt and turn index after the first request                     | counted by `lib/session-correlation.mjs` (a typed message with a new fingerprint is a new prompt, anything else a new turn) | whatever the caller supplies                                | **Open** — the increment rule is **inferred**; only the first request (1/1) is attested.                              |
 | 15  | Per-turn effort, first turn                                       | the conversation's first turn never carries a control message; it defines the base effort                                   | passes a control message through verbatim                   | **Open** — plugin policy, inferred from the control message's purpose, not from a capture.                            |
 | 16  | Previous request id and previous message id                       | captured from the response `request-id` header and from the stream, only on a successful main response                      | whatever the caller supplies (`cc_prev_req`, `diagnostics`) | **Open** — the capture point and the shape guards are plugin policy; malformed values are dropped.                    |
+| 17  | `Accept-Encoding` position                                        | sent second, not last; set by the host runtime's `fetch`                                                                    | last (genuine 2.1.329)                                      | **Open** — transport-side, from the host runtime; observed live 2026-11-20.                                           |
+| 18  | System-prompt cache layout                                        | `system[1]` cached (1h); `system[2]` cached (1h, no scope)                                                                  | genuine: `system[1]` uncached, `system[2]` `scope: global`  | **Open** — recorded; observed live 2026-11-20.                                                                        |
+| 19  | Account-served headers, betas and body fields                     | absent by decision (opt-in): `anthropic-dispatch-id`, five betas, `safeguards` and `thread`                                 | genuine sends them for the captured account                 | **Open** — deliberate (opt-in); observed live 2026-11-20, betas listed below.                                         |
+| 20  | Request class on title requests                                   | still `main`                                                                                                                | genuine side-query value not established                    | **Open** — target value unknown; observed live 2026-11-20.                                                            |
+| 21  | Instruction file quoting the host env preamble                    | the file's text verbatim when no `<env>` line follows the phrase                                                            | the caller's system, forwarded verbatim                     | **Open** — by design; it remains a possible billing-classifier trigger.                                               |
 
 Upstream truth for the rows that are still open:
 
@@ -144,6 +149,9 @@ Haiku subagents and side requests; those no longer carry it.
 Because the first two arrive through `additionalBetas` rather than through the package's own composer, they land at the
 END of the header, after every beta the package composed. `BETA_HEADER_GOLDEN` pins that order on both columns as exact
 strings, so a change on either side fails.
+
+The live validation of 2026-11-20 shows the same on the wire: against genuine 2.1.329, the host adds
+`web-search-2025-03-05` and `advisor-tool-2026-03-01` at the end of the beta list.
 
 ### Row 4, in detail
 
@@ -196,6 +204,7 @@ repoint and session correlation.
 - **Row 9, `cch=00000`.** Genuine is a per-request 5-hex value substituted natively over the serialised body; the JS
   writes only `cch=00000`. The plugin leaves the library's optional `cch` input unset (no host source), so the library
   default `00000` goes out. The server accepts it today (the plugin's capture returned 200), but it is distinguishable.
+  On 2026-11-20 a replay of the genuine body with `cch=00000` was also accepted (200). `cch=00000` is kept by decision.
 - **Row 10, library-side shape.** `Accept: application/json`, the genuine body key order, generated
   `context_management` and `diagnostics`, `x-claude-code-request-class` / `x-claude-1p-request-class`,
   `x-claude-code-prompt-id`, `x-claude-code-sandy-plover` and the `cc_turn_origin` / `cc_prompt_index` /
@@ -213,7 +222,33 @@ repoint and session correlation.
   block and before the instruction files so user instructions keep the last word. The package forwards the caller's
   system verbatim, so this is plugin policy. The evidence says host system content is not checked server-side, so
   the change is class (b) neutral: it alters content, not the fingerprint. `system_prompt.empowerment: "off"` and
-  `system_prompt.genuine_opening: false` remove it.
+  `system_prompt.genuine_opening: false` remove it. The live validation of 2026-11-20 found one exception in host
+  system content: OpenCode's env preamble is read by the server (see "Divergences the plugin closed on its own side"
+  and row 21).
+
+### Rows 17 to 21, in detail
+
+Added from the live validation of 2026-11-20 (`opencode serve` behind mitmproxy, OAuth, Sonnet 5.5 and Opus 5.5),
+compared with genuine 2.1.329 on the same captures; analysis
+[`../claude-code-2.1.329-analysis.md`](../claude-code-2.1.329-analysis.md) §7. The same validation adds evidence to
+rows 2, 3 and 9 (see their details above). The wire stays pinned to the 2.1.329 profile.
+
+- **Row 17, `Accept-Encoding` position.** The plugin's requests carry `Accept-Encoding` second; genuine sends it last.
+  It comes from the host runtime's `fetch`, a transport-side difference like row 13.
+- **Row 18, system-prompt cache layout.** The plugin caches `system[1]` (1h) and `system[2]` (1h, no scope). Genuine
+  leaves `system[1]` uncached and gives `system[2]` `scope: global`. Recorded only; nothing on the wire changed.
+- **Row 19, account-served items.** Absent by decision (opt-in): the `anthropic-dispatch-id` header; the
+  `inline-tools`, `advanced-tool-use`, `afk-mode`, `dangerous-tool-use` and `message-threads` betas; and the
+  `safeguards` and `thread` body fields. Genuine sends all of them for the captured account. The server decides
+  enrolment, which the plugin cannot observe (D24 in `MEMORY.md`).
+- **Row 20, request class on title requests.** Since `262e609` title requests are side queries for the session
+  correlation and the beta set (the side-query beta, no `cc_prompt_index`), but they still carry request class `main`.
+  The value the genuine client sends for a side query is not established.
+- **Row 21, an instruction file quoting the host env preamble.** The preamble is rewritten to the Claude Code wording
+  wherever it opens the host's environment, that is, directly followed by the `<env>` line (see "Divergences the
+  plugin closed on its own side"). An instruction file that merely quotes the sentence, with no `<env>` line after it,
+  is left unchanged by design, because instruction files are not rewritten. It remains a possible trigger of the
+  billing classifier; the decision is open.
 
 ## Seams the plugin uses, and what each one keeps alive
 
@@ -315,6 +350,27 @@ These were the plugin's defect, so under the Option A exception they were fixed 
   `isTitleGenerator` is derived in `index.mjs` (before the body transform) from the **pre-transform** body (`_parsedBodyOnce`). By the
   time the transport is built, the title-generator system-prompt swap has already rewritten those blocks, so detecting
   it later would give a false negative and the attribution would be dropped from a turn that must keep it.
+
+- **The host env preamble no longer reaches the wire (`d12f2d5`, live validation of 2026-11-20).** With `3d57144`,
+  main requests went out with OpenCode's literal env preamble in the volatile system block,
+  `Here is some useful information about the environment you are running in:`, and got HTTP 400
+  `You're out of extra usage`: the organization has extra usage disabled
+  (`overage-disabled-reason: org_level_disabled`), and the server routed the requests to extra usage, that is, it
+  classified them as third-party. The captured request was replayed with the same OAuth token as the genuine client,
+  removing or replacing one part at a time. That sentence was the sole trigger: with only it replaced by the Claude
+  Code wording, `Here is useful information about the environment you are running in:`, the identical request
+  returned 200. OpenCode brand mentions, `opencode_console` and paths (13 occurrences in `system[2]` passed), the
+  tools, the billing fields, `context_management` and `diagnostics`, and the model were not triggers. The segmenter
+  (`segmentSystemText`, in `lib/mimicry/system-prompt.mjs`) had treated the preamble as instruction-file text when it
+  followed an `Instructions from:` file; the preamble directly followed by the `<env>` line now opens an env segment
+  wherever it sits. A table-driven test over host-identifying phrases × block positions × request roles guards it
+  (`lib/mimicry/system-prompt.test.mjs`). The quoted case left open by design is row 21.
+
+- **Title requests no longer advance the prompt index (`262e609`).** The v2 title request was classified `main` and
+  advanced the prompt index, so the first typed prompt went out with `cc_prompt_index=2`. The runtime now uses the
+  host kind label `x-opencode-request-kind`, set by the v2 transport and stripped before the wire with the other
+  `x-opencode-*` headers. Title requests carry the side-query beta and no `cc_prompt_index`. The request class that is
+  still `main` is row 20.
 
 ## `/v1/messages/count_tokens` now flows through the package
 

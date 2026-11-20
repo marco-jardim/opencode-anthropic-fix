@@ -9,6 +9,65 @@ Do not edit past entries. Add a new one instead.
 
 ---
 
+## 2026-11-20 — Claude Code 2.1.329 live wire validation: billing-classifier trigger and title side queries (unreleased)
+
+**What triggered it.** With commit `3d57144`, main requests got HTTP 400 `You're out of extra usage`. The organization
+has extra usage disabled (`overage-disabled-reason: org_level_disabled`), so the server had routed the requests to extra
+usage, that is, it classified them as third-party. A live validation followed (`opencode serve` behind mitmproxy, OAuth,
+three turns on Sonnet 5.5 and on Opus 5.5), with the wire still pinned to the 2.1.329 profile (D16, D24). This entry
+records the two fixes it produced (`d12f2d5`, `262e609`), the evidence behind them and the divergences that remain.
+Analysis: `docs/claude-code-2.1.329-analysis.md` §7.
+
+**How the trigger was found.** The captured request was replayed with the same OAuth token as the genuine client,
+removing or replacing one part at a time. The sole trigger was OpenCode's literal env preamble in the volatile system
+block, `Here is some useful information about the environment you are running in:`. With only that sentence replaced
+by the Claude Code wording, `Here is useful information about the environment you are running in:`, the identical
+request returned 200. Not triggers: OpenCode brand mentions, `opencode_console` and paths (13 occurrences in
+`system[2]` passed), the tools, the billing fields, `context_management` and `diagnostics`, and the model.
+
+**Decisions.**
+
+- **D29 — The host env preamble is normalized in every system block, wherever it sits.** Root cause: the segmenter
+  treated the preamble as instruction-file text when it followed an `Instructions from:` file, so the base-scope
+  rewrite (D21) skipped it. The preamble on a line of its own, directly followed by the `<env>` line, now opens an env
+  segment even inside an instruction file (`d12f2d5`, `lib/mimicry/system-prompt.mjs`). A table-driven test over
+  host-identifying phrases × block positions × request roles guards it (`lib/mimicry/system-prompt.test.mjs`). This
+  qualifies D21: host content after the identity block is not neutral as a whole. This one literal is read by the
+  server; brand mentions and paths were not.
+- **D30 — An instruction file that merely quotes the preamble is left unchanged (open decision).** Without a following
+  `<env>` line the phrase is the file's own text, and instruction files are not rewritten (D21). It remains a possible
+  trigger, so the decision stays open.
+- **D31 — Title requests are recognised by the host's request kind.** The v2 title request was classified `main` and
+  advanced the prompt index, so the first typed prompt went out with `cc_prompt_index=2`. The runtime now reads the host
+  kind label `x-opencode-request-kind`, set by the v2 transport and stripped before the wire with the other
+  `x-opencode-*` headers (D23). Title requests carry the side-query beta and no `cc_prompt_index`, and never advance
+  the correlation (`262e609`). Their request class is still `main`: the genuine side-query value is not established.
+
+**Live results after the fixes.** All requests returned 200 on Sonnet 5.5 and Opus 5.5 (turns `hello`,
+`quanto e 2+2?` and a long question). Billing: `cc_turn_origin=human`, `cc_prompt_index` 1, 2 and 3,
+`cc_turn_index=1`. Per-turn effort (D27): a `role: "system"` control `{effort: "low"}` before turn 2; on turn 3 the
+earlier `low` control stays in place and a `{effort: "medium"}` control precedes turn 3; the top-level
+`output_config.effort` stays `medium`. The system blocks after the billing block, the tools and all earlier messages
+are byte-identical between consecutive requests. Cache figures are in the analysis §7.3.
+
+**Also recorded, without a number.**
+
+- `cch=00000` stays by decision. Genuine sends a computed value; a replay of the genuine body with `cch=00000` was
+  accepted (200).
+- Account-served items stay absent by decision (opt-in, D24), although genuine sends them for this account:
+  `anthropic-dispatch-id`, the `inline-tools`, `advanced-tool-use`, `afk-mode`, `dangerous-tool-use` and
+  `message-threads` betas, and the `safeguards` and `thread` body fields.
+- Other observed divergences: `Accept-Encoding` goes second, not last (it comes from the host runtime's `fetch`); the
+  plugin caches `system[1]` (1h) and `system[2]` (1h, no scope), where genuine leaves `system[1]` uncached and gives
+  `system[2]` `scope: global`; the host adds `web-search-2025-03-05` and `advisor-tool-2026-03-01` at the end of the
+  beta list. All of them, and the two above, are rows of `docs/mimicry/wire-compat-divergences.md`.
+
+**What is not done.** The request class of title requests (the genuine value is unknown), the quoted-preamble case
+(D30), the system cache layout, the `Accept-Encoding` position, and the plugin release itself. Nothing here moves the
+emulated version: the wire stays pinned to the profile (D16).
+
+---
+
 ## 2026-11-19 — Claude Code 2.1.329 work: live genuine captures, OAuth correction, plugin changes, repoint and per-turn effort (unreleased)
 
 **What triggered it.** The library's 2.1.329 analysis (`docs/protocol/versions/claude-code-2.1.329-analysis.md` in

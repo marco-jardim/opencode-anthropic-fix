@@ -98,6 +98,17 @@ before this plugin is released. Analysis: `docs/claude-code-2.1.329-analysis.md`
 
 - Microcompact documentation and config comments now say it tracks utilization and shows a toast and injects nothing on
   the wire; the lean-prompt flag name is `tengu_velvet_tide` (was `tengu_velvet_cascade`).
+- **Main requests billed as third-party usage.** OpenCode's env preamble
+  (`Here is some useful information about the environment you are running in:`) stayed in the volatile system block
+  when it followed an `Instructions from:` file, and the server classified those requests as third-party: on an
+  organization with extra usage disabled they failed with HTTP 400 `You're out of extra usage`. The preamble directly
+  followed by the `<env>` line is now rewritten to the Claude Code wording in every system block. An instruction file
+  that merely quotes the sentence is left unchanged by design. Live validation: `docs/claude-code-2.1.329-analysis.md`
+  §7.
+- **Title requests no longer advance the prompt index.** The opencode v2 title request was classified as a main request,
+  so the first typed prompt went out with `cc_prompt_index=2`. The plugin now reads the host's request kind
+  (`x-opencode-request-kind`, stripped before the wire); title requests carry the side-query beta and no
+  `cc_prompt_index`.
 
 ## [2.2.2] — 2026-10-25
 
