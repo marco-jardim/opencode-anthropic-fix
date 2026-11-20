@@ -16,7 +16,7 @@
 
 **Repos in scope:**
 
-- `D:\git\opencode-anthropic-fix` — `index.mjs`, `lib/config.mjs`, new test files.
+- `<repo-root>` — `index.mjs`, `lib/config.mjs`, new test files.
 - No fork changes.
 
 ---
@@ -25,8 +25,8 @@
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\index.mjs:5399-5461` — inline determinism hardening only if the test reveals a gap. Otherwise just the regression test.
-- Create test: `D:\git\opencode-anthropic-fix\test\conformance\context-hint-determinism.test.mjs`.
+- Modify: `index.mjs:5399-5461` — inline determinism hardening only if the test reveals a gap. Otherwise just the regression test.
+- Create test: `test\conformance\context-hint-determinism.test.mjs`.
 
 **Why this matters:** `applyContextHintCompaction` runs on every 422/424 response. If its output drifts byte-for-byte across runs over the same input (timestamps in placeholder text, Set iteration order leaking into a `Set<>` scan, sort-stability on mixed-type keys), the post-MC prefix hashes differently each time → server-side cache for the already-paid prefix dies → cache*creation spikes on every retry. The function \_looks* pure today but there's no guard; C1 installs one.
 
@@ -45,7 +45,7 @@ Required assertions:
 5. **Stats are deterministic**: the `stats.thinkingCleared` and `stats.toolResultsCleared` counts are identical across runs.
 6. **keepRecent boundary**: with `keepRecent=8`, exactly the last 8 tool_result blocks remain untouched; with `keepRecent=0`, all blocks become placeholders; with `keepRecent=100` (> total), none become placeholders.
 
-Run: `cd D:/git/opencode-anthropic-fix && npx vitest run test/conformance/context-hint-determinism.test.mjs` — expect fail if the function isn't exported via `__testing__` yet; otherwise expect all tests pass (the function is already pure; the test just pins it).
+Run: `npx vitest run test/conformance/context-hint-determinism.test.mjs` — expect fail if the function isn't exported via `__testing__` yet; otherwise expect all tests pass (the function is already pure; the test just pins it).
 
 - [ ] **C1.2: Export `applyContextHintCompaction` via `__testing__`**
 
@@ -62,7 +62,7 @@ If any of C1.1's assertions fail (they shouldn't based on code inspection, but v
 - [ ] **C1.4: Verify**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 npx vitest run test/conformance/context-hint-determinism.test.mjs
 npx vitest run
 ```
@@ -72,7 +72,7 @@ All 1027+ tests pass.
 - [ ] **C1.5: Commit on branch `phase-c-c1-context-hint-determinism`**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git checkout -b phase-c-c1-context-hint-determinism
 git add index.mjs test/conformance/context-hint-determinism.test.mjs
 git commit -m "test(context-hint): determinism regression harness
@@ -92,9 +92,9 @@ Phase C work tracked in docs/plans/2026-04-18-phase-c-cc-parity.md."
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\lib\config.mjs:202` — flip default and update JSDoc.
-- Modify: `D:\git\opencode-anthropic-fix\index.mjs` — ensure gating still respects explicit user opt-out.
-- Tests: `D:\git\opencode-anthropic-fix\test\conformance\context-hint-gating.test.mjs` (new).
+- Modify: `lib\config.mjs:202` — flip default and update JSDoc.
+- Modify: `index.mjs` — ensure gating still respects explicit user opt-out.
+- Tests: `test\conformance\context-hint-gating.test.mjs` (new).
 
 **Why this matters:** Real CC sends `context-hint-2026-04-09` for first-party providers on main-thread requests by default. With C1 proving the retry path is deterministic, we can safely enable by default — gaining CC-level efficiency while keeping the existing disable-on-error latching (`contextHintState.disabled`) for servers that 400 the beta. Users who've explicitly set `context_hint: false` in config stay opted out.
 
@@ -113,7 +113,7 @@ Create `test/conformance/context-hint-gating.test.mjs`. Tests:
 
 Use the same test patterns as existing `test/conformance/regression.test.mjs` (mock fetch, read captured headers/body).
 
-Run: `cd D:/git/opencode-anthropic-fix && npx vitest run test/conformance/context-hint-gating.test.mjs` — expect fail.
+Run: `npx vitest run test/conformance/context-hint-gating.test.mjs` — expect fail.
 
 - [ ] **C2.2: Flip the default**
 
@@ -138,7 +138,7 @@ Update the JSDoc comment above (lines 196-201) to reflect the new default:
 - [ ] **C2.3: Verify no other code path assumes false default**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 grep -n "context_hint" index.mjs lib/config.mjs | grep -v "context-hint-2026"
 ```
 
@@ -155,7 +155,7 @@ This is correct — `!== false` means "on unless explicitly off", matches the ne
 - [ ] **C2.4: Verify**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 npx vitest run test/conformance/context-hint-gating.test.mjs
 npx vitest run
 ```
@@ -163,7 +163,7 @@ npx vitest run
 - [ ] **C2.5: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git checkout -b phase-c-c2-context-hint-default-on
 git add lib/config.mjs test/conformance/context-hint-gating.test.mjs
 git commit -m "feat(context-hint): flip default to on for first-party main-thread
@@ -183,9 +183,9 @@ Phase C work tracked in docs/plans/2026-04-18-phase-c-cc-parity.md."
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\index.mjs` — new helper `applySessionToolResultDedupe(messages)` + wire into request pipeline.
-- Modify: `D:\git\opencode-anthropic-fix\lib\config.mjs` — add `token_economy_strategies.tool_result_dedupe_session_wide` (default `false`).
-- Test: `D:\git\opencode-anthropic-fix\test\conformance\session-dedupe.test.mjs`.
+- Modify: `index.mjs` — new helper `applySessionToolResultDedupe(messages)` + wire into request pipeline.
+- Modify: `lib\config.mjs` — add `token_economy_strategies.tool_result_dedupe_session_wide` (default `false`).
+- Test: `test\conformance\session-dedupe.test.mjs`.
 
 **Why this matters:** Over a long session, the same `Read(X)` tool may run 5–10 times (user exploration, re-reads after edits). Earlier copies are redundant — the latest result subsumes them. Deduping at session scope (keep only latest per unique tool+args combo) can save 10–20% on long debugging sessions. Pure history-driven decision → deterministic. Default OFF because it's a history-mutating optimization and `token_economy.conservative` is ON by default (see existing JSDoc on `conservative` mode); users flip conservative off or opt in explicitly.
 
@@ -203,7 +203,7 @@ Create `test/conformance/session-dedupe.test.mjs`. Tests:
 6. **No-op when disabled**: with `config.token_economy_strategies.tool_result_dedupe_session_wide === false`, calling the dispatch wrapper returns messages unchanged.
 7. **Only `read`, `grep`, `glob`, `ls`, `list`, `find` are deduped** (reproducible tools — same classifier as B1). Bash/Edit/Write results never deduped because later calls may have different side-effects.
 
-Run: `cd D:/git/opencode-anthropic-fix && npx vitest run test/conformance/session-dedupe.test.mjs` — expect fail.
+Run: `npx vitest run test/conformance/session-dedupe.test.mjs` — expect fail.
 
 - [ ] **C3.2: Add config flag**
 
@@ -259,7 +259,7 @@ Grep for where `applyProactiveMicrocompact` or `applyContextHintCompaction` is c
 - [ ] **C3.5: Verify**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 npx vitest run test/conformance/session-dedupe.test.mjs
 npx vitest run
 ```
@@ -267,7 +267,7 @@ npx vitest run
 - [ ] **C3.6: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git checkout -b phase-c-c3-session-dedupe
 git add index.mjs lib/config.mjs test/conformance/session-dedupe.test.mjs
 git commit -m "feat(dedupe): session-wide reproducible-tool result dedupe (opt-in)

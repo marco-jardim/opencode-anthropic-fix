@@ -856,7 +856,7 @@ For OpenCode v1.x, the safest local-dev setup is to link the package directory i
 
 ```powershell
 $link = "$env:USERPROFILE\.config\opencode\node_modules\opencode-anthropic-fix"
-$target = "D:\git\opencode-anthropic-fix"
+$target = (Get-Location).Path   # run this from the root of your clone
 
 New-Item -ItemType Directory -Force -Path (Split-Path $link) | Out-Null
 if (Test-Path $link) { Remove-Item $link -Recurse -Force }

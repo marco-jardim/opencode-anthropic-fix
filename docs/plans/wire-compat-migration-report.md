@@ -23,11 +23,11 @@ remains host-side is host policy by design and is enumerated in
 
 ## Commit ledger
 
-Ranges are `migration-baseline..HEAD` (plugin, `D:\git\opencode-anthropic-fix`) and
-`migration-baseline..main` (package, `D:\git\claude-code-wire-compat`). The plugin's
+Ranges are `migration-baseline..HEAD` (plugin, `<repo-root>`) and
+`migration-baseline..main` (package, `..\claude-code-wire-compat`). The plugin's
 `migration-baseline` tag is `de92d13`; the package's is `0085ee5`.
 
-### Package — `D:\git\claude-code-wire-compat`
+### Package — `..\claude-code-wire-compat`
 
 | SHA       | Subject                                                                             | Wave / phase        |
 | --------- | ----------------------------------------------------------------------------------- | ------------------- |
@@ -45,7 +45,7 @@ Ranges are `migration-baseline..HEAD` (plugin, `D:\git\opencode-anthropic-fix`) 
 `136c072` and `0085ee5` are at or below the `migration-baseline` tag — they are the Wave-0
 pre-flight re-anchor, listed here because the migration's version claim (2.1.233) rests on them.
 
-### Plugin — `D:\git\opencode-anthropic-fix`
+### Plugin — `<repo-root>`
 
 | SHA       | Subject                                                                                       | Wave / phase                     |
 | --------- | --------------------------------------------------------------------------------------------- | -------------------------------- |
@@ -146,7 +146,7 @@ applied under a switch whose documented meaning was "do not mimic".
 
 ## Global acceptance criteria
 
-All commands below were run fresh from `D:\git\opencode-anthropic-fix` on 2026-08-16; output is
+All commands below were run fresh from `<repo-root>` on 2026-08-16; output is
 verbatim, trimmed to the summary lines.
 
 | #   | Criterion                                                                                                                       | Verdict | Evidence                                                                                                       |
@@ -263,7 +263,7 @@ not a regression.
       Tests  1818 passed | 2 skipped (1820)
    Duration  13.45s
 
-> npm --prefix D:\git\claude-code-wire-compat test
+> npm --prefix ..\claude-code-wire-compat test
  Test Files  104 passed (104)
       Tests  2993 passed (2993)
    Duration  6.39s

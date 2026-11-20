@@ -31,8 +31,8 @@ both fully before your first action.
 
 2. **The naming hazard.** The plugin sanitizes `OpenCode → Claude Code` in the _system prompt it sends
    to Anthropic_. That rule has **leaked into the agent-facing docs**: `AGENTS.md` shows a broken
-   `"Claude Code" → "Claude Code"` rule and claims a canonical path `D:\git\Claude-anthropic-fix`. Both
-   are wrong. The real on-disk path is **`D:\git\opencode-anthropic-fix`** (tooling may display the
+   `"Claude Code" → "Claude Code"` rule and claims a canonical path `Claude-anthropic-fix`. Both
+   are wrong. The real on-disk path is **`<repo-root>`** (tooling may display the
    alias — use relative paths, they work). Fixing this leak is literally your first task (W0·P0.1).
 
 3. **Two production dependencies**: `@tormentalabs/claude-code-wire-compat`, `xxhash-wasm`.
@@ -47,7 +47,7 @@ both fully before your first action.
 
 ## ENVIRONMENT
 
-- Working dir (relative paths always work): repo root, on-disk `D:\git\opencode-anthropic-fix`.
+- Working dir (relative paths always work): repo root, on-disk `<repo-root>`.
 - Platform **win32**, shell **pwsh** (PowerShell 7+). NOT bash. Use `Get-ChildItem`, `$env:VAR`,
   `Remove-Item`, junctions (not symlinks). `ls --color=never` does not work.
 - Node **18+**, ESM `.mjs` only, JSDoc types (**no TypeScript** — do not introduce it).
@@ -147,7 +147,7 @@ both fully before your first action.
   result was genuinely partial. Read the rejection: if the content is actually useful, use it; if it's
   truly incomplete, re-dispatch tighter (or escalate fast→medium as suggested).
 - **Every subagent prompt MUST include the ENVIRONMENT block** with the real path
-  (`D:\git\opencode-anthropic-fix`, win32, pwsh) and "use relative paths; access pre-authorized". They
+  (`<repo-root>`, win32, pwsh) and "use relative paths; access pre-authorized". They
   start blank and will otherwise ask for permissions or use the wrong path.
 - **Config is runtime-mutable and must be read LIVE.** Inside the plugin closure, re-call
   `loadConfig()` / read the captured `config` ref; do NOT cache feature flags in closed-over consts

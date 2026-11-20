@@ -8,7 +8,7 @@ still open; the plugin's current behaviour is therefore §2 **plus** §7, not §
 alone.
 
 **Sole evidence base:** section 13.8 (`OAuth constants, verbatim`) of
-`D:\git\claude-code-wire-compat\docs\protocol\versions\claude-code-2.1.280-analysis.md`,
+`..\claude-code-wire-compat\docs\protocol\versions\claude-code-2.1.280-analysis.md`,
 lines 950–1021. That section records byte offsets into a carved `2.1.280` bundle.
 §13.8 does not state the bundle's platform, so this document does not claim one.
 

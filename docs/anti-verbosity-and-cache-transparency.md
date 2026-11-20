@@ -126,7 +126,7 @@ Added to the session footer bar:
 - `75% cache` with color-coded diamond indicator
 - Only shown when there's at least one assistant message with cache data
 
-### Files changed (D:\git\opencode)
+### Files changed (..\opencode)
 
 - `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/cache.tsx` — New sidebar plugin
 - `packages/opencode/src/cli/cmd/tui/plugin/internal.ts` — Register cache plugin

@@ -379,7 +379,7 @@ Navigation & cross-reference guide:
 All exploration documents are in the root of the repository:
 
 ```
-D:\git\opencode-anthropic-fix\
+
 ├── EXPLORATION_EXECUTIVE_SUMMARY.md    ← Start here (10 min read)
 ├── EXPLORATION_SUMMARY.md              ← Complete reference (30 min read)
 ├── MESSAGE_FLOW_DIAGRAM.md             ← Visual diagrams (20 min read)

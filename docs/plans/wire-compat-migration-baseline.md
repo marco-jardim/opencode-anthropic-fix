@@ -256,7 +256,7 @@ plataforma). Para o caminho que atravessa o plugin real
 ## 4. Descobertas que afetam waves futuras
 
 1. **Acoplamento cross-repo do drift verifier do PACOTE**: `scripts/verify-drift.mjs`
-   do pacote usa `D:\git\opencode-anthropic-fix\lib\request-headers.mjs` como
+   do pacote usa `lib\request-headers.mjs` como
    oráculo (DEFAULT_SOURCE). Quando a Phase 2.3 deletar esse arquivo, o
    verificador do pacote perde o source real. **A Phase 2.3 deve incluir:
    decidir/reapontar o oráculo do drift do pacote** (opções: apontar para

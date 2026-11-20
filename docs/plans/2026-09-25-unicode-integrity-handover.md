@@ -4,9 +4,9 @@ Prompt redigido em 2026-09-25. Somente o envio/invocacao deste prompt pelo usuar
 
 ---
 
-Inicie a implementacao de `D:\git\opencode-anthropic-fix\docs\plans\2026-09-25-unicode-integrity-fix-plan.md`. Nao entregue apenas outro plano: execute, teste, delegue QA heavy adversarial, corrija os achados e faca commits locais frequentes. Itere continuamente ate concluir ou encontrar bloqueio real/risco critico.
+Inicie a implementacao de `docs\plans\2026-09-25-unicode-integrity-fix-plan.md`. Nao entregue apenas outro plano: execute, teste, delegue QA heavy adversarial, corrija os achados e faca commits locais frequentes. Itere continuamente ate concluir ou encontrar bloqueio real/risco critico.
 
-Ambiente: Windows (win32), PowerShell 7 (pwsh). Repositorio do plugin: `D:\git\opencode-anthropic-fix`. Biblioteca: `D:\git\claude-code-wire-compat`. Use paths absolutos nos dispatches. Comandos com paths relativos exigem CWD explicito. Um caminho `Claude-anthropic-fix` pode vir de sanitizacao de prompt: confirme os caminhos canonicos acima, nao renomeie o repositorio.
+Ambiente: Windows (win32), PowerShell 7 (pwsh). Repositorio do plugin: `<repo-root>`. Biblioteca: `..\claude-code-wire-compat`. Use paths absolutos nos dispatches. Comandos com paths relativos exigem CWD explicito. Um caminho `Claude-anthropic-fix` pode vir de sanitizacao de prompt: confirme os caminhos canonicos acima, nao renomeie o repositorio.
 
 Paths canonicos sao defaults sujeitos ao gate zero do plano (1.1). Antes de editar/instalar/construir, verificar read-only se o host vivo carrega esses diretorios por junction ou resolucao da dependencia. Isso e UNVERIFIED. Se houver vinculo, preferir isolamento sem mudar junction/config vivos; WIP vivo exige consentimento especifico informado. Resolver ambos os repositorios e paths reais da dependencia. Registrar primeiro na sessao a decisao de isolamento e paths/HEAD exatos; depois de comprovar destino seguro, provisionar a worktree e persistir nela o adendo que mapeia TODOS os paths/CWDs/owners/logs antes das escritas seguintes. Nao criar o execution log no checkout vivo antes dessa decisao. Sem isolamento confirmado ou consentimento, BLOCKED.
 
@@ -23,13 +23,13 @@ Paths canonicos sao defaults sujeitos ao gate zero do plano (1.1). Antes de edit
 Leituras de contexto podem preceder o gate zero, mas nenhuma mutacao de runtime, install, build, formatter, coverage, pack ou commit deve anteceder a decisao segura de isolamento. Todos os passos abaixo respeitam o mapeamento vinculante de paths do plano 1.1.
 
 1. Leia o plano inteiro em blocos de aproximadamente 100 linhas. Tabelas longas podem truncar o retorno; continue pelo offset, sem supor que o trecho omitido inexiste.
-2. Leia as instrucoes atuais: `D:\git\opencode-anthropic-fix\AGENTS.md`, `D:\git\opencode-anthropic-fix\CLAUDE.md`, `D:\git\opencode-anthropic-fix\CONTRIBUTING.md`, `D:\git\claude-code-wire-compat\AGENTS.md` e `D:\git\claude-code-wire-compat\MEMORY.md`. Inspecione scripts, configs e arquivos analogos antes de editar.
+2. Leia as instrucoes atuais: `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `..\claude-code-wire-compat\AGENTS.md` e `..\claude-code-wire-compat\MEMORY.md`. Inspecione scripts, configs e arquivos analogos antes de editar.
 3. Verifique separadamente status staged/unstaged/untracked, branch, HEAD e log dos dois repositorios. Preserve trabalho externo; nao descarte mudancas para obter uma arvore limpa.
 4. Na ultima checagem anterior a criacao deste handover, apenas o plano estava untracked no plugin, e a biblioteca estava limpa. Agora ha tambem este documento: revalide o estado. Nao inclua arquivos em commits por acidente.
 5. Registre manifesto, lockfile, pacote realmente instalado, bundle carregado e versoes dos runtimes. Historico: plugin `1.0.0`, specifier da biblioteca `latest`, lock/install da biblioteca `0.5.0`, fonte irma `0.6.0`, registry `latest=0.6.0`. Esses numeros precisam ser confirmados, nao copiados como estado atual.
 6. A biblioteca exige Node >=20 apesar de guia antigo mencionar Node 18. Registre Node/npm/Bun/workerd quando aplicavel, ICU e `Intl.Segmenter`. Confirme a matriz Node 20/22/24 da biblioteca nas instrucoes/CI atuais.
-7. Obtenha apenas projecao segura (plano 1.3): descubra as chaves em `D:\git\opencode-anthropic-fix\lib\config.mjs`; parser/helper local emite somente booleans allowlisted, entrada relevante/path resolvido do plugin e erros enumerados. Nao abra config bruta, ecoe excecoes/conteudo, URLs com query/credenciais ou arquivos de contas. Se as ferramentas nao permitirem projecao sem exposicao integral, peca projecao ao usuario ou autorizacao para helper estreito. Respeite permissoes de acesso externo; nao habilite flags na instalacao real.
-8. Crie o registro `D:\git\opencode-anthropic-fix\docs\plans\qa\unicode-integrity-execution.md`, dono unico orquestrador, verificando o diretorio pai antes. Registre baseline, leases, tarefas, comandos/CWD/exit code, hashes, QA, autorizacoes e bloqueios.
+7. Obtenha apenas projecao segura (plano 1.3): descubra as chaves em `lib\config.mjs`; parser/helper local emite somente booleans allowlisted, entrada relevante/path resolvido do plugin e erros enumerados. Nao abra config bruta, ecoe excecoes/conteudo, URLs com query/credenciais ou arquivos de contas. Se as ferramentas nao permitirem projecao sem exposicao integral, peca projecao ao usuario ou autorizacao para helper estreito. Respeite permissoes de acesso externo; nao habilite flags na instalacao real.
+8. Crie o registro `docs\plans\qa\unicode-integrity-execution.md`, dono unico orquestrador, verificando o diretorio pai antes. Registre baseline, leases, tarefas, comandos/CWD/exit code, hashes, QA, autorizacoes e bloqueios.
 9. Rode pre-flight e baseline de P1 antes de escrever codigo. Use corpus sintetico e probes offline; investigacoes anteriores nao fizeram chamadas reais a Anthropic.
 10. Depois da baseline e QA heavy documental, faca primeiro commit `docs:` dedicado incluindo intencionalmente plano/handover sob os paths mapeados, sem mudancas externas nao relacionadas. Registre snapshots sanitizados do execution log nas fronteiras de fase sob freeze.
 
@@ -60,7 +60,7 @@ Leituras de contexto podem preceder o gate zero, mas nenhuma mutacao de runtime,
 ## 5. Leases e commits frequentes
 
 - Um writer por arquivo; nenhum OUTRO agente le arquivo sob escrita. Congele contexto em snapshots antes do fan-out. Normalize case/junctions para nao conceder dois leases ao mesmo arquivo.
-- A biblioteca permite somente UMA writing task por worktree, mesmo para arquivos disjuntos. `D:\git\opencode-anthropic-fix\index.mjs` e lock integral. Novos arquivos, testes, docs e helpers tambem precisam de owner.
+- A biblioteca permite somente UMA writing task por worktree, mesmo para arquivos disjuntos. `index.mjs` e lock integral. Novos arquivos, testes, docs e helpers tambem precisam de owner.
 - Freeze antes de suite, build, formatter, coverage, install, QA e commit: esses processos tambem leem/escrevem. Nunca execute hooks enquanto outro agente edita a arvore.
 - Nao paralelize P2 runtime/testes com P1: P2 espera o candidato aprovado e o gate T0. Dentro de P2, compactacao/resumo podem paralelizar somente depois do helper congelado e com leases disjuntos.
 - Faca commit por unidade coerente e verde (correcao + testes), sem acumular a wave inteira nem commitar testes vermelhos.
@@ -75,17 +75,17 @@ Leituras de contexto podem preceder o gate zero, mas nenhuma mutacao de runtime,
 
 Congele a matriz de texto de corpo versus headers/identificadores com evidencia. Corrija validacao compartilhada e diagnostico `safeDetails` ponta a ponta. Prepare candidato `X.Y.Z-rc.N`, metadados/guards, tarball/digest e gates completos; obtenha QA heavy. Nenhuma publicacao nesta fase.
 
-No pre-flight P1, leia `D:\git\claude-code-wire-compat\.github\workflows\publish.yml`: confirme capacidade de comparar o manifesto rebuilt ANTES de publicar e tag explicita nao-latest. Essa capacidade ainda e UNVERIFIED. Se ausente, BLOCKED ou mudanca minima de CI previamente autorizada com release owner/lease e QA heavy antes de publicacao. Nao presumir permissao para alterar CI pela permissao de publish.
+No pre-flight P1, leia `..\claude-code-wire-compat\.github\workflows\publish.yml`: confirme capacidade de comparar o manifesto rebuilt ANTES de publicar e tag explicita nao-latest. Essa capacidade ainda e UNVERIFIED. Se ausente, BLOCKED ou mudanca minima de CI previamente autorizada com release owner/lease e QA heavy antes de publicacao. Nao presumir permissao para alterar CI pela permissao de publish.
 
 ### P2: adocao do candidato e plugin
 
 P2.T0 ocorre apos P1 QA PASS e autorizacao especifica de publicacao: publique RC imutavel no registry FORA de `latest`. O publisher pode usar canal `beta`, mas o specifier do plugin e a versao EXATA `X.Y.Z-rc.N`, nunca `beta`.
 
-Atualize provenance `D:\git\opencode-anthropic-fix\docs\shared-package-provenance.md`, confira version/resolved/integrity e rode suite preexistente completa + `npx vitest run wire-baseline` ANTES de editar runtime/testes. O classificador aceita versao exata prerelease; confirme a regra atual, nao a enfraqueca. Nao use `file:`/`link:` ou excecao historica GitHub para contornar registry.
+Atualize provenance `docs\shared-package-provenance.md`, confira version/resolved/integrity e rode suite preexistente completa + `npx vitest run wire-baseline` ANTES de editar runtime/testes. O classificador aceita versao exata prerelease; confirme a regra atual, nao a enfraqueca. Nao use `file:`/`link:` ou excecao historica GitHub para contornar registry.
 
 Identidade do RC: P1 registra sha512 local e manifesto descompactado/hash por arquivo. Workflow compara manifesto rebuilt com o candidato aprovado antes de publicar, sem mudanca de fonte/runtime, e confirma tag nao-latest. Depois compare manifesto do registry e registre hashes de container e integrity; container reconstruido pode diferir sem diferenca de arquivos. Nao exija igualdade bruta dos tarballs para aprovar conteudo nem ignore drift de arquivos.
 
-E-BASE e referencia congelada separada, com path/HEAD registrados. E-CAND e a worktree aprovada pelo gate zero: default `D:\git\opencode-anthropic-fix` somente se nao-live ou com consentimento informado; senao, a worktree isolada registrada. Edits, suite completa, novos testes, coverage e hooks usam o candidato real. Isso evita commits com testes novos contra a biblioteca antiga. Sem autorizacao para RC, P2 fica BLOCKED.
+E-BASE e referencia congelada separada, com path/HEAD registrados. E-CAND e a worktree aprovada pelo gate zero: default `<repo-root>` somente se nao-live ou com consentimento informado; senao, a worktree isolada registrada. Edits, suite completa, novos testes, coverage e hooks usam o candidato real. Isso evita commits com testes novos contra a biblioteca antiga. Sem autorizacao para RC, P2 fica BLOCKED.
 
 Corrija compactacao de descricoes e resumo por grafemas; integre fallback localizado e builder REAL. Nenhum mock substitui o gate composto. Nao adicione compatibilidade retroativa apenas para sustentar dois ambientes de teste.
 
@@ -110,26 +110,26 @@ Falha pos-release: preserve lock/runtime conhecidos-bons do host, pare adocao, s
 - Controles sao escalares Unicode validos, nao UTF-16 malformado. A politica local rejeita C0 exceto TAB/LF/CR, alem de DEL; system tambem rejeita C1. U+0085 passou em mensagem e falhou em system.
 - ESC, NUL, FF e DEL foram rejeitados localmente. As fontes de `0.6.0` ainda mantinham a politica; atualizar apenas a dependencia nao resolve os bugs do plugin.
 - Aceitacao remota desses controles NAO foi demonstrada. Obtenha evidencia first-party ou solicite autorizacao para probe sintetico; nao apresente teste local como prova da API. Headers/metadata/identificadores continuam estritos.
-- O builder falha antes do fetch em `D:\git\opencode-anthropic-fix\lib\mimicry\wire-compat.mjs`. Nao rotacione contas, incremente cooldown nem repita rede para erro local deterministico.
-- `ClaudeCodeWireError` aceita detalhes primitivos, mas `sanitizeError` passa por `toSafeErrorDetails` em `D:\git\claude-code-wire-compat\src\redaction.ts`, cuja allowlist descarta campos novos. Atualizar so o throw nao basta.
+- O builder falha antes do fetch em `lib\mimicry\wire-compat.mjs`. Nao rotacione contas, incremente cooldown nem repita rede para erro local deterministico.
+- `ClaudeCodeWireError` aceita detalhes primitivos, mas `sanitizeError` passa por `toSafeErrorDetails` em `..\claude-code-wire-compat\src\redaction.ts`, cuja allowlist descarta campos novos. Atualizar so o throw nao basta.
 - Caminhos de erro devem usar estrutura validada + indices/offset/motivo, nunca nomes arbitrarios de chaves de tool input, prompts, tokens ou snippets sensiveis. Teste a cadeia completa ate a mensagem do plugin.
 - Body dumps atuais ficam depois do builder: nao capturam a entrada rejeitada. Adicione diagnostico estrutural seguro antes desse ponto, nao dump bruto de historico.
 
 ### Cortes locais
 
 - Emulacao e ligada por default; compactacao de descricoes e resumo Haiku sao opt-in, false por default. A configuracao efetiva e o campo original que abortou a sessao do usuario ainda NAO foram identificados.
-- `compactToolDescription` em `D:\git\opencode-anthropic-fix\lib\mimicry\system-prompt.mjs` usa `slice(0, 200)`. A chamada real so compacta descricoes >500 unidades quando habilitada.
+- `compactToolDescription` em `lib\mimicry\system-prompt.mjs` usa `slice(0, 200)`. A chamada real so compacta descricoes >500 unidades quando habilitada.
 - Reproducao sintetica: `'- ' + 'a'.repeat(197) + String.fromCodePoint(0x1f600) + 'b'.repeat(350)`. Via transformacao + builder: off passou; on gerou surrogate high isolado no indice 199 e `INVALID_UNICODE`.
 - Mesmo com UTF-16 valido, cortar `e\u0301` entre a letra e o acento quebra grafema. Iterar por code points sozinho nao resolve ZWJ, bandeiras, modificadores e variation selectors.
-- `formatTemplate` em `D:\git\opencode-anthropic-fix\lib\rolling-summarizer.mjs` corta secoes/envelope com slices brutos. Reproducao: topics com 89 letras `a`, emoji e 9 letras `b`, outras secoes `(none)`, budget um abaixo do template integral; apareceu surrogate isolado no indice 185 da saida.
+- `formatTemplate` em `lib\rolling-summarizer.mjs` corta secoes/envelope com slices brutos. Reproducao: topics com 89 letras `a`, emoji e 9 letras `b`, outras secoes `(none)`, budget um abaixo do template integral; apareceu surrogate isolado no indice 185 da saida.
 - O resumo original passou pelo builder, a versao cortada falhou. Cubra budgets menores que envelope, progresso em empates e grafema maior que teto; nao gere envelope quebrado nem loop.
 - Fallback restaura apenas o original VALIDO da transformacao opcional, preservando sanitizacao obrigatoria, cache/prefixes e hard caps. Nunca restaure indiscriminadamente a request original inteira.
 - Sem NFC/NFD global nem reparo indiscriminado com `toWellFormed`. `JSON.stringify` escapa surrogate isolado; `TextEncoder` sobre a string bruta o substitui por U+FFFD. U+FFFD originalmente legitimo deve ser preservado.
-- A amostragem UTF-16 dos indices 4/7/20 em `D:\git\claude-code-wire-compat\src\fingerprint.ts` e intencional e fixada por vetores de conformidade. NAO transforme em indexacao por code point/grafema.
+- A amostragem UTF-16 dos indices 4/7/20 em `..\claude-code-wire-compat\src\fingerprint.ts` e intencional e fixada por vetores de conformidade. NAO transforme em indexacao por code point/grafema.
 
 ### Streaming e display
 
-- `D:\git\opencode-anthropic-fix\lib\mimicry\response-stream.mjs` ja usa decoder incremental: o corpus valido passou em 160 cortes de dois chunks e byte a byte. Nao atribua toda falha a particionamento UTF-8 normal.
+- `lib\mimicry\response-stream.mjs` ja usa decoder incremental: o corpus valido passou em 160 cortes de dois chunks e byte a byte. Nao atribua toda falha a particionamento UTF-8 normal.
 - Falta flush final: bytes finais incompletos `F0 9F` desapareceram no EOF. Decoder fatal + flush deve produzir erro, sem substituicao silenciosa; U+FFFD legitimo continua permitido.
 - Normalizar CRLF por chunk perde o delimitador quando CR/LF se separam. Reproducao byte a byte preservou texto mas nao chamou usage. Parse com estado entre chunks, sem normalizar strings JSON.
 - UTF-8 e frames completos nao provam conclusao da mensagem. EOF apos start/delta, durante tool input ou antes do terminal precisa falhar. Verifique regras do protocolo, incluindo `message_stop`, erro remoto, cancelamento e terminal duplicado.
@@ -152,13 +152,13 @@ Falha pos-release: preserve lock/runtime conhecidos-bons do host, pare adocao, s
 
 Historico de investigacao, NAO resultado desta execucao: quatro suites do plugin passaram 41 testes; a suite multiline da biblioteca passou 34. Reexecute com a versao realmente carregada e registre os resultados novos.
 
-Plugin, CWD `D:\git\opencode-anthropic-fix`:
+Plugin, CWD `<repo-root>`:
 
 ```powershell
 npx vitest run lib/mimicry/response-stream.test.mjs lib/mimicry/system-prompt.test.mjs test/rolling-summarizer.test.mjs test/rolling-summarizer-integration.test.mjs
 ```
 
-Biblioteca, CWD `D:\git\claude-code-wire-compat`:
+Biblioteca, CWD `..\claude-code-wire-compat`:
 
 ```powershell
 npx vitest run test/validation/multiline-content.test.ts

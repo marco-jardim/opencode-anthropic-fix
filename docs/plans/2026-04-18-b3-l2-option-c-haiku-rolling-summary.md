@@ -10,8 +10,8 @@
 
 **Repos:**
 
-- Opencode fork: `D:\git\opencode`
-- Plugin: `D:\git\opencode-anthropic-fix`
+- Opencode fork: `..\opencode`
+- Plugin: `<repo-root>`
 
 **Why a new hook (not extending `experimental.session.compacting`):** The existing hook receives no messages — it only injects prompt context. Adding `messages` to its input changes semantics for every plugin that already uses it. A dedicated `experimental.session.summarize` hook is additive, zero-break, single-purpose.
 
@@ -21,7 +21,7 @@
 
 ## File Structure
 
-**Opencode fork** (`D:\git\opencode\packages\`):
+**Opencode fork** (`..\opencode\packages\`):
 
 | File                                       | Responsibility               | Action                                                                                                      |
 | ------------------------------------------ | ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -29,7 +29,7 @@
 | `opencode/src/session/compaction.ts`       | Compaction orchestration     | Wire new hook between messages-transform and assistant-message creation; short-circuit processor on summary |
 | `opencode/test/session/compaction.test.ts` | Compaction tests             | Add tests for short-circuit path and fall-through path                                                      |
 
-**Plugin** (`D:\git\opencode-anthropic-fix\`):
+**Plugin** (``):
 
 | File                                           | Responsibility                                              | Action                                                                                        |
 | ---------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -53,7 +53,7 @@
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && grep -nE "^export " lib/rolling-summarizer.mjs
+grep -nE "^export " lib/rolling-summarizer.mjs
 ```
 
 Expected output contains: `MODEL`, `TEMPERATURE`, `DEFAULT_MAX_CHARS`, `buildPrompt`, `parseHaikuResponse`, `formatTemplate`, `summarize`.
@@ -65,7 +65,7 @@ If `summarize` is missing or signature differs from `summarize(messages, { haiku
 Run:
 
 ```bash
-cd D:/git/opencode && git status && git log --oneline -1
+cd ../opencode && git status && git log --oneline -1
 ```
 
 Expected: clean working tree (except maybe `dist/` noise in plugin repo — not this one). Last commit should be `969e265c6 fix(session): purge envCache on session.deleted to prevent Map leak` or later.
@@ -77,7 +77,7 @@ If dirty, stop — do not layer plan changes on uncommitted work.
 Run:
 
 ```bash
-cd D:/git/opencode/packages/opencode && bun test test/session/
+cd ../opencode/packages/opencode && bun test test/session/
 ```
 
 Expected: all green. This baseline ensures any failure in Task 2 is our fault, not pre-existing.
@@ -88,7 +88,7 @@ Expected: all green. This baseline ensures any failure in Task 2 is our fault, n
 
 **Files:**
 
-- Modify: `D:\git\opencode\packages\plugin\src\index.ts:303-306`
+- Modify: `..\opencode\packages\plugin\src\index.ts:303-306`
 
 **Context:** The current `experimental.session.compacting` definition sits at lines 303-306. We add a sibling definition right after it. Both `Message`, `Part`, and `Model` types are already imported and used elsewhere in this file, so no new imports needed.
 
@@ -137,13 +137,13 @@ Insert after line 306 (after the closing `) => Promise<void>` of `experimental.s
 Run:
 
 ```bash
-cd D:/git/opencode/packages/plugin && bun run typecheck
+cd ../opencode/packages/plugin && bun run typecheck
 ```
 
 If `typecheck` script does not exist, run:
 
 ```bash
-cd D:/git/opencode/packages/plugin && bunx tsc --noEmit
+cd ../opencode/packages/plugin && bunx tsc --noEmit
 ```
 
 Expected: no errors.
@@ -151,7 +151,7 @@ Expected: no errors.
 - [ ] **Step 1.3: Commit**
 
 ```bash
-cd D:/git/opencode
+cd ../opencode
 git add packages/plugin/src/index.ts
 git commit -m "feat(plugin): add experimental.session.summarize hook type
 
@@ -166,8 +166,8 @@ model-based summarization. Additive — existing hooks unchanged."
 
 **Files:**
 
-- Modify: `D:\git\opencode\packages\opencode\src\session\compaction.ts:238-270`
-- Test: `D:\git\opencode\packages\opencode\test\session\compaction.test.ts`
+- Modify: `..\opencode\packages\opencode\src\session\compaction.ts:238-270`
+- Test: `..\opencode\packages\opencode\test\session\compaction.test.ts`
 
 **Context:** The existing flow (compaction.ts:204-290):
 
@@ -183,7 +183,7 @@ Our insertion point is **between step 2 and step 3**: after the transform hook f
 
 - [ ] **Step 2.1: Write failing test — short-circuit path**
 
-Append to `D:\git\opencode\packages\opencode\test\session\compaction.test.ts` (alongside the existing `plugin(ready)` mock):
+Append to `..\opencode\packages\opencode\test\session\compaction.test.ts` (alongside the existing `plugin(ready)` mock):
 
 ```ts
 function pluginWithSummarize(summary: string) {
@@ -294,7 +294,7 @@ describe("session.compaction.process — plugin-provided summary", () => {
 Run:
 
 ```bash
-cd D:/git/opencode/packages/opencode && bun test test/session/compaction.test.ts -t "plugin-provided summary"
+cd ../opencode/packages/opencode && bun test test/session/compaction.test.ts -t "plugin-provided summary"
 ```
 
 Expected: FAIL — the hook is registered but compaction.ts doesn't consult it yet, so the existing model-based path runs (and probably crashes because the test doesn't mock the provider/processor for a real model call, OR it produces a summary but not "PLUGIN_SUMMARY_XYZ").
@@ -303,7 +303,7 @@ If the test times out instead of failing, the processor is hanging on a missing 
 
 - [ ] **Step 2.3: Implement the short-circuit in `compaction.ts`**
 
-In `D:\git\opencode\packages\opencode\src\session\compaction.ts`, locate the existing block (around lines 238-270):
+In `..\opencode\packages\opencode\src\session\compaction.ts`, locate the existing block (around lines 238-270):
 
 ```ts
 const prompt = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n");
@@ -425,7 +425,7 @@ Note the re-order: `modelMessages` was computed BEFORE the `msg` object was buil
 Run:
 
 ```bash
-cd D:/git/opencode/packages/opencode && bun test test/session/compaction.test.ts -t "plugin-provided summary"
+cd ../opencode/packages/opencode && bun test test/session/compaction.test.ts -t "plugin-provided summary"
 ```
 
 Expected: PASS.
@@ -435,7 +435,7 @@ Expected: PASS.
 Run:
 
 ```bash
-cd D:/git/opencode/packages/opencode && bun test test/session/compaction.test.ts
+cd ../opencode/packages/opencode && bun test test/session/compaction.test.ts
 ```
 
 Expected: all tests pass. The existing tests mock `experimental.session.compacting` but not `experimental.session.summarize`, which means the `Effect.succeed(output)` branch in the default mock runs — output's summary stays `undefined`, so the fall-through path is taken. If any test fails because it was not expecting the new plugin.trigger call, update the test's mock to ignore `experimental.session.summarize` explicitly (return `Effect.succeed(output)`).
@@ -445,7 +445,7 @@ Expected: all tests pass. The existing tests mock `experimental.session.compacti
 Run:
 
 ```bash
-cd D:/git/opencode/packages/opencode && bun test test/session/
+cd ../opencode/packages/opencode && bun test test/session/
 ```
 
 Expected: all green. If `test/session/env-snapshot.test.ts` or `test/session/snapshot-tool-race.test.ts` fail, these are pre-existing flakes noted in the session memory — verify by running them in isolation 2x to confirm the flake.
@@ -453,7 +453,7 @@ Expected: all green. If `test/session/env-snapshot.test.ts` or `test/session/sna
 - [ ] **Step 2.7: Commit**
 
 ```bash
-cd D:/git/opencode
+cd ../opencode
 git add packages/opencode/src/session/compaction.ts packages/opencode/test/session/compaction.test.ts
 git commit -m "feat(session): wire experimental.session.summarize into compaction
 
@@ -470,8 +470,8 @@ model-based summarization path unchanged."
 
 **Files:**
 
-- Create: `D:\git\opencode-anthropic-fix\lib\haiku-call.mjs`
-- Create: `D:\git\opencode-anthropic-fix\lib\haiku-call.test.mjs`
+- Create: `lib\haiku-call.mjs`
+- Create: `lib\haiku-call.test.mjs`
 
 **Context:** The plugin already has OAuth plumbing (`lib/oauth.mjs`, `lib/accounts.mjs`) that returns a Bearer access token. We need a focused wrapper that takes a prompt, calls Anthropic's Messages API with the Haiku model at temperature 0, and returns `{text, tokens, cost}` or throws.
 
@@ -479,7 +479,7 @@ We inject `fetch` and a `getAccessToken` function so tests are fully offline.
 
 - [ ] **Step 3.1: Write failing test — happy path**
 
-Create `D:\git\opencode-anthropic-fix\lib\haiku-call.test.mjs`:
+Create `lib\haiku-call.test.mjs`:
 
 ```javascript
 import { describe, expect, it, vi } from "vitest";
@@ -561,14 +561,14 @@ describe("callHaiku", () => {
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npx vitest run lib/haiku-call.test.mjs
+npx vitest run lib/haiku-call.test.mjs
 ```
 
 Expected: FAIL — `haiku-call.mjs` does not exist.
 
 - [ ] **Step 3.3: Implement `lib/haiku-call.mjs`**
 
-Create `D:\git\opencode-anthropic-fix\lib\haiku-call.mjs`:
+Create `lib\haiku-call.mjs`:
 
 ```javascript
 export const MODEL = "claude-haiku-4-5-20251001";
@@ -638,7 +638,7 @@ export async function callHaiku({ prompt, fetch, getAccessToken }) {
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npx vitest run lib/haiku-call.test.mjs
+npx vitest run lib/haiku-call.test.mjs
 ```
 
 Expected: PASS — 4/4 tests green.
@@ -646,7 +646,7 @@ Expected: PASS — 4/4 tests green.
 - [ ] **Step 3.5: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add lib/haiku-call.mjs lib/haiku-call.test.mjs
 git commit -m "feat(lib): haiku-call — OAuth-authenticated Messages API wrapper
 
@@ -661,8 +661,8 @@ Pure, dependency-injected (fetch + getAccessToken) — fully offline tests."
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\lib\config.mjs`
-- Modify: `D:\git\opencode-anthropic-fix\lib\config.test.mjs`
+- Modify: `lib\config.mjs`
+- Modify: `lib\config.test.mjs`
 
 **Context:** Per user direction, the key is explicit: `token_economy_strategies.haiku_rolling_summary` (default `false`). The plugin already has `token_economy_strategies` as a namespace (C3 added `tool_result_dedupe_session_wide` there). We extend the same schema.
 
@@ -671,14 +671,14 @@ Pure, dependency-injected (fetch + getAccessToken) — fully offline tests."
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && grep -n "token_economy_strategies\|tool_result_dedupe_session_wide" lib/config.mjs
+grep -n "token_economy_strategies\|tool_result_dedupe_session_wide" lib/config.mjs
 ```
 
 Note the line number of the `token_economy_strategies` object / its field definitions (likely around where `tool_result_dedupe_session_wide` is declared).
 
 - [ ] **Step 4.2: Write failing test**
 
-Append to `D:\git\opencode-anthropic-fix\lib\config.test.mjs` (inside an appropriate `describe` block — reuse the one covering `token_economy_strategies` if present, otherwise add alongside existing coverage):
+Append to `lib\config.test.mjs` (inside an appropriate `describe` block — reuse the one covering `token_economy_strategies` if present, otherwise add alongside existing coverage):
 
 ```javascript
 describe("token_economy_strategies.haiku_rolling_summary", () => {
@@ -711,7 +711,7 @@ describe("token_economy_strategies.haiku_rolling_summary", () => {
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npx vitest run lib/config.test.mjs -t "haiku_rolling_summary"
+npx vitest run lib/config.test.mjs -t "haiku_rolling_summary"
 ```
 
 Expected: FAIL — schema lacks the field; default is `undefined`, not `false`.
@@ -737,7 +737,7 @@ If the schema is hand-rolled (no Zod), mirror whatever pattern exists — the ke
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npx vitest run lib/config.test.mjs
+npx vitest run lib/config.test.mjs
 ```
 
 Expected: all config tests pass (the 3 new ones + existing ones).
@@ -745,7 +745,7 @@ Expected: all config tests pass (the 3 new ones + existing ones).
 - [ ] **Step 4.6: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add lib/config.mjs lib/config.test.mjs
 git commit -m "feat(config): add token_economy_strategies.haiku_rolling_summary
 
@@ -759,7 +759,7 @@ handler landing in the next task. Gates Haiku-based compaction summaries."
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\index.mjs`
+- Modify: `index.mjs`
 - Test: new tests appended to an existing integration-test file OR a new one (see Task 6)
 
 **Context:** The plugin's `index.mjs` is a large file (lines 1-8800+) with hook handlers registered via an opencode plugin factory. We need to:
@@ -775,7 +775,7 @@ The `haikuCall` passed to `summarize` is a closure: `(prompt) => callHaiku({prom
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && grep -nE '"experimental\.chat\.messages\.transform"|"experimental\.session\.compacting"' index.mjs
+grep -nE '"experimental\.chat\.messages\.transform"|"experimental\.session\.compacting"' index.mjs
 ```
 
 Note the line numbers and the surrounding object structure. You're looking for the handler-registration block (e.g., a returned object with keys like `"experimental.chat.messages.transform": async (input, output) => { ... }`).
@@ -783,7 +783,7 @@ Note the line numbers and the surrounding object structure. You're looking for t
 Also locate:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && grep -nE "getAccessToken|accessToken|Bearer " index.mjs | head -30
+grep -nE "getAccessToken|accessToken|Bearer " index.mjs | head -30
 ```
 
 Identify the function the plugin already uses to get an OAuth token for outgoing Anthropic calls. Use that same function in the new handler.
@@ -876,7 +876,7 @@ Pick whichever matches the existing `lib/rolling-summarizer.mjs` contract. Read 
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npm test 2>&1 | tail -20
+npm test 2>&1 | tail -20
 ```
 
 Expected: 1060 + new tests all pass. No regression in existing handlers (we added, didn't modify).
@@ -884,7 +884,7 @@ Expected: 1060 + new tests all pass. No regression in existing handlers (we adde
 - [ ] **Step 5.5: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add index.mjs
 git commit -m "feat(plugin): wire experimental.session.summarize via rolling-summarizer
 
@@ -901,21 +901,21 @@ opencode falls through to its default model-based summarization."
 
 **Files:**
 
-- Create: `D:\git\opencode-anthropic-fix\test\rolling-summarizer-integration.test.mjs`
+- Create: `test\rolling-summarizer-integration.test.mjs`
 
 **Context:** We test the hook handler from Task 5 directly, by importing the plugin factory, invoking the handler with a mocked `fetch` and `getAccessToken`, and asserting the output shape across three scenarios: gate off, gate on + success, gate on + Haiku failure.
 
 The plugin exports its hook map through its factory. Find the exported entry point:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && grep -nE "^export (default|const|function)" index.mjs | head -20
+grep -nE "^export (default|const|function)" index.mjs | head -20
 ```
 
 Typically opencode plugins export a factory that returns the hook map. Adjust the test's import accordingly.
 
 - [ ] **Step 6.1: Write the integration test**
 
-Create `D:\git\opencode-anthropic-fix\test\rolling-summarizer-integration.test.mjs`:
+Create `test\rolling-summarizer-integration.test.mjs`:
 
 ```javascript
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
@@ -1075,7 +1075,7 @@ If OAuth acquires tokens via a background refresh flow (not a direct `getAccessT
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npx vitest run test/rolling-summarizer-integration.test.mjs
+npx vitest run test/rolling-summarizer-integration.test.mjs
 ```
 
 Expected: 3/3 pass.
@@ -1085,7 +1085,7 @@ Expected: 3/3 pass.
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npm test 2>&1 | tail -10
+npm test 2>&1 | tail -10
 ```
 
 Expected: all tests pass (1060 + 4 new haiku-call + 3 new config + 3 new integration = ~1070).
@@ -1093,7 +1093,7 @@ Expected: all tests pass (1060 + 4 new haiku-call + 3 new config + 3 new integra
 - [ ] **Step 6.4: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add test/rolling-summarizer-integration.test.mjs
 git commit -m "test(plugin): integration test for experimental.session.summarize
 
@@ -1108,10 +1108,10 @@ through, warning logged, output.summary stays undefined)."
 
 **Files:**
 
-- Modify: `D:\git\opencode-anthropic-fix\package.json` (0.1.19 → 0.1.20)
-- Modify: `D:\git\opencode-anthropic-fix\CHANGELOG.md` (add v0.1.20 entry)
-- Rebuild: `D:\git\opencode-anthropic-fix\dist\opencode-anthropic-auth-plugin.js`
-- Rebuild: `D:\git\opencode-anthropic-fix\dist\opencode-anthropic-auth-cli.mjs`
+- Modify: `package.json` (0.1.19 → 0.1.20)
+- Modify: `CHANGELOG.md` (add v0.1.20 entry)
+- Rebuild: `dist\opencode-anthropic-auth-plugin.js`
+- Rebuild: `dist\opencode-anthropic-auth-cli.mjs`
 
 - [ ] **Step 7.1: Bump version in `package.json`**
 
@@ -1125,7 +1125,7 @@ Edit `package.json`:
 
 - [ ] **Step 7.2: Add CHANGELOG entry**
 
-Prepend a new section to `D:\git\opencode-anthropic-fix\CHANGELOG.md` immediately after the `# Changelog` header and intro line, BEFORE the existing `## [0.1.19]` section:
+Prepend a new section to `CHANGELOG.md` immediately after the `# Changelog` header and intro line, BEFORE the existing `## [0.1.19]` section:
 
 ````markdown
 ## [0.1.20] — 2026-04-18
@@ -1180,7 +1180,7 @@ get stuck without a summary.
 
 Run:
 ```bash
-cd D:/git/opencode-anthropic-fix && npm run build
+npm run build
 ````
 
 Expected output: `Built dist/opencode-anthropic-auth-plugin.js and dist/opencode-anthropic-auth-cli.mjs`.
@@ -1188,7 +1188,7 @@ Expected output: `Built dist/opencode-anthropic-auth-plugin.js and dist/opencode
 - [ ] **Step 7.4: Commit**
 
 ```bash
-cd D:/git/opencode-anthropic-fix
+cd <repo-root>
 git add package.json CHANGELOG.md dist/opencode-anthropic-auth-plugin.js dist/opencode-anthropic-auth-cli.mjs
 git commit -m "chore: v0.1.20 — haiku rolling summary (opt-in, requires fork hook)
 
@@ -1206,7 +1206,7 @@ no-op on opencode versions without experimental.session.summarize."
 Run:
 
 ```bash
-cd D:/git/opencode/packages/opencode && bun test test/session/
+cd ../opencode/packages/opencode && bun test test/session/
 ```
 
 Expected: all green. Known flakes: `snapshot-tool-race.test.ts` (pre-existing, unrelated to this work).
@@ -1216,7 +1216,7 @@ Expected: all green. Known flakes: `snapshot-tool-race.test.ts` (pre-existing, u
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npm test 2>&1 | tail -8
+npm test 2>&1 | tail -8
 ```
 
 Expected: `Test Files XX passed`, `Tests 1070+ passed`.
@@ -1226,7 +1226,7 @@ Expected: `Test Files XX passed`, `Tests 1070+ passed`.
 Run:
 
 ```bash
-cd D:/git/opencode-anthropic-fix && npx eslint lib/haiku-call.mjs lib/haiku-call.test.mjs test/rolling-summarizer-integration.test.mjs
+npx eslint lib/haiku-call.mjs lib/haiku-call.test.mjs test/rolling-summarizer-integration.test.mjs
 ```
 
 Expected: zero errors. Pre-existing warnings in `index.mjs` are OK (they already existed pre-plan; don't fix them as part of this change — scope creep).
@@ -1255,12 +1255,12 @@ Present this checklist for the user to execute themselves:
 
 1. Install the new plugin version locally from the built dist:
    ```bash
-   cd D:/git/opencode-anthropic-fix && npm pack
+   npm pack
    # Install the resulting .tgz into wherever opencode picks up the plugin
    ```
 2. Update the opencode fork to the new commits (tasks 1 + 2):
    ```bash
-   cd D:/git/opencode && bun install && bun run build
+   cd ../opencode && bun install && bun run build
    ```
 3. Enable the flag in `%APPDATA%\opencode\anthropic-auth.json` (Windows) or
    `~/.config/opencode/anthropic-auth.json`:

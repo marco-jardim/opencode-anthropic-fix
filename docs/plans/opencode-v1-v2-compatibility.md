@@ -10,7 +10,7 @@ Inspected baseline: `opencode-anthropic-fix` 2.1.1, commit `2a7ebc3`, in this ta
 
 On 2026-09-30, the direct npm query returned **2.0.21** for `@opencode/cli` and `@opencode/plugin`, and **1.18.34** for `opencode-ai` and `@opencode-ai/plugin`. These are queried versions, not guarantees about future versions of `latest`. This plugin's lockfile contains `@opencode-ai/plugin` and SDK **1.2.27**, plus wire-compat **0.7.1**. The development dependency version alone does not determine host compatibility.
 
-Goal: one package that preserves the v1 path and adds a v2 implementation, sharing accounts, configuration, OAuth and wire behavior. Implementation takes place in this task's worktree. It does not change the active checkout at `D:\git\opencode-anthropic-fix`, installations, credentials or user settings.
+Goal: one package that preserves the v1 path and adds a v2 implementation, sharing accounts, configuration, OAuth and wire behavior. Implementation takes place in this task's worktree. It does not change the active checkout at `<repo-root>`, installations, credentials or user settings.
 
 ### Proposed version contract
 
