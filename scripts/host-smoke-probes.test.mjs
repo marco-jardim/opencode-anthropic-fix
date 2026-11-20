@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHostProbe, hostLogTail } from "./host-smoke-probes.mjs";
+import { compareModelInventories, createHostProbe, hostLogTail } from "./host-smoke-probes.mjs";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -53,6 +53,19 @@ describe("host smoke initialization probes", () => {
       "HTTP 500: broken plugin",
     );
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells a host catalog addition apart from a model lost by the reload", () => {
+    const baseline = Array.from({ length: 19 }, (_, index) => ({ id: `model-${index}` }));
+    expect(compareModelInventories(baseline, [...baseline].reverse())).toEqual({ missing: [], added: [] });
+    const grown = [...baseline, { id: "model-new", package: "p" }];
+    expect(compareModelInventories(baseline, grown)).toEqual({
+      missing: [],
+      added: [{ id: "model-new", package: "p" }],
+    });
+    // Same count, different identity: a count-only assertion would pass this.
+    const swapped = [...baseline.slice(1), { id: "model-new" }];
+    expect(compareModelInventories(baseline, swapped)).toEqual({ missing: ["model-0"], added: [{ id: "model-new" }] });
   });
 
   it("prints only the last 80 captured stdout/stderr log lines", () => {
