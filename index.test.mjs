@@ -389,7 +389,7 @@ describe("plugin lifecycle", () => {
 
     // Step 2: callback() — user pastes the code
     // At this point, loader() has NOT been called yet, so accountManager is null.
-    const credentials = await authResult.callback("auth-code#state");
+    const credentials = await authResult.callback(`auth-code#${new URL(authResult.url).searchParams.get("state")}`);
 
     expect(credentials.type).toBe("success");
     expect(credentials.refresh).toBe("refresh-from-oauth");
@@ -431,12 +431,13 @@ describe("plugin lifecycle", () => {
     const authResult = await method.authorize();
 
     // Pass a code#state string as the user would paste.
-    await authResult.callback("myauthcode#mystatevalue");
+    const pastedState = new URL(authResult.url).searchParams.get("state");
+    await authResult.callback(`myauthcode#${pastedState}`);
 
-    // The token endpoint body must contain state=mystatevalue.
+    // The token endpoint body must contain the authorize state.
     expect(capturedBody).toBeDefined();
     expect(capturedBody.code).toBe("myauthcode");
-    expect(capturedBody.state).toBe("mystatevalue");
+    expect(capturedBody.state).toBe(pastedState);
   });
 
   it("loader bootstraps from auth.json and saves accounts file immediately", async () => {
@@ -508,7 +509,7 @@ describe("plugin lifecycle", () => {
 
     const method = plugin.auth.methods[0];
     const authResult = await method.authorize();
-    const credentials = await authResult.callback("second-code#state");
+    const credentials = await authResult.callback(`second-code#${new URL(authResult.url).searchParams.get("state")}`);
 
     expect(credentials.type).toBe("success");
     expect(credentials.refresh).toBe("second-refresh");
@@ -1824,7 +1825,8 @@ describe("fetch interceptor — token refresh", () => {
     const [refreshUrl, refreshInit] = mockFetch.mock.calls[0];
     expect(refreshUrl).toBe("https://platform.claude.com/v1/oauth/token");
     expect(JSON.parse(refreshInit.body).grant_type).toBe("refresh_token");
-    expect(refreshInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+    expect(refreshInit.headers["User-Agent"]).toBe("axios/1.15.2");
+    expect(refreshInit.headers).not.toHaveProperty("anthropic-beta");
 
     // Second call should use the fresh token
     const [, apiInit] = mockFetch.mock.calls[1];
@@ -3081,11 +3083,12 @@ describe("OAuth exchange failure", () => {
     const method = plugin.auth.methods[0];
 
     const authResult = await method.authorize();
-    const credentials = await authResult.callback("bad-code#state");
+    const credentials = await authResult.callback(`bad-code#${new URL(authResult.url).searchParams.get("state")}`);
 
     expect(credentials.type).toBe("failed");
     const [, exchangeInit] = mockFetch.mock.calls[0];
-    expect(exchangeInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+    expect(exchangeInit.headers["User-Agent"]).toBe("axios/1.15.2");
+    expect(exchangeInit.headers).not.toHaveProperty("anthropic-beta");
     // saveAccounts should NOT have been called
     expect(saveAccounts).not.toHaveBeenCalled();
   });
@@ -3188,7 +3191,7 @@ describe("auth menu actions", () => {
       }),
     });
 
-    const credentials = await authResult.callback("fresh-code#state");
+    const credentials = await authResult.callback(`fresh-code#${new URL(authResult.url).searchParams.get("state")}`);
     expect(credentials.type).toBe("success");
     expect(credentials.refresh).toBe("fresh-refresh");
   });

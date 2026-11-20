@@ -430,6 +430,24 @@ describe("refreshAccessToken", () => {
     expect(account.expires).toBeGreaterThan(Date.now());
   });
 
+  it("passes the stored scopes and stores the granted ones", async () => {
+    const account = { refreshToken: "old-refresh", scopes: ["user:profile", "user:inference"] };
+    vi.mocked(refreshToken).mockResolvedValueOnce({
+      access_token: "new-access",
+      refresh_token: "new-refresh",
+      expires_in: 3600,
+      scopes: ["user:profile"],
+    });
+
+    await refreshAccessToken(account);
+
+    expect(refreshToken).toHaveBeenCalledWith("old-refresh", {
+      signal: expect.any(AbortSignal),
+      scopes: ["user:profile", "user:inference"],
+    });
+    expect(account.scopes).toEqual(["user:profile"]);
+  });
+
   it("returns null on failure", async () => {
     const account = { refreshToken: "bad-refresh" };
     mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
@@ -1014,7 +1032,8 @@ describe("auth commands", () => {
       const code = await cmdLogin();
       expect(code).toBe(0);
       expect(authorize).toHaveBeenCalledWith("max");
-      expect(exchange).toHaveBeenCalledWith("auth-code#state", "pkce-verifier");
+      // The authorize() state is forwarded (the mock returns none, so it is undefined here).
+      expect(exchange).toHaveBeenCalledWith("auth-code#state", "pkce-verifier", { state: undefined });
       expect(exec).toHaveBeenCalled();
       expect(saveAccounts).toHaveBeenCalledWith(
         expect.objectContaining({

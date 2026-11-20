@@ -330,21 +330,15 @@ describe("Fix #4: OAuth state validation (CSRF protection)", () => {
     expect(result.type).toBe("success");
   });
 
-  it("rejects callback with mismatched state via server-side validation", async () => {
-    // The main auth flow sends state to the server for validation.
-    // Mock the server rejecting the mismatched state.
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      text: async () => "invalid_state",
-    });
-
+  it("rejects a callback with a mismatched state locally, before any token request", async () => {
     const plugin = await AnthropicAuthPlugin({ client });
     const method = plugin.auth.methods[0];
     const authResult = await method.authorize();
 
     const result = await authResult.callback("auth-code#wrong-state");
     expect(result.type).toBe("failed");
+    expect(result.code).toBe("state_mismatch");
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
 
@@ -362,7 +356,7 @@ describe("OAuth wire contract (CC 2.1.280)", () => {
     expect(url).not.toContain("claude.ai/oauth");
   });
 
-  it("uses the attested token User-Agent rather than the old SDK or axios", async () => {
+  it("uses the genuine axios token User-Agent rather than the SDK one", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
@@ -370,12 +364,11 @@ describe("OAuth wire contract (CC 2.1.280)", () => {
     await refreshToken("refresh-token");
     const [, init] = mockFetch.mock.calls[0];
     const userAgent = init.headers["User-Agent"];
-    expect(userAgent).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
-    expect(userAgent).not.toContain("0.94.0");
-    expect(userAgent).not.toContain("axios/");
+    expect(userAgent).toBe("axios/1.15.2");
+    expect(userAgent).not.toContain("anthropic-sdk-typescript");
   });
 
-  it("keeps every outbound OAuth header value free of axios/", async () => {
+  it("keeps every outbound OAuth header value free of the SDK identifier and the oauth beta", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
@@ -386,11 +379,12 @@ describe("OAuth wire contract (CC 2.1.280)", () => {
     expect(values.length).toBeGreaterThan(0);
     for (const value of values) {
       expect(typeof value).toBe("string");
-      expect(value.includes("axios/")).toBe(false);
+      expect(value.includes("anthropic-sdk")).toBe(false);
+      expect(value.includes("oauth-2025")).toBe(false);
     }
   });
 
-  it("sends exactly three refresh body keys without scope", async () => {
+  it("sends the four genuine refresh body keys, scope last", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
@@ -398,8 +392,8 @@ describe("OAuth wire contract (CC 2.1.280)", () => {
     await refreshToken("refresh-token");
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id"]);
-    expect("scope" in body).toBe(false);
+    expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id", "scope"]);
+    expect(body.scope).toContain("user:inference");
   });
 });
 

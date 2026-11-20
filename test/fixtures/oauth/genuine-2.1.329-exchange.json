@@ -1,0 +1,17 @@
+{
+  "description": "Structure of the genuine Claude Code 2.1.329 OAuth token exchange, from a live capture. Header names and order and body key order only; no values are stored.",
+  "method": "POST",
+  "url": "https://platform.claude.com/v1/oauth/token",
+  "requestHeaderNames": [
+    "Accept",
+    "Content-Type",
+    "User-Agent",
+    "Content-Length",
+    "Accept-Encoding",
+    "Host",
+    "Connection"
+  ],
+  "pluginControlledHeaderNames": ["Accept", "Content-Type", "User-Agent", "Accept-Encoding"],
+  "requestBodyKeys": ["grant_type", "code", "redirect_uri", "client_id", "code_verifier", "state"],
+  "absentHeaderNames": ["anthropic-beta"]
+}
