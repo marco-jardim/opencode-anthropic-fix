@@ -92,10 +92,10 @@ The default login set gains `user:privacy_consents:write` and
 
 `... user:file_upload user:plugins user:privacy_consents:write org:desktop_config`
 
-The plugin exports both scope names and accepts them through the `extraScopes`
-option of `authorize()`, but does not request them until the release profile is
-repointed to `2.1.329`; until then the authorize URL carries the seven-scope
-`2.1.280` string above.
+The plugin is repointed to the `2.1.329` profile, so `authorize()` takes the profile's
+nine `oauthAuthorizeScopes` (`lib/oauth.mjs`) and requests both. An explicit
+`extraScopes` option still wins, and `oauth.plugins_scope: false` still removes
+`user:plugins`.
 
 ## 3) Other `2.1.329` changes that are not implemented
 

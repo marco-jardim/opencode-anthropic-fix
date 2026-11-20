@@ -16,13 +16,14 @@
 > `lib/mimicry/wire-compat.mjs`. The check only reads the file **name**; it asserts no heading or shape. This file
 > follows the shape of the 2.1.280 analysis (provenance banner, evidence tags, numbered sections, open questions).
 >
-> **Status, read this first.** The plugin has **not** been repointed to the 2.1.329 library profile yet.
-> `lib/mimicry/wire-compat.mjs` still binds the 2.1.280 profile, so on the wire the plugin still emulates
-> 2.1.280 for everything the library composes (user agent, SDK and runtime versions, beta list, header case and
-> order, body key order, `cch`). What is implemented is the **plugin-side** work that does not need the new
-> profile (§3). The repoint and per-turn effort are in §5, "Pending (lands with the 2.1.329 profile repoint)".
-> Until that lands the `check:invariants` gate reports a mismatch between this document (2.1.329) and the bound
-> profile (2.1.280); it clears with the repoint.
+> **Status, read this first.** The plugin **is** repointed to the 2.1.329 library profile.
+> `lib/mimicry/wire-compat.mjs` binds `CLAUDE_CODE_2_1_329_PROFILE` (`WIRE_PROFILE`) and exposes the registry through
+> the profile-neutral `WIRE_BETA_REGISTRY`, so on the wire the plugin emulates 2.1.329 for everything the library
+> composes (user agent, SDK and runtime versions, beta list, header names and order, body key order, billing
+> segments). The plugin-side work that did not need the new profile is in §3; the repoint, session correlation and
+> per-turn effort are in §5, "Implemented". It requires `@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later
+> (a prerelease; see §6). The `check:invariants` gate compares this document (2.1.329) with the bound profile and
+> passes.
 >
 > **Evidence tags** reuse the library's own convention: `[BIN]` transcribed from the binary, `[DER]` derived from
 > `[BIN]` under stated default conditions, `[UNR]` located but unresolved, `[LIVE]` observed in a local
@@ -42,7 +43,7 @@
 
 - **Date**: 2026-11-19
 - **Target release**: `@anthropic-ai/claude-code-win32-x64@2.1.329`
-- **Compared against**: `2.1.280` (`docs/claude-code-2.1.280-analysis.md`, the profile the plugin still binds)
+- **Compared against**: `2.1.280` (`docs/claude-code-2.1.280-analysis.md`, the profile the plugin bound before this work)
 - **Library analysis**: `docs/protocol/versions/claude-code-2.1.329-analysis.md` in the library source tree; section
   numbers below (`lib §n`) refer to it
 - **OAuth contract**: [`oauth-2.1.329-contract.md`](oauth-2.1.329-contract.md)
@@ -153,34 +154,34 @@ The plugin (2.1.280 profile plus a dynamic version override) differed from genui
 lowercase header names and a different order; five host-leaked headers (`x-opencode-client`,
 `x-opencode-project`, `x-opencode-session`, `x-opencode-session-id`, `x-session-id`) on the wire to
 `api.anthropic.com`; a different body key order; `cch=00000`; effort `high` and `max_tokens` 64000 against
-`medium` and 128000. §3 and §5 record which of these are fixed and which wait for the repoint.
+`medium` and 128000. §3 and §5 record how each was fixed (§3 before the repoint, §5 with it).
 
 ---
 
-## 3. Implemented on this branch (pre-repoint)
+## 3. Implemented before the repoint
 
 The numbered findings are lib §11.1. Class (a) is wire-safe (closer to genuine); class (b) is a documented
 divergence behind an opt-in (lib §11.2).
 
-| Finding (lib §11.1)            | What changed                                                                                                                                                                                                                                                                                    | Escape hatch                                                                            | Class                     |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------- |
-| 1–4 model-id folding (interim) | `lib/mimicry/request-body.mjs` sends effort and adaptive thinking only to models the pinned catalogue marks as supporting them, so `claude-mythos-5` no longer gets them; `thinking: {type: "disabled"}` is dropped for ids the catalogue does not know. Removed when the profile is repointed  | none (defensive)                                                                        | (a)                       |
-| 5 effort default               | default `medium`, resolved from `CLAUDE_CODE_EFFORT_LEVEL` > `default_effort` > (`auto`) catalogue default > `high`, clamped to what the model supports; host-supplied effort still wins                                                                                                        | `default_effort`                                                                        | (a)                       |
-| 7 version never floats         | the user agent and `cc_version` always carry the pinned profile's version; the npm "latest" lookup is recorded for diagnostics only (`emulating X; upstream latest Y`)                                                                                                                          | none                                                                                    | (a)                       |
-| 8 leaked host headers          | `x-opencode-*` and `x-session-id` are removed on the adapter path and the legacy forge before `ANTHROPIC_CUSTOM_HEADERS` is merged, so a user can still send one deliberately. **Pass-through mode keeps them**                                                                                 | none (pass-through is the opt-out of emulation)                                         | (a)                       |
-| 10–13 OAuth                    | axios header set and order, no `anthropic-beta`, redirects refused, `state` always sent, refresh `scope` sent with the stored scopes (and an `invalid_scope` retry), revoke URL `${TOKEN_URL}/revoke` with the `request-id` acknowledgement rule, scope union for both modes, no project scopes | `oauth.plugins_scope: false` drops `user:plugins`                                       | (a)                       |
-| 14 scope after latch           | `cache_control.scope` is dropped when the scope beta is suppressed (round-robin, disabled experimental betas, or a latched rejection), including on the retry                                                                                                                                   | none                                                                                    | (a)                       |
-| 15 TTL variables               | `CLAUDE_CODE_PROMPT_CACHE_TTL`, `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` and the split `CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL` (5m) are honoured; `extended-cache-ttl` is sent only when the resolved TTL is 1h                                                                                  | the environment variables themselves                                                    | (a)                       |
-| 16 tool deferral               | deferral excludes only `claude-3-*` models (Haiku 5.5 is no longer skipped by name); the feature stays opt-in                                                                                                                                                                                   | `token_economy.tool_deferral` (off by default)                                          | (b)                       |
-| 17 fast mode                   | follows the catalogue `fast_mode` holders; Opus 4.6 and 4.7 stay eligible only with the opt-in                                                                                                                                                                                                  | `fast_mode_legacy_models`                                                               | (b)                       |
-| 18 native 1M context           | the adaptive-context path never escalates a natively-1M model to `context-1m`; the context-limit override covers them (still behind `override_model_limits.enabled`)                                                                                                                            | none                                                                                    | (a)                       |
-| 19 org-locked thinking         | for models with `org_locked_thinking`, the first attempt prefers a usable account in the organization that last served the conversation (`lib/org-affinity.mjs`); with none, it continues, toasts once, and strips older thinking only when opted in                                            | `account_affinity.org_locked_thinking`, `account_affinity.strip_thinking_on_org_switch` | (a) stickiness, (b) strip |
-| 20 stale docs and pins         | this document set; `tengu_velvet_tide` in code comments; microcompact documented as toast-only; the OAuth `0.112.1` SDK pin removed                                                                                                                                                             | n/a                                                                                     | docs                      |
-| Haiku `claude-code` beta       | re-added on agentic main requests only (genuine `isAgenticQuery`), never on title, small or subagent-side requests                                                                                                                                                                              | none                                                                                    | (a)                       |
-| Cold-cache rewrites            | history and tool rewrites (`conservative: false`) and idle tool-result clearing run only when the prompt cache is already cold                                                                                                                                                                  | `token_economy.cold_cache_only`, `token_economy.idle_tool_result_clearing`              | (b)                       |
-| Idle compaction                | compacts a 1h-cache conversation at 0.9 of its life through `client.session.summarize` (v1 host only, feature-detected)                                                                                                                                                                         | `token_economy.idle_compaction`                                                         | (b)                       |
-| System prompt                  | segment-aware rewrite, genuine opening sentence, empowerment blocks, stable and volatile split (§4)                                                                                                                                                                                             | `system_prompt.*`                                                                       | (a) neutral               |
-| Changed defaults               | `lean_system_non_main`, `output_cap.enabled`, `prompt_compaction`, `anti_verbosity`, `adaptive_thinking_zero_simple` all default off                                                                                                                                                            | each key                                                                                | (b) → off                 |
+| Finding (lib §11.1)            | What changed                                                                                                                                                                                                                                                                                                                                                                                                                | Escape hatch                                                                            | Class                     |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------- |
+| 1–4 model-id folding (interim) | `lib/mimicry/request-body.mjs` sends effort and adaptive thinking only to models the pinned catalogue marks as supporting them, so `claude-mythos-5` no longer gets them; `thinking: {type: "disabled"}` is dropped for ids the catalogue does not know. Kept after the repoint as a defensive, exact-key lookup (`catalogueEntryForWire`), because the library's id normaliser folds unknown ids onto a catalogued sibling | none (defensive)                                                                        | (a)                       |
+| 5 effort default               | default `medium`, resolved from `CLAUDE_CODE_EFFORT_LEVEL` > `default_effort` > (`auto`) catalogue default > `high`, clamped to what the model supports; host-supplied effort still wins                                                                                                                                                                                                                                    | `default_effort`                                                                        | (a)                       |
+| 7 version never floats         | the user agent and `cc_version` always carry the pinned profile's version; the npm "latest" lookup is recorded for diagnostics only (`emulating X; upstream latest Y`)                                                                                                                                                                                                                                                      | none                                                                                    | (a)                       |
+| 8 leaked host headers          | `x-opencode-*` and `x-session-id` are removed on the adapter path and the legacy forge before `ANTHROPIC_CUSTOM_HEADERS` is merged, so a user can still send one deliberately. **Pass-through mode keeps them**                                                                                                                                                                                                             | none (pass-through is the opt-out of emulation)                                         | (a)                       |
+| 10–13 OAuth                    | axios header set and order, no `anthropic-beta`, redirects refused, `state` always sent, refresh `scope` sent with the stored scopes (and an `invalid_scope` retry), revoke URL `${TOKEN_URL}/revoke` with the `request-id` acknowledgement rule, scope union for both modes, no project scopes                                                                                                                             | `oauth.plugins_scope: false` drops `user:plugins`                                       | (a)                       |
+| 14 scope after latch           | `cache_control.scope` is dropped when the scope beta is suppressed (round-robin, disabled experimental betas, or a latched rejection), including on the retry                                                                                                                                                                                                                                                               | none                                                                                    | (a)                       |
+| 15 TTL variables               | `CLAUDE_CODE_PROMPT_CACHE_TTL`, `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` and the split `CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL` (5m) are honoured; `extended-cache-ttl` is sent only when the resolved TTL is 1h                                                                                                                                                                                                              | the environment variables themselves                                                    | (a)                       |
+| 16 tool deferral               | deferral excludes only `claude-3-*` models (Haiku 5.5 is no longer skipped by name); the feature stays opt-in                                                                                                                                                                                                                                                                                                               | `token_economy.tool_deferral` (off by default)                                          | (b)                       |
+| 17 fast mode                   | follows the catalogue `fast_mode` holders; Opus 4.6 and 4.7 stay eligible only with the opt-in                                                                                                                                                                                                                                                                                                                              | `fast_mode_legacy_models`                                                               | (b)                       |
+| 18 native 1M context           | the adaptive-context path never escalates a natively-1M model to `context-1m`; the context-limit override covers them (still behind `override_model_limits.enabled`)                                                                                                                                                                                                                                                        | none                                                                                    | (a)                       |
+| 19 org-locked thinking         | for models with `org_locked_thinking`, the first attempt prefers a usable account in the organization that last served the conversation (`lib/org-affinity.mjs`); with none, it continues, toasts once, and strips older thinking only when opted in                                                                                                                                                                        | `account_affinity.org_locked_thinking`, `account_affinity.strip_thinking_on_org_switch` | (a) stickiness, (b) strip |
+| 20 stale docs and pins         | this document set; `tengu_velvet_tide` in code comments; microcompact documented as toast-only; the OAuth `0.112.1` SDK pin removed                                                                                                                                                                                                                                                                                         | n/a                                                                                     | docs                      |
+| Haiku `claude-code` beta       | re-added on agentic main requests only (genuine `isAgenticQuery`), never on title, small or subagent-side requests; since the repoint the library composes it from `agenticQuery` (§5)                                                                                                                                                                                                                                      | none                                                                                    | (a)                       |
+| Cold-cache rewrites            | history and tool rewrites (`conservative: false`) and idle tool-result clearing run only when the prompt cache is already cold                                                                                                                                                                                                                                                                                              | `token_economy.cold_cache_only`, `token_economy.idle_tool_result_clearing`              | (b)                       |
+| Idle compaction                | compacts a 1h-cache conversation at 0.9 of its life through `client.session.summarize` (v1 host only, feature-detected)                                                                                                                                                                                                                                                                                                     | `token_economy.idle_compaction`                                                         | (b)                       |
+| System prompt                  | segment-aware rewrite, genuine opening sentence, empowerment blocks, stable and volatile split (§4)                                                                                                                                                                                                                                                                                                                         | `system_prompt.*`                                                                       | (a) neutral               |
+| Changed defaults               | `lean_system_non_main`, `output_cap.enabled`, `prompt_compaction`, `anti_verbosity`, `adaptive_thinking_zero_simple` all default off                                                                                                                                                                                                                                                                                        | each key                                                                                | (b) → off                 |
 
 Not implemented, by design (library §8 and §10.2): cache keepalive (`/v1/messages/cache_touch`), resumption,
 shared-head and parent-reply markers, `resume_cache_warm`, the total-tokens reminder,
@@ -229,32 +230,78 @@ changes are neutral for the fingerprint and exist for correctness and cache stab
 
 ---
 
-## 5. Pending (lands with the 2.1.329 profile repoint)
+## 5. Implemented with the 2.1.329 profile repoint
 
-These items need the library's 2.1.329 profile (`CLAUDE_CODE_2_1_329_PROFILE`, `BETA_REGISTRY_2_1_329`) and are
-**not** implemented on this branch.
+These items use the library's 2.1.329 profile (`CLAUDE_CODE_2_1_329_PROFILE`, `BETA_REGISTRY_2_1_329`) and are
+implemented and committed on this branch (WP7 and WP8). The library requirement is 0.8.0-rc.1 (§6).
 
-- **Repoint (WP7).** Bind `WIRE_PROFILE` to the 2.1.329 profile; this moves the user agent, Stainless package
-  version (0.128.0), runtime version (`v26.12.1` from the profile), the beta registry and order (without
-  `mid-conversation-system`, with `thinking-token-count` moved), header capitalisation and order, `Accept`,
-  `x-claude-code-request-class` and `x-claude-1p-request-class`, the body key order and generated
-  `context_management` / `diagnostics`, and the `cc_turn_origin` / `cc_prompt_index` / `cc_turn_index` billing
-  segments. All of these are library-side and arrive with the new profile.
-- **Session correlation** (`signature_emulation.session_correlation`, inert until then): per-conversation
-  `promptId`, `turnOrigin`, `turnPosition`, `toolsUsed`, `previousRequestId` and `previousMessageId` fed to the
-  library. The increment rule after the first request is inferred, not transcribed.
-- **Account-served features as opt-ins** (`account_features.*`, off by default, inert until then):
-  `dispatch_id`, `message_threads`, `inline_tools`, `advisor`, `tool_provenance`.
-- **OAuth scopes from the profile.** The authorize request will take the profile's `oauthAuthorizeScopes`, which
-  adds `user:privacy_consents:write org:desktop_config`. Until then the authorize URL carries the seven-scope
-  2.1.280 string.
-- **Per-turn effort (WP8).** Effort changes mid-conversation are sent as the genuine `role: "system"` message with
-  an `output_config` inside `messages` (beta `per-turn-control-2026-07-01`, lib §4.3.1), which keeps the cached
-  prefix intact; the top-level `output_config.effort` stays fixed for the conversation. Auto-`low` for short typed
-  questions is planned on by default (`per_turn_effort.auto_low_short_questions`) for models with the
-  `per_turn_effort` capability. The `per_turn_effort` config block exists but is inert until then.
-- **Interim guards removed.** The model-id-folding guards of §3 are removed once the catalogue covers the new ids.
-- **Tests and goldens** move with the repoint, reviewed byte by byte; the frozen library digests do not move.
+- **Repoint (WP7).** `WIRE_PROFILE` is `CLAUDE_CODE_2_1_329_PROFILE` and `WIRE_BETA_REGISTRY` (the profile-neutral
+  name every consumer reads) is `BETA_REGISTRY_2_1_329` (`lib/mimicry/wire-compat.mjs`). The library therefore
+  composes the 2.1.329 user agent, Stainless package version (0.128.0), the beta registry and order (without
+  `mid-conversation-system`, with `thinking-token-count` moved), header names and order, `Accept`,
+  `x-claude-code-request-class` and `x-claude-1p-request-class`, the body key order and the `cc_turn_origin` /
+  `cc_prompt_index` / `cc_turn_index` billing segments. The runtime version comes from the profile
+  (`WIRE_PROFILE.runtimeVersion`, `v26.12.1`; the host's `process.version` only backs up a profile that carries none),
+  and the authorize request takes the profile's nine `oauthAuthorizeScopes`, which adds
+  `user:privacy_consents:write org:desktop_config` (`lib/oauth.mjs`). `oauth.plugins_scope: false` still removes
+  `user:plugins`.
+- **Session correlation** (`signature_emulation.session_correlation`, default on; `lib/session-correlation.mjs`).
+  Per-conversation state, accounted once per logical request and for main-role requests only, feeds the library:
+  - `promptId`, which reaches the `x-claude-code-prompt-id` header and the billing block's `cc_prompt_id`;
+  - `turnOrigin: "human"` (set for the main thread; title, small and subagent requests carry none);
+  - the prompt and turn index (`turnPosition`), where the first typed prompt is 1/1 as the live capture shows;
+  - `previousRequestId` (the previous response's `request-id` header) and `previousMessageId` (read off the previous
+    stream), the latter feeding `diagnostics.previous_message_id`; values outside the shapes the library accepts are
+    ignored, so a malformed header can never become a local `INVALID_INPUT`;
+  - `toolsUsed`, the distinct tools of the conversation mapped to the Claude Code spelling and bounded to the library
+    limits, which becomes `x-claude-code-sandy-plover` (`[]` while none was used).
+
+  The first request and the typed-prompt boundary are attested; the increment rule after the first request is
+  **inferred** from the segment names (a typed message with a new fingerprint starts a prompt, anything else is a
+  further turn of the same prompt).
+
+- **Request classes.** The session-title request sends `sideQuery`. Main, non-title requests send `agenticQuery`,
+  which makes the library compose the Haiku `claude-code` beta in its own position and replaces the plugin's former
+  append (closing the position residual of §3).
+- **Account-served features** (`account_features.*`, off by default): `dispatch_id` (`anthropic-dispatch-id: v2d`),
+  `message_threads` (`thread: {"type":"create"}`), `inline_tools`, `tool_provenance`, and `advisor`. With `advisor`
+  on, the plugin sends the `advisor_20260301` server tool itself (the library derives the `advisor-tool` beta from
+  it) instead of adding the bare beta, and only for non-`claude-3-*` models. None of them is a code default
+  upstream, so none is on by default here.
+- **Cache diagnosis is body-coupled and never latched.** `cache-diagnosis-2026-04-07` is paired with the
+  `diagnostics` body field, as are `message-threads` and `tool-provenance` with theirs
+  (`BODY_COUPLED_BETAS`, `lib/mimicry/adapter-input.mjs`). The rejected-beta latch only filters the header, so
+  suppressing one of them would leave a body field without its beta; a rejection naming one surfaces as before.
+  `advisor-tool` is body-coupled only while `account_features.advisor` is on.
+- **Generated `context_management` is genuine.** When thinking is active the library writes
+  `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}` after `thinking`, as the captures show; the plugin
+  accepts it and does not add its own (`token_economy.context_management` remains an opt-in for hosts that want a
+  different body).
+- **Per-turn effort (WP8)** (`per_turn_effort.*`, default on; `lib/per-turn-effort.mjs`). Effort changes
+  mid-conversation travel as the genuine `{"role":"system","content":[],"output_config":{"effort":"<level>"}}`
+  message inside `messages`, right before the turn they apply to (beta `per-turn-control-2026-07-01`, lib §4.3.1),
+  so the cached prefix is never rewritten; the top-level `output_config.effort` stays the effort the conversation
+  started with. Two sources feed a new turn: the host's effort (an opencode variant switch) and auto-`low` for a short
+  typed question (`per_turn_effort.auto_low_short_questions`, default on; `short_question_max_chars`, default 280;
+  code fences never count as short). Rules:
+  - the decision for a turn is made exactly once, on the request where it is the newest message, and remembered; the
+    control messages of past turns are re-derived from that memory so every request is a byte-for-byte continuation
+    of the previous one;
+  - the conversation's **first turn never gets a control message** (it defines the base effort);
+  - a typed turn that directly follows an assistant message with an open `tool_use` gets none, because the later
+    orphan repair folds the missing results into that user turn;
+  - the memory resets on a model change or when the first message is not the one seen before (a new, cleared,
+    compacted or branched conversation), and the effort in hand becomes the new base;
+  - only main-thread, non-subagent requests on the adapter path, for models whose catalogue entry declares
+    `per_turn_effort`, take part. Thinking is never touched, and the count-tokens surface drops the control messages.
+
+  Escape hatch: `per_turn_effort.enabled: false` turns the mechanism off, `per_turn_effort.auto_low_short_questions:
+false` keeps host-driven changes only.
+
+- **Interim guards stay.** The model-id-folding guards of §3 are kept as exact-key catalogue lookups, now against the
+  2.1.329 catalogue.
+- **Tests and goldens** moved with the repoint and were reviewed byte by byte. The billing `cc_prompt_id` is a fresh
+  UUID per prompt, so the baselines normalise it; the library's frozen digests do not move.
 
 ---
 
@@ -262,10 +309,17 @@ These items need the library's 2.1.329 profile (`CLAUDE_CODE_2_1_329_PROFILE`, `
 
 - **`cch` is not reproducible.** The genuine client sends a per-request 5-hex value substituted below the JS; the
   algorithm is not recoverable from the bundle (lib §4.1, `[UNR]`). The plugin sends `cch=00000` and is accepted,
-  but the request is distinguishable. The library will carry an optional seam; the plugin deliberately leaves it
-  unset (no host source).
+  but the request is distinguishable. The library carries an optional `cch` seam; the plugin deliberately leaves it
+  unset (no host source), so the library default goes out.
 - **Residual transport signal.** `Content-Length`, `Host`, `Connection` (genuine: `Connection: close`) and header
-  case and position on the OAuth token calls are set by the runtime, not by `fetch` options.
+  case and position on the OAuth token calls are set by the runtime, not by `fetch` options. The same holds for the
+  main request: the library returns header pairs in the genuine capitalisation and order, but the plugin hands them to
+  `fetch` as a `Headers` object, which lowercases every name and does not preserve order, so what reaches the wire is
+  lowercase names in the runtime's order (recorded in `docs/mimicry/wire-compat-divergences.md`).
+- **Library prerelease.** The plugin needs `@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later (the first
+  release with the 2.1.329 profile as default). It is a prerelease, so the `latest` dist-tag does not carry it until
+  the library is published; the plugin must not be released before that, and `package.json` and the lockfile must move
+  with it.
 - **Gzip and padding** (lib §6.6) is a host transport concern; the padding is body bytes and is not modelled.
 - **Fingerprint input.** Genuine hashes the first typed, non-meta prompt; the library hashes the first text block
   of the first wire user message, which diverges whenever a host merges reminders into the first message (lib

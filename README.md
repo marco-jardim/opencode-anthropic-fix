@@ -520,7 +520,8 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
     // "minimal" | "off"
     "prompt_compaction": "off",
     // Correlate the requests of one session the way the genuine client does
-    // (prompt id, turn position, previous request/message ids).
+    // (prompt id, turn origin, prompt/turn index, previous request/message ids, tools used).
+    // Default true; false sends none of them.
     "session_correlation": true,
   },
 
@@ -536,8 +537,12 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
   "fast_mode_legacy_models": false,
 
   // Per-turn effort: effort changes mid-conversation go through the genuine per-turn
-  // mechanism, which keeps the cached prefix intact. "auto_low_short_questions" sends
-  // effort "low" for a short typed question (this turn only).
+  // control message ({"role":"system","content":[],"output_config":{...}}), which keeps
+  // the cached prefix intact; the top-level effort stays the conversation's base.
+  // "auto_low_short_questions" sends effort "low" for a short typed question (this turn
+  // only, up to short_question_max_chars). The first turn of a conversation and a typed
+  // turn right after an open tool_use never get a control message. Only models whose
+  // catalogue entry declares per_turn_effort take part. Set "enabled": false to turn it off.
   "per_turn_effort": {
     "enabled": true,
     "auto_low_short_questions": true,
@@ -590,7 +595,9 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
     "strip_thinking_on_org_switch": false,
   },
 
-  // Optional per-account request features (all opt-in).
+  // Optional per-account request features. The genuine client enables them only for
+  // accounts the server enrolled, which the plugin cannot observe, so every one is off
+  // by default. "advisor" sends the advisor tool (the beta follows from it).
   "account_features": {
     "dispatch_id": false,
     "message_threads": false,
@@ -726,9 +733,10 @@ explicit opt-in; existing config files keep loading.
 - `signature_emulation.prompt_compaction` is now `"off"`; set `"minimal"` (or `/anthropic set compaction minimal`) to opt in.
 - `anti_verbosity.enabled` is now `false`; set it to `true` (or `OPENCODE_ANTHROPIC_ANTI_VERBOSITY=1`) to opt in.
 - `token_economy.adaptive_thinking_zero_simple` is now `false`: thinking stays adaptive and is never toggled per question.
-- New: `default_effort` (default `"medium"`), `system_prompt.empowerment` (default `"max"`) and the per-turn effort,
-  account-affinity and account-feature settings shown above. Several of them are inert until the matching wire profile
-  is wired in.
+- New: `default_effort` (default `"medium"`), `system_prompt.empowerment` (default `"max"`), `per_turn_effort` (default
+  on), `signature_emulation.session_correlation` (default on), and the account-affinity and `account_features` settings
+  shown above (`account_features` is off by default). The plugin emulates the Claude Code 2.1.329 wire and requires
+  `@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later.
 
 ### Environment Variables
 

@@ -4,6 +4,101 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+Claude Code 2.1.329 work. The plugin now emulates the library's 2.1.329 profile on the wire (user agent, SDK and runtime
+versions, beta registry and order, body key order, billing segments, profile OAuth scopes). **Requires
+`@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later**, a prerelease: the library must publish a stable release
+before this plugin is released. Analysis: `docs/claude-code-2.1.329-analysis.md`; OAuth: `docs/oauth-2.1.329-contract.md`.
+
+### Changed (behaviour; each has an escape hatch)
+
+- **Default effort is `medium`** (was `high`) for adaptive models that support effort. `default_effort` accepts `auto`
+  (catalogue default), `low`, `medium`, `high`, `xhigh`, `max`; `CLAUDE_CODE_EFFORT_LEVEL` wins; a level the model does
+  not support is clamped to `high`; host-supplied effort still wins. Effort and adaptive thinking are now sent only to
+  models the pinned catalogue marks as supporting them, and `thinking: {type: "disabled"}` is dropped for ids the
+  catalogue does not know. Escape hatch: `default_effort: "high"`.
+- **Fast mode follows the catalogue** (`fast_mode` holders) instead of a hard-coded Opus list. Escape hatch:
+  `fast_mode_legacy_models: true` keeps Opus 4.6 and 4.7 eligible.
+- **The user-agent version is pinned to the profile.** The wire always claims the pinned profile's version; the npm
+  "latest" lookup (`signature_emulation.fetch_claude_code_version_on_startup`) is informational only and shown by
+  `/anthropic diagnose` as `emulating X; upstream latest Y`. No escape hatch (a different version would assert a protocol
+  the bytes do not follow).
+- **OAuth token requests send the genuine axios fingerprint** (`axios/1.15.2`, `Accept: application/json, text/plain,
+*/*`, no `anthropic-beta`, no SDK user agent), refuse redirects, always send `state` on exchange, send the account's
+  stored scopes as `scope` on refresh (one retry without it on `invalid_scope`), and revoke at `${TOKEN_URL}/revoke`
+  with the genuine `request-id` acknowledgement rule. The authorize URL carries the same scope union for the console and
+  the Claude.ai login, and `user:plugins` is now on by default; project scopes are never sent. Escape hatch:
+  `oauth.plugins_scope: false` drops `user:plugins` (warns once: diverges from genuine). `oauth.project_scopes` is
+  deprecated and has no effect (warns once). Accounts persist their `scopes` (optional).
+- **Leaked host headers are stripped.** `x-opencode-*` and `x-session-id` no longer reach `api.anthropic.com` on the
+  adapter path and the legacy forge. `ANTHROPIC_CUSTOM_HEADERS` can still send one deliberately; pass-through mode
+  (signature emulation off) keeps them.
+- **System prompt** (`system_prompt.*`): the OpenCode → Claude Code rewrite applies only to the base prompt and the
+  `<env>` header (`rewrite_scope: "base"`) and never to paths, URLs, instruction files or skills; the host block starts
+  with the genuine 2.1.329 opening sentence (`genuine_opening`); ten empowerment blocks follow (`empowerment`, default
+  `"max"`); and the block is split into a stable and a volatile part (`split_stable_volatile`). Escape hatches:
+  `rewrite_scope: "all"`, `genuine_opening: false`, `empowerment: "off"` (or `"power"`, `"research"`, or a list of block
+  ids), `split_stable_volatile: false`.
+- **Changed defaults:** `token_economy.lean_system_non_main`, `output_cap.enabled`, `signature_emulation.prompt_compaction`
+  (`"off"`), `anti_verbosity.enabled` and `token_economy.adaptive_thinking_zero_simple` are now off (the thinking
+  configuration is never toggled per question: it invalidates the message cache and the new models reject disabled
+  thinking). Escape hatch: set each key back to its previous value.
+- **Prompt-cache handling.** `cache_control.scope` is dropped from the body when the scope beta is suppressed (round-robin,
+  disabled experimental betas, or a latched rejection), including on the retry; `CLAUDE_CODE_PROMPT_CACHE_TTL`,
+  `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` and `CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL=5m` are honoured; and
+  `extended-cache-ttl-2025-04-11` is sent only when the resolved TTL is `1h`.
+- **Haiku `claude-code-20250219` beta only on agentic main requests** (was every Haiku request, including title and
+  subagent side requests), as the genuine client does.
+- **Natively-1M models are never escalated to `context-1m`**, and `override_model_limits` covers them.
+- **Tool deferral** excludes only `claude-3-*` models (Haiku 5.5 is no longer skipped by name); the feature stays opt-in.
+
+### Added (opt-in, all off by default)
+
+- `token_economy.cold_cache_only`: history and tool rewrites run only when the conversation's prompt cache is already
+  cold.
+- `token_economy.idle_tool_result_clearing`: after a long idle, old tool results are replaced with the genuine
+  placeholder (cold cache only).
+- `token_economy.idle_compaction` (v1 host only) and `idle_compaction_min_tokens` (default 200000, minimum 100000):
+  compacts a 1h-cache conversation at 0.9 of its cache life through `client.session.summarize`; skipped when the host has
+  no `summarize`.
+- `account_affinity.org_locked_thinking` (default on, effective once the catalogue marks a model org-locked) keeps a
+  conversation on the organization that wrote its thinking; `account_affinity.strip_thinking_on_org_switch` (off) strips
+  older thinking when no same-organization account is available.
+- `account_features` (`dispatch_id`, `message_threads`, `inline_tools`, `advisor`, `tool_provenance`; all default off).
+  With `advisor` on, the plugin sends the `advisor_20260301` tool and the library derives the beta instead of the plugin
+  adding the bare beta.
+
+### Added (default on)
+
+- **Session correlation** (`signature_emulation.session_correlation`, default `true`): per-conversation prompt id
+  (`x-claude-code-prompt-id`, billing `cc_prompt_id`), turn origin `human`, prompt and turn index (first typed prompt is
+  1/1; later increments are inferred), the previous response's `request-id` and message id
+  (`diagnostics.previous_message_id`) and the tools used (`x-claude-code-sandy-plover`). Escape hatch:
+  `session_correlation: false`.
+- **Per-turn effort** (`per_turn_effort`, default on): an effort change mid-conversation, and auto-`low` for a short typed
+  question (`auto_low_short_questions`, default on; `short_question_max_chars`, default 280), is sent as the genuine
+  `role: "system"` control message with an `output_config` before that turn, so the cached prefix is never rewritten; the
+  top-level `output_config.effort` stays the conversation's base. The first turn never gets a control message, nor does a
+  typed turn right after an open `tool_use`; memory resets on a model change or a new conversation. Only models whose
+  catalogue entry declares `per_turn_effort` take part. Escape hatch: `per_turn_effort.enabled: false`, or
+  `per_turn_effort.auto_low_short_questions: false` for host-driven changes only.
+
+### Changed by the repoint to the 2.1.329 profile
+
+- The wire follows the 2.1.329 profile: `claude-cli/2.1.329` user agent, Stainless 0.128.0, runtime version from the
+  profile, the 2.1.329 beta registry (no `mid-conversation-system`), `Accept: application/json`, the request-class and
+  prompt-id headers, the genuine body key order with generated `context_management` and `diagnostics`, and the billing
+  `cc_turn_origin` / `cc_prompt_index` / `cc_turn_index` segments. `fetch` lowercases header names and does not keep their
+  order, so the genuine capitalisation and order are a recorded divergence.
+- Title requests send `sideQuery` and main requests `agenticQuery`; the Haiku `claude-code` beta is now composed by the
+  library from `agenticQuery` instead of being appended by the plugin.
+- The authorize URL now carries all nine profile scopes, adding `user:privacy_consents:write` and `org:desktop_config`.
+- `cache-diagnosis` is body-coupled to `diagnostics` and is never suppressed by the rejected-beta latch.
+
+### Fixed
+
+- Microcompact documentation and config comments now say it tracks utilization and shows a toast and injects nothing on
+  the wire; the lean-prompt flag name is `tengu_velvet_tide` (was `tengu_velvet_cascade`).
+
 ## [2.2.2] — 2026-10-25
 
 ### Fixed

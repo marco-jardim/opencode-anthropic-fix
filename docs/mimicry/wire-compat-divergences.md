@@ -32,12 +32,16 @@ itself a defect: then the fix belongs in the consumer. `stainlessHelper` markers
   port has landed (see `docs/claude-code-2.1.280-analysis.md`), so the pin lifted. `package-lock.json` resolves
   `latest` to **`0.7.0`** as of this note. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is
   actually installed — a dist-tag is mutable, so the lockfile, not this sentence, is the source of truth.
-- The wire shape follows from that: the adapter calls the package **without a `profile` argument**, so
-  the plugin inherits the package's `DEFAULT_PROFILE`. `0.1.0` defaulted to `claude-code-2.1.195`;
-  `0.3.0` moved it to `claude-code-2.1.233-sdk-0.112.1`; `0.6.0` moved it again to
-  `claude-code-2.1.280-sdk-0.112.1` (SDK version unchanged). A package release can therefore move the
-  wire, which is the whole point of the arrangement and the reason the golden suite exists. An emergency
-  rollback pins an exact version instead of tracking `latest` — see
+- **The plugin now requires `0.8.0-rc.1` or later** (the first release carrying the Claude Code 2.1.329 profile). It
+  is a prerelease, so the `latest` dist-tag does not carry it until the library publishes a stable release; the
+  plugin must not be released before that, and `package.json` and the lockfile move with it.
+- The emulated profile is **pinned by the plugin**: the adapter passes `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`,
+  currently `CLAUDE_CODE_2_1_329_PROFILE`) as an explicit `profile` argument on every call, so a package release
+  cannot move the wire by changing its `DEFAULT_PROFILE`. For history: `0.1.0` defaulted to `claude-code-2.1.195`;
+  `0.3.0` moved it to `claude-code-2.1.233-sdk-0.112.1`; `0.6.0` to `claude-code-2.1.280-sdk-0.112.1`; `0.8.0-rc.1`
+  to the 2.1.329 profile. Before the plugin started passing `profile` explicitly (and before the 2.1.329 repoint), a
+  release could move the wire under `latest`; that is no longer the case, and the golden suite still guards the
+  library's fixes. An emergency rollback pins an exact version instead of tracking `latest` — see
   `docs/emergency-protocol-profile.md` and `docs/shared-package-provenance.md`.
 - S8 and S9 shipped in `0.1.0-rc.17` and are present in every release since.
 
@@ -81,18 +85,33 @@ recorded in the package's `docs/source-trace.md` and, for 2.1.233 and 2.1.280 re
 re-verified against the 2.1.280 binary beyond what row 3's update below cites; treat an unmarked row as carried
 forward from 2.1.233 rather than freshly confirmed.
 
-| #   | Field                                | Plugin emits                                      | Package emits                                     | State                                                                                           |
-| --- | ------------------------------------ | ------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| 1   | `claude-code-20250219` on Haiku      | present (appended last)                           | absent                                            | **Open** — deliberate, re-added through S1 `additionalBetas`.                                   |
-| 2   | `web-search-2025-03-05`              | present on first party                            | absent                                            | **Open** — deliberate, re-added through S1 `additionalBetas`.                                   |
-| 3   | `advisor-tool-2026-03-01`            | present on non-`claude-3-*`                       | absent                                            | **Open** — deliberate, re-added through S1 `additionalBetas`.                                   |
-| 4   | `mid-conversation-system-2026-04-07` | present on `claude-opus-4-8` and `claude-fable-5` | present on `claude-opus-4-8` and `claude-fable-5` | **Closed** — the adapter path composes it; both columns of `BETA_HEADER_GOLDEN` carry it.       |
-| 5   | `thinking` on the enabled branch     | `{"budget_tokens":7999,"type":"enabled"}`         | `{"budget_tokens":7999,"type":"enabled"}`         | **Closed** — the plugin's first-party turn routes through the package, so both emit the golden. |
-| 6   | `max_tokens`                         | capped at the model's default output limit        | capped at the model's default output limit        | **Closed** — same reason; both paths land on 32000 for `max_tokens: 40000` on sonnet-4-5.       |
+| #   | Field                                                             | Plugin emits                                                                                                                | Package emits                                               | State                                                                                                                 |
+| --- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 1   | `claude-code-20250219` on Haiku                                   | present on agentic main requests only, composed by the library from `agenticQuery`                                          | absent unless `agenticQuery` is set                         | **Open** — deliberate, requested through the `agenticQuery` input; the library fixes its position.                    |
+| 2   | `web-search-2025-03-05`                                           | present on first party                                                                                                      | absent                                                      | **Open** — deliberate, re-added through S1 `additionalBetas`.                                                         |
+| 3   | `advisor-tool-2026-03-01`                                         | present on non-`claude-3-*`                                                                                                 | absent                                                      | **Open** — deliberate, re-added through S1 `additionalBetas`.                                                         |
+| 4   | `mid-conversation-system-2026-04-07`                              | present on `claude-opus-4-8` and `claude-fable-5`                                                                           | present on `claude-opus-4-8` and `claude-fable-5`           | **Closed** — the adapter path composes it; both columns of `BETA_HEADER_GOLDEN` carry it.                             |
+| 5   | `thinking` on the enabled branch                                  | `{"budget_tokens":7999,"type":"enabled"}`                                                                                   | `{"budget_tokens":7999,"type":"enabled"}`                   | **Closed** — the plugin's first-party turn routes through the package, so both emit the golden.                       |
+| 6   | `max_tokens`                                                      | capped at the model's default output limit                                                                                  | capped at the model's default output limit                  | **Closed** — same reason; both paths land on 32000 for `max_tokens: 40000` on sonnet-4-5.                             |
+| 7   | `max_tokens` policy                                               | the host's own value passes through (the output cap is off by default); the catalogue default only when the host sent none  | the catalogue default (128000 on the 2.1.329 models)        | **Open** — deliberate (b); `output_cap.enabled` is the opt-in cap, see "Rows 7 to 12, in detail".                     |
+| 8   | Tool deferral                                                     | opt-in (`token_economy.tool_deferral`, `adaptive_tool_set`); excludes only `claude-3-*`                                     | the genuine client defers behind its own search tool        | **Open** — deliberate (b), off by default.                                                                            |
+| 9   | `cch`                                                             | `cch=00000`                                                                                                                 | `cch=00000` (library default; optional caller seam)         | **Open** — the genuine value is per-request, computed natively below the JS; the plugin leaves the `cch` input unset. |
+| 10  | `Accept`, body key order, request-class headers, billing segments | the 2.1.329 profile's shape, composed by the library                                                                        | the 2.1.329 profile's shape                                 | **Closed** — the plugin is repointed; the shape is library-side and fixed in that profile only.                       |
+| 11  | Pass-through mode (emulation off)                                 | host headers verbatim, **including leaked `x-opencode-*` / `x-session-id`**                                                 | n/a (no package path)                                       | **Open** — deliberate; the leaked-header strip applies on the emulated paths only.                                    |
+| 12  | Empowerment blocks and genuine opening sentence                   | host content after the identity block                                                                                       | the caller's system, forwarded verbatim                     | **Open** — deliberate (b), fingerprint-neutral; not checked server-side per the evidence.                             |
+| 13  | Header name case and order                                        | lowercase names in the runtime's order (the pairs are converted to `Headers` and handed to `fetch`)                         | genuine capitalisation and order (`HeaderPair[]`)           | **Open** — recorded, transport-side; a `Headers` object cannot carry either.                                          |
+| 14  | Prompt and turn index after the first request                     | counted by `lib/session-correlation.mjs` (a typed message with a new fingerprint is a new prompt, anything else a new turn) | whatever the caller supplies                                | **Open** — the increment rule is **inferred**; only the first request (1/1) is attested.                              |
+| 15  | Per-turn effort, first turn                                       | the conversation's first turn never carries a control message; it defines the base effort                                   | passes a control message through verbatim                   | **Open** — plugin policy, inferred from the control message's purpose, not from a capture.                            |
+| 16  | Previous request id and previous message id                       | captured from the response `request-id` header and from the stream, only on a successful main response                      | whatever the caller supplies (`cc_prev_req`, `diagnostics`) | **Open** — the capture point and the shape guards are plugin policy; malformed values are dropped.                    |
 
 Upstream truth for the rows that are still open:
 
-- Row 1: the base beta set opens `if(!isHaiku) push(claudeCode)`, so the genuine client never carries it on Haiku.
+- Row 1: the base beta set opens `if(!isHaiku) push(claudeCode)`, so the base composition never carries it on Haiku.
+  The genuine client does re-push it for **agentic queries** (`uwr(e,{isAgenticQuery})`, 2.1.329 library analysis
+  §5.4), so the plugin requests it on agentic main requests only and never on title, small or subagent-side
+  requests: `buildAdapterTransport` sets `agenticQuery` for a main request that is not a title generator
+  (`lib/mimicry/adapter-input.mjs`). The library composes the beta from that input in its own position, which
+  replaced the plugin's former append through `additionalBetas` and removed the position residual.
 - Row 2: under 2.1.233 the only two push sites were guarded by `provider==="vertex"` and `provider==="foundry"`
   (`IPt`). **Confirmed unchanged under 2.1.280**: the per-model table's `web_search` entry still reads
   `when:(e)=>e.provider==="vertex"&&hw(e.canonical)||e.provider==="foundry"` — same two providers, no first-party
@@ -116,12 +135,14 @@ not something to do as a side effect of a documentation pass.
 
 These are the only rows where the plugin still puts something on the wire that the genuine client does not, and they
 survive on purpose. `buildAdditionalBetas` in `lib/mimicry/adapter-input.mjs` pushes `web-search-2025-03-05` when
-`supportsWebSearch(model)`, `advisor-tool-2026-03-01` on any non-`claude-3-*` model, and `CLAUDE_CODE_BETA_FLAG` when
-`isHaikuModel(model)` — the last one so Haiku subagents reached through model-router delegation still get full mimic
-behaviour.
+`supportsWebSearch(model)` and `advisor-tool-2026-03-01` on any non-`claude-3-*` model (with `account_features.advisor`
+the plugin sends the advisor tool instead and the library derives the beta, so it is not pushed twice). The Haiku
+`claude-code-20250219` beta is requested through the `agenticQuery` input on an agentic main request (role `main` or
+absent, and not a title generator), which is when the genuine client re-adds it too. Earlier versions also added it for
+Haiku subagents and side requests; those no longer carry it.
 
-Because they arrive through `additionalBetas` rather than through the package's own composer, they land at the END of
-the header, after every beta the package composed. `BETA_HEADER_GOLDEN` pins that order on both columns as exact
+Because the first two arrive through `additionalBetas` rather than through the package's own composer, they land at the
+END of the header, after every beta the package composed. `BETA_HEADER_GOLDEN` pins that order on both columns as exact
 strings, so a change on either side fails.
 
 ### Row 4, in detail
@@ -158,6 +179,42 @@ in place, one pinning 32000 on both paths at 40000 and one control asserting bot
 The bound is the model **default**, not its upper limit. Upstream only ever compares the
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` environment value against `upperLimit`, and the package reads no environment.
 
+### Rows 7 to 12, in detail
+
+Added for the Claude Code 2.1.329 work (analysis: [`../claude-code-2.1.329-analysis.md`](../claude-code-2.1.329-analysis.md)).
+Rows 11 and 13 describe differences that exist today; they are not new behaviour. Rows 14 to 16 were added with the
+repoint and session correlation.
+
+- **Row 7, `max_tokens` policy.** opencode's provider sends its own `max_tokens`; the plugin passes it through
+  (`output_cap.enabled` defaults to `false`, so no cap is applied) and only fills the catalogue default when the host
+  sent none (`transformRequestBody`, `lib/mimicry/request-body.mjs`). The genuine client always sends the catalogue
+  default, 128000 on the new 5.5 / 5.2 models (`[LIVE]`). The two differ whenever the host's own value differs from
+  the catalogue default. Closing it would mean ignoring the host's limit, a product decision.
+- **Row 8, tool deferral.** Opt-in, class (b). The earlier regex `/claude-3-|haiku/i` is replaced by `!isClaude3Model`,
+  so Haiku 5.5 is no longer skipped by name. The genuine client defers behind its own search tool; the plugin defers
+  without it.
+- **Row 9, `cch=00000`.** Genuine is a per-request 5-hex value substituted natively over the serialised body; the JS
+  writes only `cch=00000`. The plugin leaves the library's optional `cch` input unset (no host source), so the library
+  default `00000` goes out. The server accepts it today (the plugin's capture returned 200), but it is distinguishable.
+- **Row 10, library-side shape.** `Accept: application/json`, the genuine body key order, generated
+  `context_management` and `diagnostics`, `x-claude-code-request-class` / `x-claude-1p-request-class`,
+  `x-claude-code-prompt-id`, `x-claude-code-sandy-plover` and the `cc_turn_origin` / `cc_prompt_index` /
+  `cc_turn_index` billing segments are all composed by the library. They are fixed in the library's 2.1.329 profile
+  only (its frozen digests must not move) and reach the plugin because it is pinned to that profile (WP7). The generated
+  `context_management` and `diagnostics` fields are accepted as genuine; `cache-diagnosis` is body-coupled and is never
+  latched.
+- **Row 11, pass-through mode.** With signature emulation off nothing is forged: the host's header set travels as it
+  arrived. That includes `x-opencode-client`, `x-opencode-project`, `x-opencode-session`, `x-opencode-session-id` and
+  `x-session-id`. On the emulated paths (adapter and legacy forge) they are removed before `ANTHROPIC_CUSTOM_HEADERS`
+  is merged, so a user can still send one on purpose (`HOST_LEAKED_HEADER_NAMES` and `isHostLeakedHeader`,
+  `lib/mimicry/headers.mjs`).
+- **Row 12, empowerment blocks and genuine opening.** The plugin's host system block starts with the genuine 2.1.329
+  opening sentence followed by the empowerment package (default `max`, ten blocks), placed **after** the identity
+  block and before the instruction files so user instructions keep the last word. The package forwards the caller's
+  system verbatim, so this is plugin policy. The evidence says host system content is not checked server-side, so
+  the change is class (b) neutral: it alters content, not the fingerprint. `system_prompt.empowerment: "off"` and
+  `system_prompt.genuine_opening: false` remove it.
+
 ## Seams the plugin uses, and what each one keeps alive
 
 Every entry here was a capability the plugin lost — or would have lost — when the adapter took over request
@@ -177,7 +234,9 @@ construction. Under Option A each was answered with an opt-in seam in the packag
 
 Two more seams are used outside this table: `capabilities` (set in `buildAdapterTransport` in `lib/mimicry/adapter-input.mjs`) downgrades `adaptiveThinking` so
 `OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING` is not a no-op, and `profileOverride` (`resolveProfileOverride` in `lib/mimicry/adapter-input.mjs`) carries
-the coupled `userAgent`/`cliVersion` pair when the plugin's dynamic user agent diverges from the pinned profile.
+the coupled `userAgent`/`cliVersion` pair when the env-driven user-agent suffix (entrypoint, agent-sdk, client-app)
+diverges from the pinned profile. The version in that pair is always the pinned profile's: a host-detected or
+npm-fetched version never produces an override.
 
 ### S8 vs S3 — two different fields with the same name
 
@@ -400,7 +459,7 @@ the code.
      (in `lib/mimicry/adapter-input.mjs`) are derived from `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`), so
      they follow the profile the seam binds rather than being re-typed — `test/conformance/version-literals-retired.test.mjs`
      enforces that. What DOES need a decision is the `WIRE_PROFILE` binding itself: it names an explicit profile
-     export (currently `CLAUDE_CODE_2_1_280_PROFILE`), so moving to a newer client is an intentional one-line change
+     export (currently `CLAUDE_CODE_2_1_329_PROFILE`), so moving to a newer client is an intentional one-line change
      at the seam — import the new profile singleton and rebind `WIRE_PROFILE` to it — not a side effect of the bump.
      Leaving `WIRE_PROFILE` behind a newer `DEFAULT_PROFILE` does not fail closed, but it no longer silently
      migrates the wire either (that was the failure mode before the request path started passing `profile`
