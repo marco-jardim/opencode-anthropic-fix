@@ -6,7 +6,7 @@ import { createServer as createHttpServer } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OpenCode } from "@opencode/client";
-import { createHostProbe, hostLogTail } from "./host-smoke-probes.mjs";
+import { compareModelInventories, createHostProbe, hostLogTail } from "./host-smoke-probes.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary = process.argv[2];
@@ -299,13 +299,29 @@ try {
     return reloaded.data.find((item) => item.id === "opencode-anthropic-fix")?.state.status === "active";
   }, "plugin after location reload");
   const reloadedModels = await client.model.list({ location });
-  assert.equal(reloadedModels.data.filter((item) => item.providerID === "anthropic").length, anthropicModels.length);
+  const reloadedAnthropicModels = reloadedModels.data.filter((item) => item.providerID === "anthropic");
+  const inventory = compareModelInventories(anthropicModels, reloadedAnthropicModels);
+  assert.deepEqual(inventory.missing, [], "Models listed before the reload vanished after it");
+  // The host refreshes its own catalog in the background, so the reload can list
+  // models the baseline did not. The plugin cannot add models, so an addition is
+  // legitimate only if the plugin still manages it exactly like the baseline.
+  assert.ok(
+    reloadedAnthropicModels.every((item) => item.package === sdkPackage),
+    "Every reloaded model must stay on the shipped SDK, including host-catalog additions",
+  );
+  assert.ok(
+    reloadedAnthropicModels.every((item) => item.cost.every((tier) => tier.input === 0 && tier.output === 0)),
+    "Every reloaded model must keep the zeroed subscription cost, including host-catalog additions",
+  );
+  const catalogAdditions = inventory.added.map((item) => item.id).sort();
   assert.equal(registryRequests, 0, "Managed models must use the shipped SDK without a registry install");
   const report = {
     version: info.version,
     plugin,
     oauthRegistered: true,
     modelCount: anthropicModels.length,
+    reloadedModelCount: reloadedAnthropicModels.length,
+    catalogAdditionsAfterReload: catalogAdditions,
     modelPackage: anthropicModels[0].package,
     administrativeRpcWithoutModel: true,
     generation: true,
