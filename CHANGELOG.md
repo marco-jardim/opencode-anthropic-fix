@@ -4,6 +4,8 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-11-20
+
 Claude Code 2.1.329 work. The plugin now emulates the library's 2.1.329 profile on the wire (user agent, SDK and runtime
 versions, beta registry and order, body key order, billing segments, profile OAuth scopes). **Requires
 `@tormentalabs/claude-code-wire-compat` 0.8.0 or later** (published 2026-11-20 under `latest`; the lockfile resolves

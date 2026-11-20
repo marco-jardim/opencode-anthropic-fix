@@ -34,7 +34,7 @@ and the pinned `@ai-sdk/anthropic` 3.0.111 provider for v2.
   `docs/plans/opencode-v1-v2-compatibility.md` for boundaries and validation limits.
 - `lib/mimicry/wire-compat.mjs` — the **only** import point for
   `@tormentalabs/claude-code-wire-compat`. Binds `WIRE_PROFILE` (currently
-  `CLAUDE_CODE_2_1_280_PROFILE`) and passes it explicitly to every builder.
+  `CLAUDE_CODE_2_1_329_PROFILE`) and passes it explicitly to every builder.
 - `lib/mimicry/adapter-input.mjs` — maps the host body/config to the package
   input: additive betas, `suppressBetas`, the beta-rejection latch helpers.
 - `lib/mimicry/response-stream.mjs` — SSE transform: UTF-8 decode, line framing,
