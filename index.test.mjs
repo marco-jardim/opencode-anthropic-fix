@@ -1073,6 +1073,52 @@ describe("fetch interceptor", () => {
     expect(textBlocks.join("\n")).not.toContain("<task>");
   });
 
+  it("keeps a host-labelled title request out of the main prompt correlation", async () => {
+    // The live v2 title shape: a haiku model, a large max_tokens, a host-written
+    // system prompt that names no title generator, and ONE short user message.
+    // Only the host's own request kind (the v2 transport label) marks it a title.
+    const session = { "x-opencode-session": "ses_title_correlation" };
+    const sent = async (extraHeaders, body) => {
+      mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { ...session, ...extraHeaders },
+        body: JSON.stringify(body),
+      });
+      const [, init] = mockFetch.mock.calls.at(-1);
+      const out = JSON.parse(init.body);
+      return { headers: init.headers, system: out.system.map((block) => block.text).join("\n") };
+    };
+    const hostSystem = [{ type: "text", text: `You write short names for threads.\n${"Be precise. ".repeat(400)}` }];
+    const title = await sent(
+      { "x-opencode-request-kind": "title" },
+      {
+        model: "claude-haiku-5-5",
+        max_tokens: 32000,
+        messages: [{ role: "user", content: "Name this thread: how do I rotate my signing keys?" }],
+        system: hostSystem,
+      },
+    );
+    const mainBody = (text) => ({
+      model: "claude-sonnet-4-5",
+      max_tokens: 32000,
+      messages: [{ role: "user", content: text }],
+      system: [{ type: "text", text: "You are a coding agent." }],
+    });
+    const first = await sent({}, mainBody("first typed prompt"));
+
+    // The title is a side query: no turn origin, no prompt index, no main beta set.
+    expect(title.system).not.toContain("cc_prompt_index");
+    expect(title.system).not.toContain("cc_turn_origin=human");
+    expect(title.headers.get("anthropic-beta").split(",")).toContain("claude-code-side-query-2026-09-29");
+    expect(title.headers.get("anthropic-beta").split(",")).not.toContain("claude-code-20250219");
+    // The private label never reaches the wire.
+    expect([...title.headers.keys()].filter((name) => name.startsWith("x-opencode-"))).toEqual([]);
+    // The title did not advance the main correlation: the first typed prompt is index 1.
+    expect(first.system).toContain("cc_turn_origin=human");
+    expect(first.system).toContain("cc_prompt_index=1");
+  });
+
   it.each([
     ["main", {}, 32000, 3],
     ["title", { "x-opencode-request-kind": "title" }, 32000, 1],
@@ -1122,6 +1168,36 @@ describe("fetch interceptor", () => {
       expect(system.join("\n")).toContain(`Instructions from: ${cwd}\\AGENTS.md\n# Contributor operating guide`);
     },
   );
+
+  it("recognises a title-generator system prompt at any max_tokens, without a host label", async () => {
+    const session = { "x-opencode-session": "ses_title_unlabelled" };
+    const send = async (body) => {
+      mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: session,
+        body: JSON.stringify(body),
+      });
+      const [, init] = mockFetch.mock.calls.at(-1);
+      const out = JSON.parse(init.body);
+      return out.system.map((block) => block.text).join("\n");
+    };
+    const title = await send({
+      model: "claude-haiku-5-5",
+      max_tokens: 32000,
+      messages: [{ role: "user", content: "hello" }],
+      system: [{ type: "text", text: "You are a title generator. You output ONLY a thread title." }],
+    });
+    const first = await send({
+      model: "claude-sonnet-4-5",
+      max_tokens: 32000,
+      messages: [{ role: "user", content: "first typed prompt" }],
+      system: [{ type: "text", text: "You are a coding agent." }],
+    });
+
+    expect(title).not.toContain("cc_prompt_index");
+    expect(first).toContain("cc_prompt_index=1");
+  });
 
   it("preserves verbose system instructions when prompt compaction is off", async () => {
     loadConfig.mockReturnValueOnce({
