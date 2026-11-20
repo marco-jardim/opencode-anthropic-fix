@@ -9,6 +9,36 @@ Do not edit past entries. Add a new one instead.
 
 ---
 
+## 2026-11-20 — Fast-mode entitlement 429 is a per-account session latch, not fast-pool exhaustion (unreleased)
+
+Context: closes the gap noted under D33 of the entry below. The canary response (HTTP 429, `rate_limit_error`, "Usage
+credits are required for fast mode.", `x-should-retry: false`, `anthropic-ratelimit-unified-overage-disabled-reason:
+org_level_disabled`, no `retry-after`) was handled as fast-pool exhaustion: the wrong toast and a cooldown that re-armed
+fast mode every 30 s, so each re-arm cost another rejected request. Worse, `x-should-retry: false` made the interceptor
+return the 429 to the host before the fast-pool fallback was ever reached, so the session did not even survive.
+
+- **D34 — A missing fast-mode entitlement is recognised and latched off for that account for the session.** Match
+  (`isFastModeCreditsRequiredError` in `lib/backoff.mjs`): HTTP 429 on a request that carried `speed: "fast"`, and the
+  parsed error message matches `/usage credits are required for fast mode/i`, or `x-should-retry: false` plus a message
+  that mentions both "fast mode" and "credit". Deliberately tight: a plain fast-pool 429 never matches, and an unparsable
+  body never matches. On a match the runtime latches the account in `AccountManager` (`markFastModeUnentitled`, keyed by
+  account id so a disk reload that replaces and re-indexes the account objects keeps it), retries once on the same account
+  without consuming an account slot, and shows "⚡ Fast mode needs usage credits on this account, using standard speed"
+  once (only when the latch is newly set). The branch sits before the `x-should-retry: false` early return in the
+  interceptor, and a per-request cap of one retry stops a loop in the one path where `speed` survives the rewrite
+  (emulation off).
+- **D35 — The latch lives behind `isFastRateLimited`.** That check already gates every source of `speed` in
+  `transformRequestBody` (the `fast_mode` setting, `fast_mode_auto` and a host-sent value), so consulting the latch there
+  covers all three, and the beta follows because the wire library composes it from `speed`. Rejected: flipping the global
+  `config.fast_mode` (the entitlement is per account and other accounts may have credits) and a long fast-bucket cooldown
+  (it expires, re-arms, and would be a persisted-looking state in the rate-limit map). The latch is in memory only and is
+  never written to `accounts.json`: a new session tries fast mode again in case credits were enabled meanwhile. The
+  standard bucket is never marked and no account rotates, because the account is fine at standard speed.
+- Plain fast-pool 429s are unchanged: fast-bucket cooldown only, "Fast pool limited" toast, re-armed after the cooldown.
+
+Pinned by `test/conformance/fast-mode-credits-latch.test.mjs` (through the real interceptor), `lib/backoff.test.mjs` and
+`lib/accounts.test.mjs`.
+
 ## 2026-11-20 — Fast mode verified live; it stays off by default (unreleased)
 
 Context: `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE` turned out to be inverted (fixed in the same branch). That raised the

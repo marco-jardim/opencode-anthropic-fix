@@ -6,6 +6,15 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ### Fixed
 
+- **The "Usage credits are required for fast mode" 429 is now treated as a missing entitlement, not fast-pool
+  exhaustion.** On such a 429 (or an `x-should-retry: false` 429 whose message mentions fast mode and credits) for a
+  request that carried `speed: "fast"`, the plugin retries once on the same account at standard speed without the
+  fast-mode beta, turns fast mode off for that account for the rest of the session (in memory only; a new session tries
+  again), and shows "⚡ Fast mode needs usage credits on this account, using standard speed" once. This covers `fast_mode`,
+  `token_economy.fast_mode_auto` and a host-sent `speed`. Previously the response was returned to the host as-is, because
+  `x-should-retry: false` ended the retry loop before the fallback ran, and the "Fast pool limited" toast and cooldown
+  re-armed fast mode every 30 seconds. The standard quota is not marked rate-limited and no account rotates. Plain
+  fast-pool 429s are unchanged.
 - **`OPENCODE_ANTHROPIC_DISABLE_FAST_MODE` was inverted.** `=0`, `false` or `no` disabled fast mode and `=1` did not. It
   is now a real kill switch: `1`, `true` or `yes` (case- and whitespace-insensitive) turn fast mode off, and `=0` no
   longer disables it. With the switch on, neither `fast_mode` nor `token_economy.fast_mode_auto` applies, a host-sent
