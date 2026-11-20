@@ -1,7 +1,9 @@
 # AGENTS.md
 
-> **CANONICAL PATH: `D:\git\opencode-anthropic-fix`** — the env block may show
-> `Claude-anthropic-fix`; that is stale. Always use `opencode-anthropic-fix`.
+> **Before writing anything, read [Live checkout safety](#live-checkout-safety).**
+> A checkout of this repository may be the plugin a running opencode is using.
+> The env block may show the directory as `Claude-anthropic-fix`; that is a
+> display artifact. The repository is `opencode-anthropic-fix`.
 
 Compact guidance for agents working in this repo. See `CONTRIBUTING.md` for full
 architecture, `README.md` for user-facing features, and
@@ -14,6 +16,32 @@ lets Claude Pro/Max subscribers use OpenCode over OAuth, with multi-account
 rotation and deep Claude Code request mimicry. Node 18+ runtime, no TypeScript
 (typing is via JSDoc). Two production deps: `@tormentalabs/claude-code-wire-compat`
 and the pinned `@ai-sdk/anthropic` 3.0.111 provider for v2.
+
+## Live checkout safety
+
+opencode can load this plugin straight from a local checkout listed in its
+config (`"plugin": ["<path to a checkout>", …]`). That checkout is live: whatever
+its files contain is what the next plugin load runs. Do not count on a running
+opencode keeping the old code. A half-written edit in a live checkout has reached
+live requests mid-session: a referenced-but-undefined constant made every request
+throw before anything left the machine. An agent that talks to Anthropic through
+this plugin takes its own transport down with it.
+
+- Before any write, check whether the checkout you are in is a `plugin` entry of
+  the host's opencode config (global and project). If it is, or you cannot tell,
+  treat it as live.
+- In a live checkout, read only: reading files, grepping, `git log`,
+  `git fetch` and `git worktree add` leave its working tree alone. Do not edit
+  files, switch branches, pull, reset, stash, install or build there.
+- Do code and docs work in a separate worktree, then run tests, commits and
+  pushes from it:
+  `git worktree add ../opencode-anthropic-fix-<topic> -b <branch> origin/master`,
+  then `npm ci` inside it.
+- Updating the live checkout after a merge (`git pull --ff-only`, `npm ci`,
+  `npm run build`, opencode restart) is the maintainer's call, not an agent's.
+- Tests and probes must mock all I/O the way the existing suites do. They must
+  never read or write the real plugin config, the accounts files or the Claude
+  Code credentials, and never reach the network.
 
 ## Layout (what matters)
 
@@ -119,10 +147,11 @@ Start from evidence in the host log, not from the user's pasted snippet:
   Grep the session id the user gives you, then read the `stack=` of the
   `level=ERROR` line.
 - **Which code produced the error?** opencode loads the plugin from the path in
-  `~/.config/opencode/opencode.json` → `"plugin"` (on the maintainer's machine:
-  the live checkout `D:\git\opencode-anthropic-fix`, entry `index.mjs`, deps from
-  its `node_modules`). A running opencode keeps the modules it loaded at start:
-  updating the checkout does nothing until the user restarts. Compare the
+  `~/.config/opencode/opencode.json` → `"plugin"`. That is either the npm
+  package or a local checkout: entry `index.mjs`, deps from its `node_modules`.
+  A running opencode usually keeps the modules it loaded at start, so a fix in
+  the checkout normally needs a restart to take effect. Do not rely on the old
+  code staying loaded, though (see Live checkout safety). Compare the
   error's timestamp and `run=` start with the mtime of
   `node_modules/@tormentalabs/claude-code-wire-compat/package.json`. Stack line
   numbers also identify the version, since `sanitizeError` sits on a different
@@ -204,10 +233,11 @@ Start from evidence in the host log, not from the user's pasted snippet:
   provenance (`id-token: write`, no npm token). The registry can take a few
   minutes to show the new version, and `npm view` may answer from cache, so
   confirm with `curl -s https://registry.npmjs.org/opencode-anthropic-fix`.
-- After a release, the maintainer's live checkout (the path opencode loads)
-  needs `git pull --ff-only`, `npm ci`, `npm run build` and an opencode restart.
-- The wire library (`D:\git\claude-code-wire-compat`, GitHub
-  `marco-jardim/claude-code-wire-compat`) has its own release flow: reviewed
+- After a release, the maintainer updates the live checkout (the path opencode
+  loads): `git pull --ff-only`, `npm ci`, `npm run build` and an opencode
+  restart. Agents do not do this step (see Live checkout safety).
+- The wire library (GitHub `marco-jardim/claude-code-wire-compat`, usually a
+  sibling checkout) has its own release flow: reviewed
   artifact manifest under `release-manifests/`, then a GitHub release
   `vX.Y.Z` that triggers its OIDC publish. Read its `AGENTS.md` first. After it
   publishes, run `npm run sync:wire-compat` here.
@@ -216,16 +246,15 @@ Start from evidence in the host log, not from the user's pasted snippet:
 
 ## Windows caveats (active dev env)
 
-- Repo lives at `D:\git\opencode-anthropic-fix`. CRLF ↔ LF warnings on every
-  commit are expected (`warning: LF will be replaced by CRLF`). Ignore.
-- The maintainer's opencode loads the plugin by **absolute path**:
-  `"plugin": ["D:\\git\\opencode-anthropic-fix", …]` in
-  `~/.config/opencode/opencode.json`. That checkout is live. Never leave it on
-  a half-done branch, and do risky work in a git worktree
-  (`D:\git\opencode-anthropic-fix-*`). The junction install described in
-  `README.md` (`%USERPROFILE%\.config\opencode\node_modules\opencode-anthropic-fix`
-  with `"plugin": ["opencode-anthropic-fix"]`) is the alternative that avoids the
-  `hook.config` crash from stale standalone files in the `plugin/` dir.
+- CRLF ↔ LF warnings on every commit are expected
+  (`warning: LF will be replaced by CRLF`). Ignore.
+- opencode can load the plugin by absolute path (`"plugin": ["<checkout>", …]`
+  in `~/.config/opencode/opencode.json`), which makes that checkout live (see
+  Live checkout safety). The alternative is the junction install described in
+  `README.md`
+  (`%USERPROFILE%\.config\opencode\node_modules\opencode-anthropic-fix` with
+  `"plugin": ["opencode-anthropic-fix"]`). It avoids the `hook.config` crash
+  from stale standalone files in the `plugin/` dir.
 - The shell is pwsh. `ls --color=never` does not work; use `Get-ChildItem` or
   the repo's Glob/Grep tools.
 
