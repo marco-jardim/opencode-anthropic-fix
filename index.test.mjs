@@ -1073,6 +1073,56 @@ describe("fetch interceptor", () => {
     expect(textBlocks.join("\n")).not.toContain("<task>");
   });
 
+  it.each([
+    ["main", {}, 32000, 3],
+    ["title", { "x-opencode-request-kind": "title" }, 32000, 1],
+    ["small side query", {}, 200, 1],
+    ["subagent", { "x-parent-session-id": "ses_parent" }, 32000, 3],
+    ["compaction", { "x-opencode-request-kind": "compaction" }, 32000, 3],
+  ])(
+    "never sends the host's environment header in any system block (%s request)",
+    async (_role, extraHeaders, maxTokens, messageCount) => {
+      // The live layout of the refused request's volatile block: MCP instructions,
+      // a project instruction file, the date, the environment, the worktree hint.
+      const cwd = "D:\\git\\claude-code-wire-compat";
+      const liveVolatile = [
+        "<mcp_instructions>\nUse the docs server for library questions.\n</mcp_instructions>",
+        `Instructions from: ${cwd}\\AGENTS.md`,
+        "# Contributor operating guide\nOpenCode is the host.",
+        "Today's date: Fri Nov 20 2026",
+        "Here is some useful information about the environment you are running in:",
+        `<env>\n  Working directory: ${cwd}\n  Platform: win32\n</env>`,
+        "This is a git worktree, so edit only files under the working directory.",
+      ].join("\n");
+      const messages = Array.from({ length: messageCount }, (_unused, index) => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: `turn ${index}`,
+      }));
+      mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-opencode-session": "ses_env_phrase", ...extraHeaders },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: maxTokens,
+          messages,
+          system: [
+            { type: "text", text: "You are OpenCode, an interactive CLI tool." },
+            { type: "text", text: liveVolatile },
+          ],
+        }),
+      });
+
+      const [, init] = mockFetch.mock.calls.at(-1);
+      const system = JSON.parse(init.body).system.map((block) => block.text);
+      expect(system.length).toBeGreaterThan(0);
+      for (const text of system) expect(text).not.toContain("Here is some useful information");
+      expect(system.join("\n")).toContain("Here is useful information about the environment you are running in:");
+      expect(system.join("\n")).toContain(`Instructions from: ${cwd}\\AGENTS.md\n# Contributor operating guide`);
+    },
+  );
+
   it("preserves verbose system instructions when prompt compaction is off", async () => {
     loadConfig.mockReturnValueOnce({
       ...loadConfig(),
