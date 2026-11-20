@@ -84,12 +84,12 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Deep QA conformance** &mdash; 680+ tests across 26 test files, including 40 regression tests validating every header, body field, OAuth parameter, beta flag, system prompt block, response handling path, and telemetry schema against the [reverse-engineering doc](docs/claude-code-reverse-engineering.md)
 - **Prompt caching with 1h TTL** &mdash; extended cache TTL on system prompt blocks using scope-correct `cache_control` (`'org'` for default path, `'global'` for boundary path), auto-disabled if API rejects; cache hit rate tracking with configurable warning threshold
 - **API preconnect** &mdash; fire-and-forget HEAD request on init to pre-warm TCP+TLS connection, skipped when proxy/mTLS detected
-- **8K default output cap** &mdash; limits `max_tokens` to 8K by default, auto-escalates to 64K after output truncation, resets after one turn
+- **Optional 8K output cap (opt-in)** &mdash; `output_cap.enabled: true` limits `max_tokens` to 8K, auto-escalates to 64K after output truncation, resets after one turn; off by default, so your client's own `max_tokens` is sent unchanged
 - **Context overflow auto-recovery** &mdash; parses structured `prompt_too_long` errors to auto-reduce `max_tokens` before falling back to message trimming
 - **Cache break detection** &mdash; hashes system prompt and tool schemas per turn, alerts when `cache_read_input_tokens` drops >2K
 - **`/anthropic context` command** &mdash; token breakdown by role, tool_result grouping, duplicate content detection via SHA-256
 - **Token budget parsing** &mdash; natural-language budget expressions (`+500k`, `use 2M tokens`) with system prompt injection and diminishing returns detection
-- **Microcompact context trimming** &mdash; injects `clear_tool_uses` / `clear_thinking` betas at >80% context utilization
+- **Microcompact context tracking** &mdash; tracks context utilization and shows a toast at >80%; it injects nothing on the wire
 - **FG/BG request classification** &mdash; reduced retry budget for background requests (title generation, short queries)
 - **Smart 529 overload recovery** &mdash; quota-aware account switching on overload exhaustion with cooldown and progressive error messaging
 - **Proactive rate limit detection** &mdash; reads `anthropic-ratelimit-unified-*-utilization` headers (tokens, requests, input-tokens) and applies health penalties before hitting 429
@@ -511,13 +511,99 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
   "signature_emulation": {
     // Enable Claude-style attribution/stainless headers and betas
     "enabled": true,
-    // Resolve latest @anthropic-ai/claude-code version once on plugin startup
+    // Informational only: look up the latest @anthropic-ai/claude-code version once on
+    // plugin startup. The emulated version is pinned by the wire profile and never follows it.
     "fetch_claude_code_version_on_startup": true,
     // Compact long injected system instructions to reduce token usage.
     // In "minimal" mode, repeated/contained blocks are deduplicated and title-generator
-    // requests are replaced with a compact dedicated prompt.
+    // requests are replaced with a compact dedicated prompt. Default "off" (opt-in).
     // "minimal" | "off"
-    "prompt_compaction": "minimal",
+    "prompt_compaction": "off",
+    // Correlate the requests of one session the way the genuine client does
+    // (prompt id, turn position, previous request/message ids).
+    "session_correlation": true,
+  },
+
+  // Effort level for adaptive models that support it:
+  // "auto" | "low" | "medium" | "high" | "xhigh" | "max".
+  // The env var CLAUDE_CODE_EFFORT_LEVEL wins; "auto" defers to the model catalogue's
+  // default; xhigh/max are clamped where the model does not support them. An effort
+  // sent by your client always wins.
+  "default_effort": "medium",
+
+  // Keep fast mode available on Opus 4.6/4.7 even when the model catalogue does not
+  // advertise it. Opt-in.
+  "fast_mode_legacy_models": false,
+
+  // Per-turn effort: effort changes mid-conversation go through the genuine per-turn
+  // mechanism, which keeps the cached prefix intact. "auto_low_short_questions" sends
+  // effort "low" for a short typed question (this turn only).
+  "per_turn_effort": {
+    "enabled": true,
+    "auto_low_short_questions": true,
+    "short_question_max_chars": 280,
+  },
+
+  // Host system prompt handling.
+  "system_prompt": {
+    // "off" | "power" | "research" | "max", or an array of block ids:
+    // ownership, depth, tool_power, persistence, recommendations, proof, research,
+    // context_economy, communication, initiative. Unknown values fall back to "max".
+    "empowerment": "max",
+    // Start the stable system block with the genuine opening sentence.
+    "genuine_opening": true,
+    // Split the host block into a stable and a volatile block (env, project instructions).
+    "split_stable_volatile": true,
+    // "base": the OpenCode -> Claude Code rewrite applies only to the base prompt and the
+    // env header. "all": legacy, rewrite everywhere.
+    "rewrite_scope": "base",
+  },
+
+  // Cache-aware history rewriting and idle handling (all opt-in).
+  "token_economy": {
+    // Only rewrite history when the prompt cache is already cold.
+    "cold_cache_only": false,
+    // Clear old tool results when the cache is cold.
+    "idle_tool_result_clearing": false,
+    // Compact the session while idle, shortly before the cache expires.
+    "idle_compaction": false,
+    // Minimum estimated context (tokens) before idle compaction fires (100000-2000000).
+    "idle_compaction_min_tokens": 200000,
+    // Strip billing/identity blocks from title-gen and small requests. Default off.
+    "lean_system_non_main": false,
+    // Zero the thinking budget for trivial follow-ups. Default off: thinking stays
+    // adaptive and stable, because changing it invalidates the message cache.
+    "adaptive_thinking_zero_simple": false,
+  },
+
+  // Conciseness instructions injected for Opus 4.6. Default off (opt-in).
+  "anti_verbosity": {
+    "enabled": false,
+  },
+
+  // Multi-organization accounts.
+  "account_affinity": {
+    // Keep a session on the account of the same organization for models whose
+    // thinking blocks are organization-bound.
+    "org_locked_thinking": true,
+    // When no same-organization account is usable, strip prior thinking blocks.
+    "strip_thinking_on_org_switch": false,
+  },
+
+  // Optional per-account request features (all opt-in).
+  "account_features": {
+    "dispatch_id": false,
+    "message_threads": false,
+    "inline_tools": false,
+    "advisor": false,
+    "tool_provenance": false,
+  },
+
+  // OAuth. "plugins_scope" defaults to true (the genuine client requests user:plugins);
+  // an explicit false warns once. "project_scopes" is deprecated and ignored.
+  "oauth": {
+    "revoke_on_logout": false,
+    "plugins_scope": true,
   },
 
   // Context limit override for 1M-window models.
@@ -572,8 +658,9 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 
   // Output cap: default max_tokens per request. Escalates to 64K
   // after stop_reason: "max_tokens", then resets after one turn.
+  // Default off (opt-in): your client's max_tokens is sent unchanged.
   "output_cap": {
-    "enabled": true,
+    "enabled": false,
     "default_max_tokens": 8000,
     "escalated_max_tokens": 64000,
   },
@@ -609,8 +696,8 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
     "completion_threshold": 0.9,
   },
 
-  // Microcompact: inject clear_tool_uses/clear_thinking betas
-  // when context utilization exceeds threshold_percent.
+  // Microcompact: tracks context utilization and shows a toast when it exceeds
+  // threshold_percent. It injects nothing on the wire.
   "microcompact": {
     "enabled": true,
     "threshold_percent": 80,
@@ -626,6 +713,23 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 }
 ```
 
+### Changed defaults
+
+These defaults changed to follow the genuine client more closely. Every previous behaviour is still available as an
+explicit opt-in; existing config files keep loading.
+
+- `oauth.plugins_scope` is now `true` (authorize requests `user:plugins`). An explicit `false` still works and warns once
+  that it diverges from the genuine client.
+- `oauth.project_scopes` is deprecated and has no effect: project scopes are never requested. A non-empty value warns once.
+- `token_economy.lean_system_non_main` is now `false`.
+- `output_cap.enabled` is now `false`; set it to `true` for the 8K default cap.
+- `signature_emulation.prompt_compaction` is now `"off"`; set `"minimal"` (or `/anthropic set compaction minimal`) to opt in.
+- `anti_verbosity.enabled` is now `false`; set it to `true` (or `OPENCODE_ANTHROPIC_ANTI_VERBOSITY=1`) to opt in.
+- `token_economy.adaptive_thinking_zero_simple` is now `false`: thinking stays adaptive and is never toggled per question.
+- New: `default_effort` (default `"medium"`), `system_prompt.empowerment` (default `"max"`) and the per-turn effort,
+  account-affinity and account-feature settings shown above. Several of them are inert until the matching wire profile
+  is wired in.
+
 ### Environment Variables
 
 | Variable                                           | Description                                                                                                                                               |
@@ -635,7 +739,7 @@ Configuration is stored at `~/.config/opencode/anthropic-auth.json`. All setting
 | `OPENCODE_ANTHROPIC_QUIET`                         | Set to `1` to suppress non-error toasts (account status, switching).                                                                                      |
 | `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).                                                                                           |
 | `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                                                                                                         |
-| `OPENCODE_ANTHROPIC_PROMPT_COMPACTION`             | Set to `off` to disable default minimal system prompt compaction.                                                                                         |
+| `OPENCODE_ANTHROPIC_PROMPT_COMPACTION`             | `minimal` enables system prompt compaction; the default is `off`.                                                                                         |
 | `OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT`           | Set to `1` to log the final transformed `system` prompt to stderr (title-generator requests are skipped).                                                 |
 | `OPENCODE_ANTHROPIC_OVERRIDE_MODEL_LIMITS`         | Set to `0` to disable context limit overrides for 1M-window models (e.g. when models.dev has been updated).                                               |
 | `OPENCODE_ANTHROPIC_INITIAL_ACCOUNT`               | Pin this session to a specific account (1-based index or email). Overrides strategy to `sticky`. See [Round-Robin Limitations](#round-robin-limitations). |
@@ -664,7 +768,7 @@ The plugin also:
 - Zeros out model costs (your subscription covers usage)
 - Emulates Claude-style request headers and beta flags by default
 - Sanitizes "OpenCode" references to "Claude Code" in system prompts (required by Anthropic's API)
-- In `prompt_compaction="minimal"`, deduplicates repeated/contained system blocks and uses a compact dedicated prompt for internal title-generation requests
+- With `prompt_compaction="minimal"` (opt-in; the default is `off`), deduplicates repeated/contained system blocks and uses a compact dedicated prompt for internal title-generation requests
 - With signature emulation on, adds `?beta=true` to `/v1/messages` and `/v1/messages/count_tokens` requests (and
   normalizes a `/messages` path to `/v1/messages`). With it off, the host's URL is sent untouched.
 

@@ -48,6 +48,9 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       signature_emulation: {
         ...original.DEFAULT_CONFIG.signature_emulation,
         fetch_claude_code_version_on_startup: false,
+        // prompt_compaction defaults to "off"; this suite exercises the "minimal" opt-in
+        // (the "off" cases set it explicitly).
+        prompt_compaction: "minimal",
       },
       override_model_limits: {
         ...original.DEFAULT_CONFIG.override_model_limits,
@@ -56,6 +59,9 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
       adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
       preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
+      // output_cap is off by default; these suites post bodies without max_tokens,
+      // so keep the opt-in explicit to preserve the capped-max_tokens behaviour.
+      output_cap: { ...original.DEFAULT_CONFIG.output_cap, enabled: true },
     })),
     loadConfigFresh: vi.fn(() => ({
       ...original.DEFAULT_CONFIG,
@@ -63,6 +69,7 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       signature_emulation: {
         ...original.DEFAULT_CONFIG.signature_emulation,
         fetch_claude_code_version_on_startup: false,
+        prompt_compaction: "minimal",
       },
       override_model_limits: {
         ...original.DEFAULT_CONFIG.override_model_limits,
@@ -71,6 +78,7 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
       adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
       preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
+      output_cap: { ...original.DEFAULT_CONFIG.output_cap, enabled: true },
     })),
     saveConfig: vi.fn(),
   };
@@ -955,7 +963,7 @@ describe("fetch interceptor", () => {
     expect(payloadText.join("\n")).not.toMatch(/opencode/i);
   });
 
-  it("compacts verbose system instructions in minimal mode (default)", async () => {
+  it("compacts verbose system instructions in minimal mode (explicit opt-in)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {

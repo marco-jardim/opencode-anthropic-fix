@@ -5,7 +5,8 @@ describe("Task 1.2: 8K Default Output Cap", () => {
     it("T1.2.1: DEFAULT_CONFIG includes output_cap section", async () => {
       const { DEFAULT_CONFIG } = await import("../../lib/config.mjs");
       expect(DEFAULT_CONFIG.output_cap).toBeDefined();
-      expect(DEFAULT_CONFIG.output_cap.enabled).toBe(true);
+      // Opt-in since the 2.1.329 defaults: the caller's max_tokens passes through unchanged.
+      expect(DEFAULT_CONFIG.output_cap.enabled).toBe(false);
       expect(DEFAULT_CONFIG.output_cap.default_max_tokens).toBe(8_000);
       expect(DEFAULT_CONFIG.output_cap.escalated_max_tokens).toBe(64_000);
     });

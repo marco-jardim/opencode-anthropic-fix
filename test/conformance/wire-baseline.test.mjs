@@ -127,6 +127,9 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
       ...testConfig.adaptiveContextOverride,
     },
     token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: false },
+    // anti_verbosity is off by default; the sealed fixtures were captured with the
+    // opt-in on, so it stays explicit here to keep the pinned bytes unchanged.
+    anti_verbosity: { ...original.DEFAULT_CONFIG.anti_verbosity, enabled: true },
   });
 
   return {
