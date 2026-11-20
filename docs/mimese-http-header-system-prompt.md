@@ -51,7 +51,7 @@ See [OpenCode v2 adapter](opencode-v2.md) for transport and lifecycle boundaries
 > leaked-header strip (§4.2), the version pinned to the profile (§2), the effort
 > default `medium` and per-turn effort (§7.5), the system-prompt changes (§6.2, §6.9),
 > and the repoint with session correlation (§14.3, §14.4). The plugin requires
-> `@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later.
+> `@tormentalabs/claude-code-wire-compat` 0.8.0 or later.
 
 <!-- Last verified against: Claude Code 2.1.195 — DECOMPILED from the real
      linux-x64 native binary (@anthropic-ai/claude-code-linux-x64@2.1.195, Bun-

@@ -21,8 +21,8 @@
 > the profile-neutral `WIRE_BETA_REGISTRY`, so on the wire the plugin emulates 2.1.329 for everything the library
 > composes (user agent, SDK and runtime versions, beta list, header names and order, body key order, billing
 > segments). The plugin-side work that did not need the new profile is in §3; the repoint, session correlation and
-> per-turn effort are in §5, "Implemented". It requires `@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later
-> (a prerelease; see §6). The `check:invariants` gate compares this document (2.1.329) with the bound profile and
+> per-turn effort are in §5, "Implemented". It requires `@tormentalabs/claude-code-wire-compat` 0.8.0 or later
+> (see §6). The `check:invariants` gate compares this document (2.1.329) with the bound profile and
 > passes. The live wire validation of 2026-11-20, its two fixes and the divergences it left are in §7.
 >
 > **Evidence tags** reuse the library's own convention: `[BIN]` transcribed from the binary, `[DER]` derived from
@@ -234,7 +234,7 @@ OpenCode's env preamble in that content is read by the server, and it must be re
 ## 5. Implemented with the 2.1.329 profile repoint
 
 These items use the library's 2.1.329 profile (`CLAUDE_CODE_2_1_329_PROFILE`, `BETA_REGISTRY_2_1_329`) and are
-implemented and committed on this branch (WP7 and WP8). The library requirement is 0.8.0-rc.1 (§6).
+implemented and committed on this branch (WP7 and WP8). The library requirement is 0.8.0 (§6).
 
 - **Repoint (WP7).** `WIRE_PROFILE` is `CLAUDE_CODE_2_1_329_PROFILE` and `WIRE_BETA_REGISTRY` (the profile-neutral
   name every consumer reads) is `BETA_REGISTRY_2_1_329` (`lib/mimicry/wire-compat.mjs`). The library therefore
@@ -318,10 +318,9 @@ false` keeps host-driven changes only.
   main request: the library returns header pairs in the genuine capitalisation and order, but the plugin hands them to
   `fetch` as a `Headers` object, which lowercases every name and does not preserve order, so what reaches the wire is
   lowercase names in the runtime's order (recorded in `docs/mimicry/wire-compat-divergences.md`).
-- **Library prerelease.** The plugin needs `@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later (the first
-  release with the 2.1.329 profile as default). It is a prerelease, so the `latest` dist-tag does not carry it until
-  the library is published; the plugin must not be released before that, and `package.json` and the lockfile must move
-  with it.
+- **Library release.** The plugin needs `@tormentalabs/claude-code-wire-compat` 0.8.0 or later (the first release
+  with the 2.1.329 profile as default), published on 2026-11-20 under `latest` with npm provenance. `package.json`
+  tracks `latest` and the lockfile resolves 0.8.0.
 - **Gzip and padding** (lib §6.6) is a host transport concern; the padding is body bytes and is not modelled.
 - **Fingerprint input.** Genuine hashes the first typed, non-meta prompt; the library hashes the first text block
   of the first wire user message, which diverges whenever a host merges reminders into the first message (lib

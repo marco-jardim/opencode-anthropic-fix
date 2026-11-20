@@ -32,13 +32,12 @@ itself a defect: then the fix belongs in the consumer. `stainlessHelper` markers
   port has landed (see `docs/claude-code-2.1.280-analysis.md`), so the pin lifted. `package-lock.json` resolves
   `latest` to **`0.7.0`** as of this note. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is
   actually installed — a dist-tag is mutable, so the lockfile, not this sentence, is the source of truth.
-- **The plugin now requires `0.8.0-rc.1` or later** (the first release carrying the Claude Code 2.1.329 profile). It
-  is a prerelease, so the `latest` dist-tag does not carry it until the library publishes a stable release; the
-  plugin must not be released before that, and `package.json` and the lockfile move with it.
+- **The plugin now requires `0.8.0` or later** (the first release carrying the Claude Code 2.1.329 profile, published
+  on 2026-11-20 under `latest`). `package.json` tracks `latest`; the lockfile resolves 0.8.0.
 - The emulated profile is **pinned by the plugin**: the adapter passes `WIRE_PROFILE` (`lib/mimicry/wire-compat.mjs`,
   currently `CLAUDE_CODE_2_1_329_PROFILE`) as an explicit `profile` argument on every call, so a package release
   cannot move the wire by changing its `DEFAULT_PROFILE`. For history: `0.1.0` defaulted to `claude-code-2.1.195`;
-  `0.3.0` moved it to `claude-code-2.1.233-sdk-0.112.1`; `0.6.0` to `claude-code-2.1.280-sdk-0.112.1`; `0.8.0-rc.1`
+  `0.3.0` moved it to `claude-code-2.1.233-sdk-0.112.1`; `0.6.0` to `claude-code-2.1.280-sdk-0.112.1`; `0.8.0`
   to the 2.1.329 profile. Before the plugin started passing `profile` explicitly (and before the 2.1.329 repoint), a
   release could move the wire under `latest`; that is no longer the case, and the golden suite still guards the
   library's fixes. An emergency rollback pins an exact version instead of tracking `latest` — see

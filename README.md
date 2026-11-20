@@ -736,7 +736,7 @@ explicit opt-in; existing config files keep loading.
 - New: `default_effort` (default `"medium"`), `system_prompt.empowerment` (default `"max"`), `per_turn_effort` (default
   on), `signature_emulation.session_correlation` (default on), and the account-affinity and `account_features` settings
   shown above (`account_features` is off by default). The plugin emulates the Claude Code 2.1.329 wire and requires
-  `@tormentalabs/claude-code-wire-compat` 0.8.0-rc.1 or later.
+  `@tormentalabs/claude-code-wire-compat` 0.8.0 or later.
 
 ### Environment Variables
 
