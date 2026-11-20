@@ -106,7 +106,7 @@ forward from 2.1.233 rather than freshly confirmed.
 | 18  | System-prompt cache layout                                        | `system[1]` cached (1h); `system[2]` cached (1h, no scope)                                                                  | genuine: `system[1]` uncached, `system[2]` `scope: global`  | **Open** — recorded; observed live 2026-11-20.                                                                        |
 | 19  | Account-served headers, betas and body fields                     | absent by decision (opt-in): `anthropic-dispatch-id`, five betas, `safeguards` and `thread`                                 | genuine sends them for the captured account                 | **Open** — deliberate (opt-in); observed live 2026-11-20, betas listed below.                                         |
 | 20  | Request class on title requests                                   | still `main`                                                                                                                | genuine side-query value not established                    | **Open** — target value unknown; observed live 2026-11-20.                                                            |
-| 21  | Instruction file quoting the host env preamble                    | the file's text verbatim when no `<env>` line follows the phrase                                                            | the caller's system, forwarded verbatim                     | **Open** — by design; it remains a possible billing-classifier trigger.                                               |
+| 21  | Instruction file quoting the host env preamble                    | the file verbatim, except the preamble sentence (rewritten)                                                                 | the caller's system, forwarded verbatim                     | **Closed** — the literal is replaced everywhere, instruction files included.                                          |
 
 Upstream truth for the rows that are still open:
 
@@ -243,11 +243,11 @@ rows 2, 3 and 9 (see their details above). The wire stays pinned to the 2.1.329 
 - **Row 20, request class on title requests.** Since `262e609` title requests are side queries for the session
   correlation and the beta set (the side-query beta, no `cc_prompt_index`), but they still carry request class `main`.
   The value the genuine client sends for a side query is not established.
-- **Row 21, an instruction file quoting the host env preamble.** The preamble is rewritten to the Claude Code wording
-  wherever it opens the host's environment, that is, directly followed by the `<env>` line (see "Divergences the
-  plugin closed on its own side"). An instruction file that merely quotes the sentence, with no `<env>` line after it,
-  is left unchanged by design, because instruction files are not rewritten. It remains a possible trigger of the
-  billing classifier; the decision is open.
+- **Row 21, an instruction file quoting the host env preamble (closed).** The maintainer decided to normalize the
+  preamble literal everywhere. `normalizeSystemTextBlocks` replaces the exact, case-sensitive sentence with the Claude
+  Code wording in every system text, instruction files and skills included, whether or not an `<env>` line follows it
+  (see "Divergences the plugin closed on its own side"). It is the single exception to the rule that instruction files
+  are not rewritten: the rest of the file, its paths and URLs stay byte-identical, and no other phrase is touched.
 
 ## Seams the plugin uses, and what each one keeps alive
 
@@ -363,7 +363,7 @@ These were the plugin's defect, so under the Option A exception they were fixed 
   (`segmentSystemText`, in `lib/mimicry/system-prompt.mjs`) had treated the preamble as instruction-file text when it
   followed an `Instructions from:` file; the preamble directly followed by the `<env>` line now opens an env segment
   wherever it sits. A table-driven test over host-identifying phrases × block positions × request roles guards it
-  (`lib/mimicry/system-prompt.test.mjs`). The quoted case left open by design is row 21.
+  (`lib/mimicry/system-prompt.test.mjs`). The quoted case, which that commit left open, is closed in row 21.
 
 - **Title requests no longer advance the prompt index (`262e609`).** The v2 title request was classified `main` and
   advanced the prompt index, so the first typed prompt went out with `cc_prompt_index=2`. The runtime now uses the

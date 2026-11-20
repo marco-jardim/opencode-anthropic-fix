@@ -11,6 +11,12 @@ Do not edit past entries. Add a new one instead.
 
 ## 2026-11-20 — Claude Code 2.1.329 live wire validation: billing-classifier trigger and title side queries (unreleased)
 
+> **Amendment (2026-11-20), D30 decided.** The maintainer chose to normalize the preamble literal everywhere, instruction
+> files included, as the single exception to the rewrite rule (D21). `normalizeSystemTextBlocks` now replaces the exact,
+> case-sensitive sentence in every system text, for every role and mode; the rest of an instruction file, its paths and
+> URLs stay byte-identical, and no other phrase is touched. Divergence row 21 is closed. The D30 text below is the
+> original record.
+
 **What triggered it.** With commit `3d57144`, main requests got HTTP 400 `You're out of extra usage`. The organization
 has extra usage disabled (`overage-disabled-reason: org_level_disabled`), so the server had routed the requests to extra
 usage, that is, it classified them as third-party. A live validation followed (`opencode serve` behind mitmproxy, OAuth,

@@ -358,8 +358,10 @@ divergences of §7.4. No identifier, token, account value or local path from the
   skipped it. The preamble on a line of its own, directly followed by the `<env>` line, now opens an env segment even
   inside an instruction file. A table-driven test over host-identifying phrases × block positions × request roles
   guards it (`lib/mimicry/system-prompt.test.mjs`).
-- **Open decision.** An instruction file that merely quotes the preamble (without a following `<env>`) is left
-  unchanged by design. It remains a possible trigger (divergence row 21).
+- **Decided: normalized everywhere.** `d12f2d5` left an instruction file that merely quotes the preamble (without a
+  following `<env>`) unchanged. The maintainer then chose to replace this one literal in every system text, instruction
+  files and skills included, as the single exception to the rewrite rule: the match is exact and case-sensitive, and
+  the rest of the file stays byte-identical (divergence row 21, closed).
 - **Consequence for §4.** Host content after the identity block is not neutral as a whole: this one literal is read by
   the server. Brand mentions and paths were not.
 

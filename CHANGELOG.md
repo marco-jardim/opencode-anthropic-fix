@@ -102,9 +102,10 @@ versions, beta registry and order, body key order, billing segments, profile OAu
   (`Here is some useful information about the environment you are running in:`) stayed in the volatile system block
   when it followed an `Instructions from:` file, and the server classified those requests as third-party: on an
   organization with extra usage disabled they failed with HTTP 400 `You're out of extra usage`. The preamble directly
-  followed by the `<env>` line is now rewritten to the Claude Code wording in every system block. An instruction file
-  that merely quotes the sentence is left unchanged by design. Live validation: `docs/claude-code-2.1.329-analysis.md`
-  §7.
+  followed by the `<env>` line is now rewritten to the Claude Code wording in every system block, and so is the exact
+  sentence anywhere else in the system text, instruction files and skills included. It is the only literal rewritten
+  inside instruction files; the rest of the file stays byte-identical. Live validation:
+  `docs/claude-code-2.1.329-analysis.md` §7.
 - **Title requests no longer advance the prompt index.** The opencode v2 title request was classified as a main request,
   so the first typed prompt went out with `cc_prompt_index=2`. The plugin now reads the host's request kind
   (`x-opencode-request-kind`, stripped before the wire); title requests carry the side-query beta and no
