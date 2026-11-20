@@ -14,7 +14,58 @@
 // imported, and `globalThis.fetch` is stubbed per request. `node:https` is
 // replaced with a stub that fails loudly if anything tries to use it.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// HERMETIC PROFILE: point every location the plugin could resolve a user profile
+// from (home, Windows profile, XDG dirs) at a directory that does not exist, so
+// the suite behaves like a clean CI machine regardless of who runs it. Runs
+// before any import below, and the previous values are restored in `afterAll`.
+const savedProfileEnv = vi.hoisted(() => {
+  const os = process.getBuiltinModule("node:os");
+  const path = process.getBuiltinModule("node:path");
+  const root = path.join(os.tmpdir(), `opencode-fast-mode-test-profile-${process.pid}`);
+  const overrides = {
+    HOME: root,
+    USERPROFILE: root,
+    APPDATA: path.join(root, "AppData", "Roaming"),
+    LOCALAPPDATA: path.join(root, "AppData", "Local"),
+    XDG_CONFIG_HOME: path.join(root, ".config"),
+    XDG_DATA_HOME: path.join(root, ".local", "share"),
+    XDG_CACHE_HOME: path.join(root, ".cache"),
+    XDG_STATE_HOME: path.join(root, ".local", "state"),
+  };
+  const saved = {};
+  for (const [key, value] of Object.entries(overrides)) {
+    saved[key] = process.env[key];
+    process.env[key] = value;
+  }
+  // Proxy / custom-TLS variables make the runtime skip its API preconnect probe
+  // (`isProxyOrMtlsEnvironment`), and the headless-login variables seed an extra
+  // account. Both are host state; the suite must see neither.
+  for (const key of [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "SSL_CERT_FILE",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ]) {
+    saved[key] = process.env[key];
+    delete process.env[key];
+  }
+  return saved;
+});
+
+afterAll(() => {
+  for (const [key, value] of Object.entries(savedProfileEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
@@ -77,6 +128,8 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
     fast_mode: testConfig.fastMode,
     fast_mode_legacy_models: testConfig.fastModeLegacyModels,
     idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
+    // Default-on HEAD probe at loader time; not part of what these tests pin.
+    preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
     adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
     token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: false },
   });
@@ -133,8 +186,13 @@ function fastPoolRateLimitResponse() {
  */
 async function drive({ model, hostSpeed = true, hostBeta = true, responses = [successResponse] }) {
   const queue = [...responses];
-  const mockFetch = vi.fn(() => {
-    const next = queue.shift() ?? successResponse;
+  // Only /v1/messages calls consume the scripted queue. The runtime also issues
+  // fire-and-forget fetches of its own (the API preconnect HEAD, usage polling);
+  // if those drew from the queue they would swallow the 429 meant for the
+  // messages call, and the outcome would depend on the host environment.
+  const mockFetch = vi.fn((input) => {
+    const isMessages = String(input).includes("/v1/messages");
+    const next = (isMessages ? queue.shift() : undefined) ?? successResponse;
     return Promise.resolve(next());
   });
   vi.stubGlobal("fetch", mockFetch);
@@ -162,7 +220,7 @@ async function drive({ model, hostSpeed = true, hostBeta = true, responses = [su
   await response.text();
 
   return mockFetch.mock.calls
-    .filter(([input]) => String(input).includes("/messages"))
+    .filter(([input]) => String(input).includes("/v1/messages"))
     .map(([input, init]) => ({
       url: String(input),
       body: JSON.parse(init.body),
