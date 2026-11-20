@@ -8,10 +8,10 @@ body byte-for-byte after normalising genuine per-run nondeterminism.
 **The direction of the difference inverted once, and then the ground moved again.** That suite was written when the
 shared package was the incomplete implementation and the plugin was the reference. Since the package's Wave 7 work
 (`v0.1.0-rc.10`) and the max-tokens clamp (`v0.1.0-rc.11`), the package is derived directly from a genuine client
-binary — 2.1.195 then, 2.1.233 since the `0.3.0` default profile, and **2.1.280 since `0.7.0`** (the profile itself
-landed at `0.6.0`; `0.7.0` is the release this plugin actually depends on and additionally changes the body-prose
-Unicode policy, see [`../claude-code-2.1.280-analysis.md`](../claude-code-2.1.280-analysis.md) §10) — and is the
-reference. Since `index.mjs` started routing the first-party `/v1/messages` turn through the adapter,
+binary — 2.1.195 then, 2.1.233 since the `0.3.0` default profile, 2.1.280 since `0.6.0` (`0.7.0` additionally
+changed the body-prose Unicode policy, see
+[`../claude-code-2.1.280-analysis.md`](../claude-code-2.1.280-analysis.md) §10), and **2.1.329 since `0.8.0`**, the
+release this plugin now requires (see "Package version state" below) — and is the reference. Since `index.mjs` started routing the first-party `/v1/messages` turn through the adapter,
 the plugin's production path **is** the package plus plugin-owned policy — so most rows below are no longer "two
 implementations disagree" but "the plugin deliberately steers the package through a seam".
 
@@ -30,7 +30,7 @@ itself a defect: then the fix belongs in the consumer. `stainlessHelper` markers
   temporary hold while the plugin's wire port to 2.1.280 was in flight — `0.6.0` switched the package's
   `DEFAULT_PROFILE` to Claude Code 2.1.280, which failed 48 tests against the port that had not yet landed. The
   port has landed (see `docs/claude-code-2.1.280-analysis.md`), so the pin lifted. `package-lock.json` resolves
-  `latest` to **`0.7.0`** as of this note. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is
+  `latest` to **`0.8.0`** as of this note. Run `npm ls @tormentalabs/claude-code-wire-compat` to see what is
   actually installed — a dist-tag is mutable, so the lockfile, not this sentence, is the source of truth.
 - **The plugin now requires `0.8.0` or later** (the first release carrying the Claude Code 2.1.329 profile, published
   on 2026-11-20 under `latest`). `package.json` tracks `latest`; the lockfile resolves 0.8.0.

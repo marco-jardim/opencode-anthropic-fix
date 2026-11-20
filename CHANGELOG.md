@@ -4,6 +4,18 @@ All notable changes to `opencode-anthropic-fix` are documented here.
 
 ## [Unreleased]
 
+### Documentation
+
+- Refreshed documentation after 2.3.0 so it matches the code: the wire-compat provenance and rollback procedure
+  (`docs/shared-package-provenance.md`: 0.8.0 artifact and integrity, 2.1.329 profile, pin-and-rollback guidance,
+  legacy-forge status), the emergency profile override (`docs/emergency-protocol-profile.md`: the base profile is the
+  explicitly passed `WIRE_PROFILE`), the beta decision table (`mid-conversation-system` retired in 2.1.329, 24-model
+  catalogue, `index.mjs` line citations replaced by file and function names), and the divergences note.
+- README: axios fingerprint version, beta description for the 2.1.329 profile, the redact-thinking caveat, test counts,
+  and a row in the environment-variable table for each documented variable that was missing. `CLAUDE.md` no longer
+  describes `index.mjs` as the runtime or lists a dependency the package does not have; `AGENTS.md` carries the current
+  regression-test count and names the HTTP 529 backoff tests unambiguously.
+
 ## [2.3.0] — 2026-11-20
 
 Claude Code 2.1.329 work. The plugin now emulates the library's 2.1.329 profile on the wire (user agent, SDK and runtime

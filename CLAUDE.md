@@ -11,7 +11,7 @@ This repository contains an `opencode` plugin and standalone CLI that let Claude
 - **Docs are the contract:** any wire change to headers, betas, system prompt, or body shape requires matching updates to [the HTTP mimicry contract](docs/mimese-http-header-system-prompt.md) **and** [the conformance regression suite](test/conformance/regression.test.mjs).
 - **OAuth first:** under OAuth, `oauth-2025-04-20` is always present in `anthropic-beta`.
 - **No TypeScript:** use `.mjs` and JSDoc only.
-- Do not add another heavy production dependency. The two production dependencies are `@tormentalabs/claude-code-wire-compat` and `xxhash-wasm`.
+- Do not add another heavy production dependency. The two production dependencies are `@tormentalabs/claude-code-wire-compat` and `@ai-sdk/anthropic` (pinned, used by the v2 provider).
 - Changes to `rateLimitResetTimes` or `consecutiveFailures` in `anthropic-accounts.json` require a migration path.
 - The system-prompt sanitization `OpenCode → Claude Code` applies **only** to the system prompt sent to Anthropic—never to code, docs, or paths.
 
@@ -47,7 +47,7 @@ Follow this exact order (source: [AGENTS.md, “Release flow”](AGENTS.md#relea
 
 ## Parallel-safety & commit-often
 
-For multi-agent work, respect file-ownership locks and treat `index.mjs` as one global write-lock. Commit each subtask separately with a conventional prefix; see [§A2 (parallelism/write-safety) and §A3 (commit-often)](docs/plans/agent-native-remediation-plan.md).
+For multi-agent work, respect file-ownership locks and treat `lib/host/runtime.mjs` (the runtime behind the thin `index.mjs` entry) as one global write-lock. Commit each subtask separately with a conventional prefix; see [§A2 (parallelism/write-safety) and §A3 (commit-often)](docs/plans/agent-native-remediation-plan.md).
 
 ## Where things live
 
@@ -55,7 +55,8 @@ Use `node cli.mjs diagnose` (or `dg`) to create a redacted diagnostic bundle; pa
 
 | Subsystem                                                                                                                    | Location                               |
 | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| OAuth, fetch interceptor, retry/overload loop, request/response mimicry, and token-economy state machines                    | `index.mjs`                            |
+| Thin plugin entry (the runtime lives in `lib/host/runtime.mjs`; mimicry in `lib/mimicry/*`)                                  | `index.mjs`                            |
+| OAuth, fetch interceptor, retry/overload loop, request/response orchestration, and token-economy state machines              | `lib/host/runtime.mjs`                 |
 | Standalone CLI; `/anthropic` dispatches in-process                                                                           | `cli.mjs`                              |
 | OAuth, accounts, rotation, backoff, config, storage, refresh-lock, cc-credentials, account-state, redact, and tuning modules | `lib/*.mjs`                            |
 | Research and the mimicry contract                                                                                            | `docs/`                                |

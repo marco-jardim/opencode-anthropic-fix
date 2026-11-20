@@ -73,15 +73,15 @@ The [original plugin](https://github.com/anomalyco/opencode-anthropic-auth) prov
 - **Standalone CLI** &mdash; manage accounts without opening OpenCode
 - **Configurable strategies** &mdash; sticky, round-robin, or hybrid account selection
 - **Claude Code signature emulation** &mdash; full HTTP header, system prompt, beta flag, and metadata mimicry derived from Claude Code's open source code. Canonical Claude Code protocol composition (headers, body, system prefix, betas, URL) is sourced from [`@tormentalabs/claude-code-wire-compat`](https://www.npmjs.com/package/@tormentalabs/claude-code-wire-compat); system prompt cache scoping stays host policy (`splitSystemCacheScopes`, boundary/global/org) with exact marker detection and scope-aware `cache_control` generation
-- **OAuth endpoint fingerprint parity** &mdash; matches the real CLI's bundled axios 1.13.6 HTTP client signature (`Accept`, `User-Agent`, `Content-Type`) on all OAuth token endpoint calls, required since 2026-03-21 server-side enforcement
+- **OAuth endpoint fingerprint parity** &mdash; matches the real CLI's bundled axios 1.15.2 HTTP client signature (`Accept`, `User-Agent`, `Content-Type`) on all OAuth token endpoint calls, required since 2026-03-21 server-side enforcement
 - **Billing header fingerprint parity** &mdash; `cc_version` suffix uses the real CLI's 3-char fingerprint hash (SHA-256 of salt + first user message chars + version), `cch=00000` is a static placeholder (xxHash64 attestation was removed in Claude Code v2.1.97), system prompt is sanitized to match Claude Code's pattern validation, and `X-Claude-Code-Session-Id` header is sent on all requests
 - **Adaptive thinking for Opus/Sonnet 4.6** &mdash; automatically normalizes thinking to `{type: "adaptive"}` for supported models, with `effort-2025-11-24` beta
-- **Upstream-aligned auto betas** &mdash; 13+ always-on betas matching Claude Code 2.1.92 (`redact-thinking-2026-02-12` available as opt-in to preserve thinking block visibility)
+- **Upstream-aligned auto betas** &mdash; the beta list follows the pinned Claude Code 2.1.329 profile's registry (45 entries), composed by the shared wire package. `redact-thinking-2026-02-12` is replaced by `thinking-display-updates-2026-08-18` plus body `thinking.display: "updates"` on turns with active thinking and no caller-supplied display
 - **1M context limit override** &mdash; patches `model.limit.context` so OpenCode compacts at the right threshold while `models.dev` catches up
 - **Runtime config + custom betas** &mdash; `/anthropic set`, `/anthropic config`, and `/anthropic betas` slash commands for live feature toggling without restarting OpenCode
 - **Files API integration** &mdash; upload, list, download, and manage files via `/anthropic files` with endpoint/content-scoped `files-api-2025-04-14` beta injection
 - **Code execution support** &mdash; available via explicit custom beta opt-in (`code-execution-2025-08-25`), not auto-enabled
-- **Deep QA conformance** &mdash; 680+ tests across 26 test files, including 40 regression tests validating every header, body field, OAuth parameter, beta flag, system prompt block, response handling path, and telemetry schema against the [reverse-engineering doc](docs/claude-code-reverse-engineering.md)
+- **Deep QA conformance** &mdash; 2400+ tests across 110 test files, including 80+ regression tests validating every header, body field, OAuth parameter, beta flag, system prompt block, response handling path, and telemetry schema against the [reverse-engineering doc](docs/claude-code-reverse-engineering.md)
 - **Prompt caching with 1h TTL** &mdash; extended cache TTL on system prompt blocks using scope-correct `cache_control` (`'org'` for default path, `'global'` for boundary path), auto-disabled if API rejects; cache hit rate tracking with configurable warning threshold
 - **API preconnect** &mdash; fire-and-forget HEAD request on init to pre-warm TCP+TLS connection, skipped when proxy/mTLS detected
 - **Optional 8K output cap (opt-in)** &mdash; `output_cap.enabled: true` limits `max_tokens` to 8K, auto-escalates to 64K after output truncation, resets after one turn; off by default, so your client's own `max_tokens` is sent unchanged
@@ -379,17 +379,17 @@ Add or remove beta flags that get included in every `anthropic-beta` header. Per
 
 **Available preset betas** (shown by `/anthropic betas`):
 
-| Beta                              | Description                                       |
-| --------------------------------- | ------------------------------------------------- |
-| `prompt-caching-scope-2026-01-05` | Cache control with `scope: "org"` — free perf win |
-| `context-management-2025-06-27`   | Server-side auto-summarization when context fills |
-| `structured-outputs-2025-12-15`   | Strict JSON schema output enforcement             |
-| `tool-examples-2025-10-29`        | Input/output examples in tool definitions         |
-| `compact-2026-01-12`              | Conversation compaction endpoint                  |
-| `mcp-servers-2025-12-04`          | MCP servers in API request payload                |
-| `web-search-2025-03-05`           | Web search (Vertex/Foundry only)                  |
-| `context-1m-2025-08-07`           | 1M context beta (provider/model dependent)        |
-| `redact-thinking-2026-02-12`      | Hide thinking blocks from responses (opt-in)      |
+| Beta                              | Description                                                                                                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `prompt-caching-scope-2026-01-05` | Cache control with `scope: "org"` — free perf win                                                                                                                        |
+| `context-management-2025-06-27`   | Server-side auto-summarization when context fills                                                                                                                        |
+| `structured-outputs-2025-12-15`   | Strict JSON schema output enforcement                                                                                                                                    |
+| `tool-examples-2025-10-29`        | Input/output examples in tool definitions                                                                                                                                |
+| `compact-2026-01-12`              | Conversation compaction endpoint                                                                                                                                         |
+| `mcp-servers-2025-12-04`          | MCP servers in API request payload                                                                                                                                       |
+| `web-search-2025-03-05`           | Web search (Vertex/Foundry only)                                                                                                                                         |
+| `context-1m-2025-08-07`           | 1M context beta (provider/model dependent)                                                                                                                               |
+| `redact-thinking-2026-02-12`      | Hide thinking blocks from responses (opt-in); removed again on turns with active thinking and no caller display, where `thinking-display-updates-2026-08-18` replaces it |
 
 Example workflow:
 
@@ -740,18 +740,29 @@ explicit opt-in; existing config files keep loading.
 
 ### Environment Variables
 
-| Variable                                           | Description                                                                                                                                               |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OPENCODE_ANTHROPIC_STRATEGY`                      | Override the account selection strategy at runtime.                                                                                                       |
-| `OPENCODE_ANTHROPIC_DEBUG`                         | Set to `1` to enable debug logging.                                                                                                                       |
-| `OPENCODE_ANTHROPIC_QUIET`                         | Set to `1` to suppress non-error toasts (account status, switching).                                                                                      |
-| `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).                                                                                           |
-| `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                                                                                                         |
-| `OPENCODE_ANTHROPIC_PROMPT_COMPACTION`             | `minimal` enables system prompt compaction; the default is `off`.                                                                                         |
-| `OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT`           | Set to `1` to log the final transformed `system` prompt to stderr (title-generator requests are skipped).                                                 |
-| `OPENCODE_ANTHROPIC_OVERRIDE_MODEL_LIMITS`         | Set to `0` to disable context limit overrides for 1M-window models (e.g. when models.dev has been updated).                                               |
-| `OPENCODE_ANTHROPIC_INITIAL_ACCOUNT`               | Pin this session to a specific account (1-based index or email). Overrides strategy to `sticky`. See [Round-Robin Limitations](#round-robin-limitations). |
-| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`           | Set to `1` to suppress experimental auto-betas (mirrors Claude Code gateway safety switch).                                                               |
+| Variable                                           | Description                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENCODE_ANTHROPIC_STRATEGY`                      | Override the account selection strategy at runtime.                                                                                                                                                                                                                                                           |
+| `OPENCODE_ANTHROPIC_DEBUG`                         | Set to `1` to enable debug logging.                                                                                                                                                                                                                                                                           |
+| `OPENCODE_ANTHROPIC_QUIET`                         | Set to `1` to suppress non-error toasts (account status, switching).                                                                                                                                                                                                                                          |
+| `OPENCODE_ANTHROPIC_EMULATE_CLAUDE_CODE_SIGNATURE` | Set to `0` to disable Claude signature emulation (legacy mode).                                                                                                                                                                                                                                               |
+| `OPENCODE_ANTHROPIC_FETCH_CLAUDE_CODE_VERSION`     | Set to `0` to skip npm version lookup at startup.                                                                                                                                                                                                                                                             |
+| `OPENCODE_ANTHROPIC_PROMPT_COMPACTION`             | `minimal` enables system prompt compaction; the default is `off`.                                                                                                                                                                                                                                             |
+| `OPENCODE_ANTHROPIC_DEBUG_SYSTEM_PROMPT`           | Set to `1` to log the final transformed `system` prompt to stderr (title-generator requests are skipped).                                                                                                                                                                                                     |
+| `OPENCODE_ANTHROPIC_OVERRIDE_MODEL_LIMITS`         | Set to `0` to disable context limit overrides for 1M-window models (e.g. when models.dev has been updated).                                                                                                                                                                                                   |
+| `OPENCODE_ANTHROPIC_INITIAL_ACCOUNT`               | Pin this session to a specific account (1-based index or email). Overrides strategy to `sticky`. See [Round-Robin Limitations](#round-robin-limitations).                                                                                                                                                     |
+| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`           | Set to `1` to suppress experimental auto-betas (mirrors Claude Code gateway safety switch).                                                                                                                                                                                                                   |
+| `CLAUDE_CODE_EFFORT_LEVEL`                         | Default effort when your client sent none: `low`, `medium`, `high`, `xhigh`, `max` or `auto` (case-insensitive). Wins over `default_effort` (default `medium`); `auto` uses the model catalogue's default, else `high`; a level the model does not support is clamped to `high`; an invalid value is ignored. |
+| `CLAUDE_CODE_PROMPT_CACHE_TTL`                     | `5m` or `1h`: prompt-cache TTL for main-thread requests, overriding the configured TTL. Other values are ignored. `FORCE_PROMPT_CACHING_5M` (truthy) takes precedence.                                                                                                                                        |
+| `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`            | `5m` or `1h`: the same, for every non-main request (subagents and side requests). Other values are ignored.                                                                                                                                                                                                   |
+| `CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL`            | Exactly `5m` lowers only the messages cache breakpoint to 5 minutes; any other value is ignored. Unset by default.                                                                                                                                                                                            |
+| `ANTHROPIC_CUSTOM_HEADERS`                         | Extra request headers, one `Name: value` per line. Lines without a colon, or with an empty name or value, are skipped. Merged last, so they win over host headers; this is the only way to deliberately send an `x-opencode-*` or `x-session-id` header.                                                      |
+| `OPENCODE_ANTHROPIC_ANTI_VERBOSITY`                | `1` or `true` enables, `0` or `false` disables `anti_verbosity.enabled` (default off), overriding the config file.                                                                                                                                                                                            |
+| `OPENCODE_ANTHROPIC_MAX_BUDGET_USD`                | Session cost budget in USD (unset or `0` = no budget). `/anthropic stats` shows a `Budget:` line and a toast warns at 80% and at 100%. It never blocks requests.                                                                                                                                              |
+| `OPENCODE_ANTHROPIC_IGNORE_BUDGET`                 | Set to `1`, `true` or `yes` to suppress the "budget exceeded" toast at 100%; the regular "at N% of budget" toast shows instead.                                                                                                                                                                               |
+| `OPENCODE_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS`        | Milliseconds of silence after which a response stream is aborted with a "stream idle timeout" error. Overrides `streaming.idle_timeout_ms`; default `0` (disabled).                                                                                                                                           |
+| `OPENCODE_ANTHROPIC_DISABLE_ADAPTIVE_THINKING`     | Set to `1`, `true` or `yes` to send adaptive-thinking models `{type: "enabled", budget_tokens}` (your budget, else `MAX_THINKING_TOKENS`, else 16000) instead of `{type: "adaptive"}`.                                                                                                                        |
+| `CLAUDE_CODE_DISABLE_1M_CONTEXT`                   | Set to `1`, `true` or `yes` to skip the plugin's context-limit override for 1M-window models.                                                                                                                                                                                                                 |
 
 ### OAuth-only behavior
 
@@ -786,7 +797,8 @@ The plugin also:
 
 **On (default):** every `/v1/messages` and `/v1/messages/count_tokens` turn is built by the shared
 `@tormentalabs/claude-code-wire-compat` package: full Claude Code header set, beta list, identity/billing system
-blocks and `metadata.user_id`.
+blocks and `metadata.user_id`. The wire is pinned to the Claude Code 2.1.329 profile via `WIRE_PROFILE` and requires
+`@tormentalabs/claude-code-wire-compat` 0.8.0 or later.
 
 **Off: pure passthrough plus the auth envelope.** The plugin forges nothing. Your request goes out as your client wrote
 it — same `user-agent`, same headers, same body bytes — with only three changes, all of which belong to the OAuth
@@ -801,7 +813,7 @@ transport rather than to the disguise:
 The body is not transformed either. Two fields are stripped because the API rejects them outright: the body-level
 `betas` field and any stainless-helper markers your client attached.
 
-> **Changed in the unreleased version.** Emulation-off used to still forge a `claude-cli` user-agent and REPLACE your
+> **Changed in 1.0.0.** Emulation-off used to still forge a `claude-cli` user-agent and REPLACE your
 > `anthropic-beta` with a minimal list, and it ran structural body normalizations (which also emptied your `system`
 > prompt and injected a `temperature` you never sent). All of that is gone. See the CHANGELOG.
 
