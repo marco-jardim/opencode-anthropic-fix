@@ -1294,7 +1294,13 @@ describe("E2E: Beta composition is complete and correct", () => {
     // Use opus-4-6: real CC's Kw(model) pushes effort-2025-11-24 for Opus 4.5/4.6/
     // 4.7/4.8 and Sonnet 4.6, and n0d(model) pushes context-management for any
     // first-party non-claude-3 model — so this model carries BOTH.
-    const { headers, body } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
+    // A MAIN-shaped request (real message, large max_tokens): the 1h marker, and
+    // therefore `extended-cache-ttl`, only apply to the main thread.
+    const { headers, body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-6",
+      max_tokens: 8192,
+      messages: [{ role: "user", content: "hello there" }],
+    });
     const beta = headers.get("anthropic-beta");
     // The body half of the display-updates pairing: thinking carries display "updates".
     expect(body.thinking?.display).toBe("updates");
@@ -1348,6 +1354,19 @@ describe("E2E: Beta composition is complete and correct", () => {
     expect(beta).not.toContain("code-execution-2025-01-24");
     expect(beta).not.toContain("prompt-caching-2024-07-31");
     expect(beta).not.toContain("token-efficient-tools-2025-02-19");
+  });
+
+  it("omits extended-cache-ttl on a role-scoped 5m request and sends no claude-code beta for Haiku outside agentic main", async () => {
+    // A title/small-shaped request resolves to the role-scoped 5m ttl; the
+    // genuine client sends extended-cache-ttl only with a 1h marker.
+    const small = await sendRequest(fetchFn, {
+      model: "claude-haiku-4-5",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "title this" }],
+    });
+    const smallBeta = small.headers.get("anthropic-beta");
+    expect(smallBeta).not.toContain("extended-cache-ttl-2025-04-11");
+    expect(smallBeta).not.toContain("claude-code-20250219");
   });
 
   it("betas are in header only, not in body (first-party API)", async () => {

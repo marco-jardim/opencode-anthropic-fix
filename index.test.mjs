@@ -3610,12 +3610,19 @@ describe("header handling", () => {
       headers: { "content-type": "application/json" },
       // Canonical Anthropic model ID form — the Claude-3 detection regex
       // matches "claude-3-" prefix which exists in the canonical form.
-      body: JSON.stringify({ model: "claude-3-5-haiku-latest", messages: [] }),
+      // An agentic MAIN-shaped request (real messages, large max_tokens): the
+      // claude-code beta is re-added for Haiku only on those. An empty / small /
+      // title-shaped request does not get it.
+      body: JSON.stringify({
+        model: "claude-3-5-haiku-latest",
+        max_tokens: 8192,
+        messages: [{ role: "user", content: "hello" }],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    // Haiku gets CLAUDE_CODE_BETA_FLAG so subagent delegation gets full mimic
+    // Haiku gets CLAUDE_CODE_BETA_FLAG on agentic main requests (genuine isAgenticQuery)
     expect(betaHeader).toContain("claude-code-20250219");
     expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).not.toContain("fast-mode-2026-02-01");
@@ -3633,7 +3640,11 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        max_tokens: 8192,
+        messages: [{ role: "user", content: "hello" }],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
