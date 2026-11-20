@@ -9,6 +9,34 @@ Do not edit past entries. Add a new one instead.
 
 ---
 
+## 2026-11-20 — Fast mode verified live; it stays off by default (unreleased)
+
+Context: `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE` turned out to be inverted (fixed in the same branch). That raised the
+question of whether fast mode does anything on a subscription at all.
+
+Live canary on `claude-opus-5-5`, OAuth subscription account. Both requests were built by the plugin's own adapter
+path and differed only in `speed: "fast"` and `fast-mode-2026-02-01`:
+
+- Standard request: 200, with `usage.speed: "standard"` and `usage.service_tier: "standard"`.
+- Fast request: 429 `rate_limit_error`, "Usage credits are required for fast mode.". The response also carried
+  `x-should-retry: false` and `anthropic-ratelimit-unified-overage-disabled-reason: org_level_disabled`, and it was
+  rejected in about 330 ms, before any generation.
+
+- **D32 — Fast mode is functional on the wire.** The server recognises the body field and the beta together, and it
+  gates them on entitlement. The wire shape needs no change.
+- **D33 — Fast mode stays off by default for everyone.** On subscription accounts fast mode is billed to usage
+  credits, not to the plan's quota. In long agentic sessions most wall time is spent waiting between tool calls, so
+  the speed-up is marginal while the cost is real. `fast_mode`, `token_economy.fast_mode_auto` and
+  `fast_mode_legacy_models` stay `false`, pinned in `lib/config.test.mjs`. Turning fast mode on is an explicit,
+  per-user opt-in.
+- Without credits, the existing fast-pool 429 fallback retries the turn at standard speed on the same account, so the
+  session survives. Known gap, not addressed here:
+  - the toast says "Fast pool limited";
+  - the fast bucket re-arms after its cooldown, even though the server sends `x-should-retry: false`.
+
+  The better behaviour would be to recognise the credits message as a missing entitlement, latch fast mode off for
+  that account for the session, and show an accurate toast.
+
 ## 2026-11-20 — Claude Code 2.1.329 live wire validation: billing-classifier trigger and title side queries (unreleased)
 
 > **Amendment (2026-11-20), D30 decided.** The maintainer chose to normalize the preamble literal everywhere, instruction
