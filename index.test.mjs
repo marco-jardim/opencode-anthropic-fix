@@ -84,6 +84,13 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
   };
 });
 
+// Wrap (never replace) the body transform so a test can assert the runtime
+// inputs it receives (session key) while every request still runs the real one.
+vi.mock("./lib/mimicry/request-body.mjs", async (importOriginal) => {
+  const original = await importOriginal();
+  return { ...original, transformRequestBody: vi.fn(original.transformRequestBody) };
+});
+
 // Mock global fetch for OAuth token exchange and API requests
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -100,6 +107,9 @@ import { isBetaRetryAccountUsable } from "./lib/accounts.mjs";
 import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import { loadConfig, loadConfigFresh, saveConfig as saveRuntimeConfig, DEFAULT_CONFIG } from "./lib/config.mjs";
+import { transformRequestBody } from "./lib/mimicry/request-body.mjs";
+import { buildDiagnosticBundle } from "./lib/diagnose.mjs";
+import { WIRE_PROFILE } from "./lib/mimicry/wire-compat.mjs";
 
 describe("legacy tool identity", () => {
   it("preserves prototype-like tool names through the legacy response hook", () => {
@@ -5458,6 +5468,198 @@ describe("adaptive 1M context", () => {
 // ---------------------------------------------------------------------------
 // Slash Command Message Stripping
 // ---------------------------------------------------------------------------
+describe("runtime integration: session key, refused scope, native 1M, pinned version", () => {
+  const SCOPE_BETA = "prompt-caching-scope-2026-01-05";
+  const baseConfig = () => ({
+    ...DEFAULT_CONFIG,
+    account_selection_strategy: "sticky",
+    signature_emulation: {
+      ...DEFAULT_CONFIG.signature_emulation,
+      fetch_claude_code_version_on_startup: false,
+    },
+    override_model_limits: { ...DEFAULT_CONFIG.override_model_limits },
+    idle_refresh: { ...DEFAULT_CONFIG.idle_refresh, enabled: false },
+    adaptive_context: { ...DEFAULT_CONFIG.adaptive_context, enabled: false },
+    custom_betas: [],
+    cache_policy: { ...DEFAULT_CONFIG.cache_policy, boundary_marker: true },
+  });
+  const useConfig = (cfg) => {
+    vi.mocked(loadConfig).mockReturnValue(cfg);
+    vi.mocked(loadConfigFresh).mockReturnValue(cfg);
+  };
+  const boundarySystem = [
+    { type: "text", text: "Static instructions" },
+    { type: "text", text: "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" },
+    { type: "text", text: "Dynamic instructions" },
+  ];
+  const ok200 = () => new Response("", { status: 200 });
+  const reject400 = (name) => {
+    const body = JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: `Unexpected value(s) \`${name}\` for the \`anthropic-beta\` header. Please consult our documentation.`,
+      },
+    });
+    return {
+      ok: false,
+      status: 400,
+      headers: { get: () => null },
+      json: async () => JSON.parse(body),
+      text: async () => body,
+      clone() {
+        return this;
+      },
+    };
+  };
+  const send = (fn, { model = "claude-opus-4-5", headers = {}, extra = {} } = {}) =>
+    fn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        model,
+        system: boundarySystem,
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 10,
+        ...extra,
+      }),
+    });
+  const betasOf = (call) =>
+    call[1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockFetch.mockReset();
+  });
+
+  it("precondition: boundary mode with a sticky strategy emits scope:global and the scope beta", async () => {
+    useConfig(baseConfig());
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockResolvedValueOnce(ok200());
+    await send(fn);
+    expect(mockFetch.mock.calls[0][1].body).toContain('"scope":"global"');
+    expect(betasOf(mockFetch.mock.calls[0])).toContain(SCOPE_BETA);
+  });
+
+  it("a latched rejection of the scope beta drops scope:global from the retry body", async () => {
+    useConfig(baseConfig());
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce(reject400(SCOPE_BETA)).mockResolvedValueOnce(ok200());
+
+    await send(fn);
+
+    expect(mockFetch.mock.calls).toHaveLength(2);
+    expect(betasOf(mockFetch.mock.calls[0])).toContain(SCOPE_BETA);
+    expect(mockFetch.mock.calls[0][1].body).toContain('"scope":"global"');
+    expect(betasOf(mockFetch.mock.calls[1])).not.toContain(SCOPE_BETA);
+    expect(mockFetch.mock.calls[1][1].body).not.toContain('"scope":"global"');
+  });
+
+  it("round-robin with boundary_marker emits no scope in the body and no scope beta", async () => {
+    useConfig({ ...baseConfig(), account_selection_strategy: "round-robin" });
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockResolvedValueOnce(ok200());
+    await send(fn);
+    expect(mockFetch.mock.calls[0][1].body).not.toContain('"scope"');
+    expect(betasOf(mockFetch.mock.calls[0])).not.toContain(SCOPE_BETA);
+  });
+
+  it("passes the session key (x-opencode-session, then x-session-id, then the plugin session) to transformRequestBody", async () => {
+    useConfig(baseConfig());
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockImplementation(async () => ok200());
+    vi.mocked(transformRequestBody).mockClear();
+
+    await send(fn, { headers: { "x-opencode-session": "ses_primary", "x-session-id": "ses_secondary" } });
+    await send(fn, { headers: { "x-session-id": "ses_secondary" } });
+    await send(fn);
+
+    const keys = vi.mocked(transformRequestBody).mock.calls.map((call) => call[2].sessionKey);
+    expect(keys[0]).toBe("ses_primary");
+    expect(keys[1]).toBe("ses_secondary");
+    expect(typeof keys[2]).toBe("string");
+    expect(keys[2]).not.toBe("");
+    expect(keys[2]).toBe(vi.mocked(transformRequestBody).mock.calls[2][2].sessionId);
+    // The host's session headers still never reach the wire.
+    expect(mockFetch.mock.calls[0][1].headers.get("x-opencode-session")).toBeNull();
+    expect(mockFetch.mock.calls[0][1].headers.get("x-session-id")).toBeNull();
+  });
+
+  it("an npm-fetched claude-code version never changes the user agent or cc_version", async () => {
+    const cfg = baseConfig();
+    cfg.signature_emulation.fetch_claude_code_version_on_startup = true;
+    useConfig(cfg);
+    mockFetch.mockImplementation(async (url) => {
+      if (String(url).includes("registry.npmjs.org")) {
+        return { ok: true, status: 200, json: async () => ({ version: "9.9.9" }) };
+      }
+      return ok200();
+    });
+    const fn = await setupFetchFn(makeClient());
+    await vi.waitFor(() => {
+      expect(mockFetch.mock.calls.some((call) => String(call[0]).includes("registry.npmjs.org"))).toBe(true);
+    });
+    // Let the fetch's .then() run so the version is recorded before the request.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await send(fn);
+
+    const messageCall = mockFetch.mock.calls.find((call) => String(call[0]).includes("/v1/messages"));
+    const ua = messageCall[1].headers.get("user-agent");
+    expect(ua).toContain(`claude-cli/${WIRE_PROFILE.cliVersion}`);
+    expect(ua).not.toContain("9.9.9");
+    const parsed = JSON.parse(messageCall[1].body);
+    expect(parsed.system[0].text).toContain(`cc_version=${WIRE_PROFILE.cliVersion}.`);
+    expect(JSON.stringify(parsed)).not.toContain("9.9.9");
+
+    // ...but it is surfaced for diagnostics.
+    const bundle = await buildDiagnosticBundle();
+    expect(bundle.meta.latestUpstreamClaudeCodeVersion).toBe("9.9.9");
+    expect(bundle.meta.mimicryVersionNote).toBe(`emulating ${WIRE_PROFILE.cliVersion}; upstream latest 9.9.9`);
+  });
+
+  it("never escalates a natively-1M model to context-1m, but still escalates a non-native one", async () => {
+    const cfg = baseConfig();
+    cfg.adaptive_context = { enabled: true, escalation_threshold: 1_000, deescalation_threshold: 500 };
+    useConfig(cfg);
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockImplementation(async () => ok200());
+    const big = { messages: [{ role: "user", content: "x".repeat(200_000) }] };
+
+    await send(fn, { model: "claude-opus-4-6", extra: big });
+    await send(fn, { model: "claude-opus-4-7", extra: big });
+
+    const messageCalls = mockFetch.mock.calls.filter((call) => String(call[0]).includes("/v1/messages"));
+    expect(betasOf(messageCalls[0])).toContain("context-1m-2025-08-07");
+    expect(betasOf(messageCalls[1])).not.toContain("context-1m-2025-08-07");
+  });
+
+  it("override_model_limits covers catalogue natively-1M ids and stays behind the enabled flag", async () => {
+    const provider = (id) => ({
+      models: { [id]: { id, cost: {}, limit: { context: 200_000, output: 32_000 } } },
+    });
+    const run = async (enabled) => {
+      const cfg = baseConfig();
+      cfg.override_model_limits = { enabled, context: 1_000_000, output: 0 };
+      useConfig(cfg);
+      loadAccounts.mockResolvedValue(null);
+      const p = provider("claude-opus-4-7");
+      const plugin = await AnthropicAuthPlugin({ client: makeClient() });
+      await plugin.auth.loader(
+        vi.fn().mockResolvedValue({ type: "oauth", refresh: "r", access: "a", expires: Date.now() + 3_600_000 }),
+        p,
+      );
+      return p.models["claude-opus-4-7"].limit.context;
+    };
+    expect(await run(true)).toBe(1_000_000);
+    expect(await run(false)).toBe(200_000);
+  });
+});
+
 describe("slash command message stripping", () => {
   let fetchFn;
   let client;
