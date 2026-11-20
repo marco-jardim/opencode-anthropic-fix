@@ -13,7 +13,7 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
   return { ...actual, loadConfig: () => mockLoadConfig() };
 });
 
-const { authorize, refreshToken } = await import("../../lib/oauth.mjs");
+const { authorize, exchange, refreshToken } = await import("../../lib/oauth.mjs");
 const mockFetch = vi.fn();
 
 beforeEach(() => {
@@ -58,10 +58,11 @@ it("contract §2.3 Header 1", async () => {
   const [, init] = mockFetch.mock.calls[0];
   expect(init.headers["Content-Type"]).toBe("application/json");
   // Closed-set check: legal ONLY because `init` is the object this code builds
-  // and hands to fetch. It must never be applied to a wire capture — §13.8
-  // enumerates what it found, not a closed set, so asserting absence there would
-  // pin an artefact of the evidence rather than the client.
-  expect(Object.keys(init.headers)).toEqual(["Content-Type", "anthropic-beta", "User-Agent"]);
+  // and hands to fetch. It must never be applied to a wire capture: the runtime
+  // adds Content-Length, Host and Connection itself.
+  // Corrected 2026-11-19: the genuine token requests are axios calls, so `Accept`
+  // and `Accept-Encoding` are part of the set and the order is the captured one.
+  expect(Object.keys(init.headers)).toEqual(["Accept", "Content-Type", "User-Agent", "Accept-Encoding"]);
 });
 
 it("contract §2.3 Header 2", async () => {
@@ -71,7 +72,9 @@ it("contract §2.3 Header 2", async () => {
   });
   await refreshToken("refresh-token");
   const [, init] = mockFetch.mock.calls[0];
-  expect(init.headers["anthropic-beta"]).toBe("oauth-2025-04-20");
+  // Corrected 2026-11-19 (D2): there is no anthropic-beta on a token request.
+  expect("anthropic-beta" in init.headers).toBe(false);
+  expect(init.headers).not.toHaveProperty("anthropic-beta");
 });
 
 it("contract §2.3 Header 3", async () => {
@@ -81,7 +84,7 @@ it("contract §2.3 Header 3", async () => {
   });
   await refreshToken("refresh-token");
   const [, init] = mockFetch.mock.calls[0];
-  expect(init.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+  expect(init.headers["User-Agent"]).toBe("axios/1.15.2");
 });
 
 it("contract §2.3 Body keys", async () => {
@@ -89,28 +92,28 @@ it("contract §2.3 Body keys", async () => {
     ok: true,
     json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
   });
-  await refreshToken("refresh-token");
+  await refreshToken("refresh-token", { scopes: ["user:profile", "user:inference"] });
   const [, init] = mockFetch.mock.calls[0];
   const body = JSON.parse(init.body);
-  expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id"]);
+  // Corrected 2026-11-19 (D5): the genuine refresh body always carries `scope`, last.
+  expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id", "scope"]);
   expect(body.grant_type).toBe("refresh_token");
-  expect("scope" in body).toBe(false);
   expect(init.body).toBe(
     JSON.stringify({
       grant_type: "refresh_token",
       refresh_token: "refresh-token",
       client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+      scope: "user:profile user:inference",
     }),
   );
 });
 
-it("guard: ignored refresh options never reach the wire", async () => {
+it("guard: the default refresh scope is the claude.ai base set plus user:plugins", async () => {
   mockFetch.mockResolvedValueOnce({
     ok: true,
     json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
   });
   await refreshToken("refresh-token", {
-    scopes: ["user:profile", "user:inference"],
     sdkTokenUserAgent: false,
     // clientId is honoured for headless accounts, not ignored; pin only its empty-string fallback.
     clientId: "",
@@ -121,9 +124,10 @@ it("guard: ignored refresh options never reach the wire", async () => {
     grant_type: "refresh_token",
     refresh_token: "refresh-token",
     client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    scope: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins",
   });
-  expect("scope" in body).toBe(false);
-  expect(init.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+  expect(init.headers["User-Agent"]).toBe("axios/1.15.2");
+  expect(init.redirect).toBe("manual");
 });
 
 it("guard: a supplied clientId is honoured, and only in client_id", async () => {
@@ -131,20 +135,81 @@ it("guard: a supplied clientId is honoured, and only in client_id", async () => 
     ok: true,
     json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
   });
-  await refreshToken("refresh-token", { clientId: "custom-client-id" });
+  await refreshToken("refresh-token", { clientId: "custom-client-id", scopes: ["user:inference"] });
   const [, init] = mockFetch.mock.calls[0];
   const body = JSON.parse(init.body);
   expect(body).toEqual({
     grant_type: "refresh_token",
     refresh_token: "refresh-token",
     client_id: "custom-client-id",
+    scope: "user:inference",
   });
-  expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id"]);
+  expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id", "scope"]);
   expect(init.headers).toEqual({
+    Accept: "application/json, text/plain, */*",
     "Content-Type": "application/json",
-    "anthropic-beta": "oauth-2025-04-20",
-    "User-Agent": "anthropic-sdk-typescript/0.112.1 userOAuthProvider",
+    "User-Agent": "axios/1.15.2",
+    "Accept-Encoding": "gzip, compress, deflate, br",
   });
+});
+
+it("guard: an invalid_scope refusal is retried once without scope", async () => {
+  mockFetch
+    .mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ error: "invalid_scope" }),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
+    });
+  await refreshToken("refresh-token", { scopes: ["user:profile", "user:plugins"] });
+  expect(mockFetch).toHaveBeenCalledTimes(2);
+  const retryBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+  expect(Object.keys(retryBody)).toEqual(["grant_type", "refresh_token", "client_id"]);
+});
+
+it("guard: the exchange always sends state, in the captured key order", async () => {
+  mockFetch.mockResolvedValueOnce({ ok: false, status: 400, text: async () => "" });
+  await exchange("code#state-value", "verifier");
+  const [, init] = mockFetch.mock.calls[0];
+  const keys = Object.keys(JSON.parse(init.body));
+  expect(keys).toEqual(["grant_type", "code", "redirect_uri", "client_id", "code_verifier", "state"]);
+  expect(init.redirect).toBe("manual");
+  expect(Object.keys(init.headers)).toEqual(["Accept", "Content-Type", "User-Agent", "Accept-Encoding"]);
+});
+
+it("guard: a state mismatch never reaches the network", async () => {
+  const result = await exchange("code#other", "verifier", { state: "expected" });
+  expect(result).toMatchObject({ type: "failed", code: "state_mismatch" });
+  expect(mockFetch).not.toHaveBeenCalled();
+});
+
+it("guard: console and max authorize with the same scope union and no project scopes", async () => {
+  const max = new URL((await authorize("max")).url).searchParams.get("scope");
+  const consoleScope = new URL((await authorize("console")).url).searchParams.get("scope");
+  expect(consoleScope).toBe(max);
+  expect(max).toBe(
+    "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins user:privacy_consents:write org:desktop_config",
+  );
+  expect(max).not.toContain("projects");
+});
+
+it("guard: the token endpoints never send the SDK fingerprint or the oauth beta", async () => {
+  mockFetch.mockResolvedValue({
+    ok: true,
+    json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
+  });
+  await refreshToken("refresh-token");
+  await exchange("code#state", "verifier");
+  for (const [, init] of mockFetch.mock.calls) {
+    const wire = JSON.stringify(init.headers).toLowerCase();
+    expect(wire).not.toContain("anthropic-sdk");
+    expect(wire).not.toContain("anthropic-beta");
+    expect(wire).not.toContain("oauth-2025");
+  }
 });
 
 it("guard: the token endpoint host is never changed", async () => {

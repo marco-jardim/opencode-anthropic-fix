@@ -38,6 +38,8 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
     custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
     idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
     adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
+    // output_cap is off by default; this suite posts bodies without max_tokens.
+    output_cap: { ...original.DEFAULT_CONFIG.output_cap, enabled: true },
   });
 
   return {

@@ -127,6 +127,9 @@ vi.mock("../../lib/config.mjs", async (importOriginal) => {
       ...testConfig.adaptiveContextOverride,
     },
     token_economy: { ...original.DEFAULT_CONFIG.token_economy, context_hint: false },
+    // anti_verbosity is off by default; the sealed fixtures were captured with the
+    // opt-in on, so it stays explicit here to keep the pinned bytes unchanged.
+    anti_verbosity: { ...original.DEFAULT_CONFIG.anti_verbosity, enabled: true },
   });
 
   return {
@@ -154,6 +157,10 @@ const NORMALIZED_PATHS = {
   "body.metadata.user_id": "<generated>",
   "headers.x-claude-code-session-id": "<generated>",
   "headers.x-client-request-id": "<generated>",
+  // 2.1.329: a fresh prompt UUID per independent request (session correlation).
+  // The same UUID sits in the billing block as `cc_prompt_id=<uuid>`; that segment
+  // is scrubbed in `driveRequest` so the rest of system[0].text stays literal.
+  "headers.x-claude-code-prompt-id": "<generated>",
   // Secret material. The suite uses a mock OAuth account ("test-access"), but
   // the placeholder guarantees no token can ever be committed here.
   "headers.authorization": "<redacted>",
@@ -257,6 +264,14 @@ async function driveRequest(vector) {
     throw new TypeError(`Vector "${vector.name}": expected the interceptor to send a JSON request body`);
   }
 
+  const body = JSON.parse(init.body);
+  // The billing block repeats the per-request prompt UUID (`cc_prompt_id=<uuid>`).
+  // Only that segment is replaced; cc_version, entrypoint, cch and the turn
+  // segments stay literal. Applied before the determinism gate on purpose.
+  if (Array.isArray(body.system) && typeof body.system[0]?.text === "string") {
+    body.system[0].text = body.system[0].text.replace(/cc_prompt_id=[^;]*/, "cc_prompt_id=<generated>");
+  }
+
   return {
     url: String(input),
     // `Headers` lowercases and alphabetically orders its entries; the explicit
@@ -264,7 +279,7 @@ async function driveRequest(vector) {
     headers: Object.fromEntries(
       [...new Headers(init.headers).entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
     ),
-    body: JSON.parse(init.body),
+    body,
   };
 }
 

@@ -108,14 +108,18 @@ const REQUEST_BODY = {
 // changing it requires editing the test and justifying it in review. Order is
 // the composer's own emission order and is pinned with it: `anthropic-beta` is
 // a list header whose order is part of the fingerprint claim.
+//
+// 2.1.329: the composer now emits `thinking-token-count` after
+// `prompt-caching-scope` (it came before `context-management` under 2.1.280).
+// The set is otherwise unchanged for this request.
 const DEFAULT_BETAS = [
   "claude-code-20250219",
   "oauth-2025-04-20",
   "interleaved-thinking-2025-05-14",
   "redact-thinking-2026-02-12",
-  "thinking-token-count-2026-05-13",
   "context-management-2025-06-27",
   "prompt-caching-scope-2026-01-05",
+  "thinking-token-count-2026-05-13",
   "extended-cache-ttl-2025-04-11",
   "cache-diagnosis-2026-04-07",
   "web-search-2025-03-05",

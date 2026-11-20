@@ -45,36 +45,23 @@ const deliberateOmissions = new Map([
     "test-only/host-only injection seam; the plugin's runtimes always provide global `crypto.subtle`, which is the package default",
   ],
   [
-    "previousRequestId",
-    // Feeds the `cc_prev_req` segment of the billing block, new in the 2.1.233
-    // profile (the 2.1.195 profile has no such segment and ignores the field)
-    // and still present in 2.1.280 — the library's 2.1.280 behaviour-flag audit
-    // confirms the bundle's billing-block builder still emits both `cc_prev_req`
-    // and `cc_prompt_id` with the same validation patterns this package declares.
-    // The value is the `request-id` the SERVER returned on the preceding turn.
-    // The plugin's fetch interceptor does not thread response ids back into the
-    // next outgoing request: it has no per-conversation store keyed by anything
-    // the host gives it, and the host body carries no such id either.
-    //
-    // This is a KNOWN, OBSERVABLE DIVERGENCE, not a no-op: from turn 2 onward a
-    // genuine 2.1.233+ / 2.1.280 client emits `cc_prev_req=req_...;` and the
-    // plugin does not. Recorded in docs/mimicry/wire-compat-divergences.md;
-    // closing it needs response-id capture plumbed through the interceptor,
-    // which is a follow-up.
-    "the plugin does not track server-returned request ids, so it cannot supply `cc_prev_req`; known turn-2+ divergence from the 2.1.233+ / 2.1.280 profile, tracked as a follow-up",
-  ],
-  [
-    "promptId",
-    // Feeds the `cc_prompt_id` segment of the same 2.1.233+ / 2.1.280 billing
-    // block. Upstream reads a host-side prompt UUID; the package cannot derive
-    // one and neither can the plugin — nothing in the intercepted request
-    // identifies a prompt, and inventing a UUID would emit a segment whose
-    // value is meaningless rather than matching genuine traffic.
-    //
-    // Same class of divergence as `previousRequestId`, same follow-up.
-    "no host-side prompt UUID reaches the interceptor; synthesising one would emit a fabricated `cc_prompt_id`, so the segment is omitted — known 2.1.233+ / 2.1.280 divergence, tracked as a follow-up",
+    "cch",
+    // The five-hex-character body-hash attestation of the `cch=` billing segment.
+    // The library only PLACES a value; computing it is the caller's business. The
+    // plugin has no source for it (the JS bundles genuine Claude Code ships emit
+    // the `00000` placeholder, and the Bun-binary attestation lives on a path the
+    // plugin does not model), and hashing the body per turn would also mutate
+    // system[0] on every request and invalidate the prompt cache. Omitted on
+    // purpose: the library keeps `cch=00000`. Recorded in
+    // docs/mimicry/wire-compat-divergences.md.
+    "no host source for the body-hash attestation; the library default `00000` is what the JS bundles emit, and re-hashing per turn would invalidate the prompt cache",
   ],
 ]);
+
+// Fields that used to be deliberate omissions and are now forwarded from the
+// session-correlation state (lib/session-correlation.mjs): promptId,
+// previousRequestId, turnPosition, toolsUsed, previousMessageId. Forwarded
+// unconditionally by the translator; whether a value exists is decided upstream.
 
 /**
  * Extract the top-level property names of an interface from a `.d.ts` source.
@@ -203,6 +190,16 @@ function maximalTransport() {
     cacheControl: {},
     capabilities: { adaptiveThinking: false },
     profileOverride: { userAgent: "claude-cli/2.0.0 (external, cli)" },
+    // 2.1.329 inputs, populated from session correlation / config.
+    promptId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    previousRequestId: "req_011CPrevious",
+    turnOrigin: "human",
+    turnPosition: { promptIndex: 0, turnIndex: 1 },
+    toolsUsed: [{ name: "Bash" }],
+    previousMessageId: "msg_01Previous",
+    accountFeatures: { dispatchId: "v2d" },
+    sideQuery: true,
+    agenticQuery: true,
   };
 }
 

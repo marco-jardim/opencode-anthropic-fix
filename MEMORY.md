@@ -9,6 +9,182 @@ Do not edit past entries. Add a new one instead.
 
 ---
 
+## 2026-11-20 — Claude Code 2.1.329 live wire validation: billing-classifier trigger and title side queries (unreleased)
+
+> **Amendment (2026-11-20), D30 decided.** The maintainer chose to normalize the preamble literal everywhere, instruction
+> files included, as the single exception to the rewrite rule (D21). `normalizeSystemTextBlocks` now replaces the exact,
+> case-sensitive sentence in every system text, for every role and mode; the rest of an instruction file, its paths and
+> URLs stay byte-identical, and no other phrase is touched. Divergence row 21 is closed. The D30 text below is the
+> original record.
+
+**What triggered it.** With commit `3d57144`, main requests got HTTP 400 `You're out of extra usage`. The organization
+has extra usage disabled (`overage-disabled-reason: org_level_disabled`), so the server had routed the requests to extra
+usage, that is, it classified them as third-party. A live validation followed (`opencode serve` behind mitmproxy, OAuth,
+three turns on Sonnet 5.5 and on Opus 5.5), with the wire still pinned to the 2.1.329 profile (D16, D24). This entry
+records the two fixes it produced (`d12f2d5`, `262e609`), the evidence behind them and the divergences that remain.
+Analysis: `docs/claude-code-2.1.329-analysis.md` §7.
+
+**How the trigger was found.** The captured request was replayed with the same OAuth token as the genuine client,
+removing or replacing one part at a time. The sole trigger was OpenCode's literal env preamble in the volatile system
+block, `Here is some useful information about the environment you are running in:`. With only that sentence replaced
+by the Claude Code wording, `Here is useful information about the environment you are running in:`, the identical
+request returned 200. Not triggers: OpenCode brand mentions, `opencode_console` and paths (13 occurrences in
+`system[2]` passed), the tools, the billing fields, `context_management` and `diagnostics`, and the model.
+
+**Decisions.**
+
+- **D29 — The host env preamble is normalized in every system block, wherever it sits.** Root cause: the segmenter
+  treated the preamble as instruction-file text when it followed an `Instructions from:` file, so the base-scope
+  rewrite (D21) skipped it. The preamble on a line of its own, directly followed by the `<env>` line, now opens an env
+  segment even inside an instruction file (`d12f2d5`, `lib/mimicry/system-prompt.mjs`). A table-driven test over
+  host-identifying phrases × block positions × request roles guards it (`lib/mimicry/system-prompt.test.mjs`). This
+  qualifies D21: host content after the identity block is not neutral as a whole. This one literal is read by the
+  server; brand mentions and paths were not.
+- **D30 — An instruction file that merely quotes the preamble is left unchanged (open decision).** Without a following
+  `<env>` line the phrase is the file's own text, and instruction files are not rewritten (D21). It remains a possible
+  trigger, so the decision stays open.
+- **D31 — Title requests are recognised by the host's request kind.** The v2 title request was classified `main` and
+  advanced the prompt index, so the first typed prompt went out with `cc_prompt_index=2`. The runtime now reads the host
+  kind label `x-opencode-request-kind`, set by the v2 transport and stripped before the wire with the other
+  `x-opencode-*` headers (D23). Title requests carry the side-query beta and no `cc_prompt_index`, and never advance
+  the correlation (`262e609`). Their request class is still `main`: the genuine side-query value is not established.
+
+**Live results after the fixes.** All requests returned 200 on Sonnet 5.5 and Opus 5.5 (turns `hello`,
+`quanto e 2+2?` and a long question). Billing: `cc_turn_origin=human`, `cc_prompt_index` 1, 2 and 3,
+`cc_turn_index=1`. Per-turn effort (D27): a `role: "system"` control `{effort: "low"}` before turn 2; on turn 3 the
+earlier `low` control stays in place and a `{effort: "medium"}` control precedes turn 3; the top-level
+`output_config.effort` stays `medium`. The system blocks after the billing block, the tools and all earlier messages
+are byte-identical between consecutive requests. Cache figures are in the analysis §7.3.
+
+**Also recorded, without a number.**
+
+- `cch=00000` stays by decision. Genuine sends a computed value; a replay of the genuine body with `cch=00000` was
+  accepted (200).
+- Account-served items stay absent by decision (opt-in, D24), although genuine sends them for this account:
+  `anthropic-dispatch-id`, the `inline-tools`, `advanced-tool-use`, `afk-mode`, `dangerous-tool-use` and
+  `message-threads` betas, and the `safeguards` and `thread` body fields.
+- Other observed divergences: `Accept-Encoding` goes second, not last (it comes from the host runtime's `fetch`); the
+  plugin caches `system[1]` (1h) and `system[2]` (1h, no scope), where genuine leaves `system[1]` uncached and gives
+  `system[2]` `scope: global`; the host adds `web-search-2025-03-05` and `advisor-tool-2026-03-01` at the end of the
+  beta list. All of them, and the two above, are rows of `docs/mimicry/wire-compat-divergences.md`.
+
+**What is not done.** The request class of title requests (the genuine value is unknown), the quoted-preamble case
+(D30), the system cache layout, the `Accept-Encoding` position, and the plugin release itself. Nothing here moves the
+emulated version: the wire stays pinned to the profile (D16).
+
+---
+
+## 2026-11-19 — Claude Code 2.1.329 work: live genuine captures, OAuth correction, plugin changes, repoint and per-turn effort (unreleased)
+
+**What triggered it.** The library's 2.1.329 analysis (`docs/protocol/versions/claude-code-2.1.329-analysis.md` in
+`claude-code-wire-compat`) added live TLS-intercepted captures of the genuine client as an OAuth subscriber (interactive,
+`-p`, quota probe, and the `claude auth login --claudeai` exchange). Compared with the plugin's own capture they showed
+concrete differences: a UA that said 2.1.329 beside Stainless 0.112.1, the retired `mid-conversation-system` beta, five
+host-leaked `x-opencode-*` / `x-session-id` headers on the wire, effort `high` and `max_tokens` 64000 against genuine
+`medium` and 128000, and OAuth token calls shaped unlike the genuine axios calls. This entry records the plugin-side
+decisions made before the repoint (D15–D23) and the repoint itself with per-turn effort (D24–D28). Analysis:
+`docs/claude-code-2.1.329-analysis.md`.
+
+**Decisions.** (D-numbers continue this file's series. "Contract D2/D5/D8/D9" below means the divergence ids of
+`docs/oauth-2.1.280-contract.md`, not decisions D8/D9 of the 2026-09-26 entry.)
+
+- **D15 — OAuth uses the axios path in both 2.1.280 and 2.1.329.** The 2.1.280 bundle does contain the axios token
+  calls (refresh and exchange); the earlier claim that it has no axios OAuth path was wrong. The genuine token requests
+  send `Accept: application/json, text/plain, */*`, `Content-Type`, `User-Agent: axios/1.15.2` and `Accept-Encoding`,
+  with no `anthropic-beta`; the SDK `userOAuthProvider` shape belongs only to SDK credentials-file profiles that
+  Claude Code's own login never takes. This **corrects contract D2 (no axios), D5 (refresh has no `scope`), D8
+  (exchange reuses the SDK header triple) and D9 (conditional scopes default off)**, plus D1 (revoke path); the
+  corrections are dated in `docs/oauth-2.1.280-contract.md` and the new contract is `docs/oauth-2.1.329-contract.md`.
+  Alternative rejected: keeping the SDK fingerprint because it had been "verified" — it was verified against the wrong
+  call site, and a client sending it was the odd one out.
+- **D16 — The emulated version never floats with npm latest.** The wire (user agent, `cc_version`, fingerprint input,
+  beta set, body shape) is only byte-faithful for the pinned profile's own release, so the runtime always claims
+  `WIRE_PROFILE.cliVersion`. The npm "latest" lookup stays as an informational diagnostic (`emulating X; upstream latest
+Y`). Alternative rejected: following npm latest, which paired a new UA with the old Stainless and runtime versions, a
+  combination no genuine build produces. Extends the 2026-09-26 D9 (profile pinned in the plugin).
+- **D17 — Effort default is `medium`; thinking is never toggled per question; per-turn effort (see D27).** The
+  maintainer's default is `medium` (`default_effort`; `auto` follows the catalogue; `CLAUDE_CODE_EFFORT_LEVEL` wins;
+  clamped to what the model supports), matching the genuine catalogue default for the 5.5 / 5.2 models. Thinking stays
+  `adaptive`: a thinking-config change invalidates the message cache, and the new models reject
+  `thinking: {type: "disabled"}`, so `adaptive_thinking_zero_simple` defaults to off. A mid-conversation effort change
+  is to go through the genuine per-turn mechanism (a `role: "system"` message in `messages`, beta
+  `per-turn-control-2026-07-01`) rather than the top-level `output_config.effort`, so the cached prefix survives. That
+  needed the library's 2.1.329 seam and landed with the repoint (D27).
+- **D18 — The Haiku `claude-code-20250219` beta is on agentic main turns only.** The base composition withholds it on
+  Haiku; the genuine client re-adds it only for agentic queries. The plugin used to add it for every Haiku request,
+  including title and subagent side requests. It now adds it for role `main` (or absent), never for a title generator.
+  The position residual (the plugin appended it last) closed with the repoint: the library's `agenticQuery` input now
+  composes it in its own position (D24).
+- **D19 — History rewrites happen only on a cold cache, and only as an opt-in.** `conservative` (default) forbids
+  history and tool rewrites because they invalidate a warm cache. `token_economy.cold_cache_only` allows them only when
+  the conversation's cache is already cold (per session, last main-role request, messages TTL), and
+  `idle_tool_result_clearing` uses the genuine placeholder after a long idle. Both default off. Alternative rejected:
+  loosening `conservative` globally.
+- **D20 — Org affinity rather than stripping.** For models with `org_locked_thinking`, thinking written under one
+  organization is unusable under another. The plugin prefers a usable same-organization account for the conversation
+  (stickiness, on by default) instead of rewriting history; stripping older thinking is opt-in
+  (`strip_thinking_on_org_switch`) and keeps the latest assistant turn, and a no-same-org fallback toasts once.
+  Effective only once a catalogue marks a model org-locked (the 2.1.329 profile).
+- **D21 — System prompt: empowerment blocks (default `max`), a stable/volatile split, and a narrow rewrite scope.**
+  The host block starts with the genuine 2.1.329 opening sentence, then empowerment blocks (ten, byte-stable, default
+  `max`) before the instruction files so user instructions keep the last word. The big host block is split into a
+  stable block (opening, blocks, base prompt, global instructions, skills; org-scope breakpoint) and a volatile block
+  (`<env>`, project instructions, anything unclassified; deliberately **no** breakpoint, because the wire package would
+  merge two equal markers back into one). The OpenCode → Claude Code rewrite now applies only to the base prompt and the
+  `<env>` header (`rewrite_scope: "base"`), never to paths, URLs, `Instructions from:` files or skills. All of it is
+  host content after the identity block; the evidence says it is not checked server-side, so it is fingerprint-neutral
+  (class (b)). Alternative rejected: moving instruction files into the first user message, which needs a library
+  fingerprint fix first.
+- **D22 — Fast mode follows the catalogue.** Eligibility is the `fast_mode` capability of the pinned catalogue, not a
+  hard-coded Opus list; Opus 4.6 / 4.7 stay eligible only with `fast_mode_legacy_models`.
+- **D23 — Leaked host headers are stripped.** `x-opencode-*` and `x-session-id` were reaching `api.anthropic.com`, each a
+  direct fingerprint of a foreign client. They are removed on both emulated paths before `ANTHROPIC_CUSTOM_HEADERS`
+  is merged (a user can still send one on purpose). **Pass-through mode keeps them**: with emulation off nothing is
+  forged, and that is documented as a divergence rather than patched.
+- **D24 — Repoint to the 2.1.329 profile, with session correlation.** `WIRE_PROFILE` is `CLAUDE_CODE_2_1_329_PROFILE`
+  and `WIRE_BETA_REGISTRY` (profile-neutral name) its registry. The library only places conversation state; the
+  plugin owns the observable part (`lib/session-correlation.mjs`): a prompt id per typed prompt, turn origin `human`
+  on the main thread, the prompt/turn index (first typed prompt is 1/1, attested), the previous `request-id` and
+  message id, and the tools used. The increment rule after the first request is **inferred** from the segment names
+  and recorded as a divergence. Title requests send `sideQuery`, main requests `agenticQuery` (replacing the Haiku
+  append); account-served features (`dispatch_id`, `message_threads`, `inline_tools`, `advisor`, `tool_provenance`)
+  are opt-in and off, because the server decides enrolment and the plugin cannot observe it. The runtime version and
+  the nine authorize scopes now come from the profile. Alternative rejected: sending the account features by default,
+  which asserts enrolment the account may not have.
+- **D25 — Generated `context_management` is accepted as genuine.** With thinking active the library writes
+  `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`, exactly as the captures show, so the plugin takes it
+  rather than suppressing or duplicating it. `token_economy.context_management` stays an opt-in for custom bodies.
+- **D26 — Cache diagnosis is body-coupled and never latched.** `cache-diagnosis-2026-04-07` is paired with the
+  `diagnostics` body field (as `message-threads` and `tool-provenance` are with theirs). The rejected-beta latch only
+  filters the header, so suppressing one would produce a body field without its beta, neither genuine nor valid.
+  A rejection naming one surfaces as an error. `advisor-tool` is body-coupled only while `account_features.advisor` is
+  on. Alternative rejected: keeping it latchable as under 2.1.280, where there was no paired body field.
+- **D27 — Per-turn effort goes through the genuine control message; auto-low is on by default.** A turn whose effort
+  differs from the one in force gets `{"role":"system","content":[],"output_config":{"effort":…}}` right before it;
+  the top-level `output_config.effort` is the conversation's base and never moves, so the cached prefix is never
+  rewritten (`lib/per-turn-effort.mjs`, applied in `lib/mimicry/request-body.mjs`). Two sources: the host's effort
+  and auto-`low` for a short typed question (`per_turn_effort.auto_low_short_questions`, default on, 280 characters).
+  The decision for a turn is made once and remembered so past control messages are re-derived identically. The first
+  turn never gets one (it is the base), a typed turn right after an open `tool_use` gets none (orphan repair folds
+  results into it), and the memory resets on a model change or a new conversation. Escape hatch:
+  `per_turn_effort.enabled` / `auto_low_short_questions`. The first-turn rule is plugin policy, not captured.
+- **D28 — The plugin requires library 0.8.0-rc.1 (prerelease).** The 2.1.329 profile, `BETA_REGISTRY_2_1_329` and the
+  new input fields exist only from that release. It is not on the `latest` dist-tag, so the library must publish a
+  stable release (and `package.json` and the lockfile move with it) before this plugin work is released.
+  Alternative rejected: vendoring or shimming the missing exports.
+
+**Also decided here, without a number.** `oauth.plugins_scope` defaults to `true` (an explicit `false` warns once);
+`oauth.project_scopes` is deprecated and has no effect; the defaults `lean_system_non_main`, `output_cap.enabled`,
+`prompt_compaction` (`"off"`), `anti_verbosity` and `adaptive_thinking_zero_simple` moved to off; `cch=00000` stays
+(genuine is a per-request native value the library cannot compute); excluded and documented, not implemented: cache
+keepalive, resumption, `resume_cache_warm`, the total-tokens reminder, gzip and padding.
+
+**What is not done.** Library publication (D28) and the plugin release itself. Not implemented by design: cache
+keepalive, resumption, gzip and padding, `cch` computation, and header case and order on the wire (`fetch` lowercases
+names; recorded in `docs/mimicry/wire-compat-divergences.md`).
+
+---
+
 ## 2026-09-26 — INVALID_UNICODE / INPUT_TOO_LARGE incident, 2.1.280 port (plugin 2.1.0-2.1.1)
 
 **What the user saw.** opencode sessions and subagents died with `INVALID_UNICODE`, then long Opus 5.5 sessions died

@@ -42,12 +42,15 @@ const fableCases = ["claude-fable-5"].map((identifier) => ({
   expectedAdaptive: true,
 }));
 
+// Not adaptive: the seam gates `isAdaptiveThinkingModel` on the emulated
+// profile's catalogue, and the 2.1.280 `claude-mythos-5` entry carries no
+// `adaptive_thinking` capability (see model-predicates-parity DIVERGENCE (5)).
 const mythosCases = ["claude-mythos-5"].map((identifier) => ({
   label: identifier,
   identifier,
   expectedFable: false,
   expectedMythos: true,
-  expectedAdaptive: true,
+  expectedAdaptive: false,
 }));
 
 const opusCases = [6, 7, 8].flatMap((version) => separators.map((separator) => `claude-opus-4${separator}${version}`));

@@ -12,6 +12,59 @@ alone.
 lines 950–1021. That section records byte offsets into a carved `2.1.280` bundle.
 §13.8 does not state the bundle's platform, so this document does not claim one.
 
+## Corrections 2026-11-19
+
+Live capture of the genuine `2.1.329` login and a re-read of the `2.1.280` bundle
+show that several inferences recorded below were wrong. Where a statement in §2,
+§3, §6 or §7 conflicts with this section, **this section wins**. The sections are
+left as written so the history of the inference stays visible; the current
+contract is `oauth-2.1.329-contract.md` (same directory), which also records what
+changed in `2.1.329`.
+
+- **D1 (revoke).** Was: the path `/v1/oauth/revoke` appears nowhere in the
+  bundle. Is: the genuine revoke is `POST ${TOKEN_URL}/revoke`
+  (`/v1/oauth/token/revoke`), body `{token, token_type_hint, client_id}`, 5 s
+  timeout. The plugin now uses that URL and the axios fingerprint. It stays off by
+  default (`oauth.revoke_on_logout`) and counts a revocation as acknowledged only
+  on a 2xx response carrying a `request-id` header.
+- **D2 (axios).** Was: token requests use no axios path and `axios/1.13.6` matches
+  nothing. Is: exchange, refresh and revoke are axios calls in `2.1.280` too
+  (`dt.post(nn().TOKEN_URL, …)` with `dt.isAxiosError`, `@7222591` and
+  `@7231359`). The genuine user agent is `axios/1.15.2`. The SDK
+  `userOAuthProvider` triple belongs to the SDK credentials-file path only, never
+  to Claude Code's own login.
+- **D5 (refresh scope).** Was: the refresh body has no `scope` key. Is: the body
+  is `{grant_type, refresh_token, client_id, scope}` and `scope` is always sent
+  (stored scopes, otherwise the Claude.ai default list plus `user:plugins`). The
+  earlier reading of §13.8 byte `4429828` described the SDK path, not Claude
+  Code's own refresh.
+- **D8 (exchange headers).** Was: the exchange reuses the refresh header triple
+  (assumed). Is: the exchange is measured. Headers are `Accept`, `Content-Type`,
+  `User-Agent: axios/1.15.2`, `Accept-Encoding`; the body keys are `grant_type`,
+  `code`, `redirect_uri`, `client_id`, `code_verifier`, `state`, with `state`
+  always present.
+- **D9 (conditional scopes).** Was: conditional scopes default off. Is:
+  `user:plugins` is a normal default in `2.1.280` and `2.1.329`; the authorize URL
+  carries the same union for both modes, and project scopes are never sent.
+- **D13 (scope order).** Was: the order of the conditional extensions is the
+  plugin's own choice. Is: the order is the genuine one, console base, then
+  claude.ai base, then `user:plugins` (`org:create_api_key`, `user:profile`,
+  `user:inference`, `user:sessions:claude_code`, `user:mcp_servers`,
+  `user:file_upload`, `user:plugins`). Project scopes are not part of a login
+  request. The space-join serialisation is unchanged.
+
+Consequences for the sections below:
+
+- §2.2 and §2.3 header rows: read `Header 1` as `Content-Type: application/json`,
+  `Header 2` as **absent** (no `anthropic-beta` on token requests) and `Header 3`
+  as `User-Agent: axios/1.15.2`, with `Accept` and `Accept-Encoding` added by
+  axios. The body rows follow the table above.
+- §3: the SDK constants (`0.112.1`, `userOAuthProvider`, the oauth beta on token
+  requests) are not part of Claude Code's own token requests. The plugin no longer
+  carries them.
+- §6 items 1–3: superseded by D1, D2 and D5 above.
+- §4.2 and §7 D9/D13: superseded by D9 and D13 above.
+
 ## Attestation vocabulary
 
 Three levels, and the level is always stated:

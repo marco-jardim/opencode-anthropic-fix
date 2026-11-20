@@ -48,6 +48,9 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       signature_emulation: {
         ...original.DEFAULT_CONFIG.signature_emulation,
         fetch_claude_code_version_on_startup: false,
+        // prompt_compaction defaults to "off"; this suite exercises the "minimal" opt-in
+        // (the "off" cases set it explicitly).
+        prompt_compaction: "minimal",
       },
       override_model_limits: {
         ...original.DEFAULT_CONFIG.override_model_limits,
@@ -56,6 +59,9 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
       adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
       preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
+      // output_cap is off by default; these suites post bodies without max_tokens,
+      // so keep the opt-in explicit to preserve the capped-max_tokens behaviour.
+      output_cap: { ...original.DEFAULT_CONFIG.output_cap, enabled: true },
     })),
     loadConfigFresh: vi.fn(() => ({
       ...original.DEFAULT_CONFIG,
@@ -63,6 +69,7 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       signature_emulation: {
         ...original.DEFAULT_CONFIG.signature_emulation,
         fetch_claude_code_version_on_startup: false,
+        prompt_compaction: "minimal",
       },
       override_model_limits: {
         ...original.DEFAULT_CONFIG.override_model_limits,
@@ -71,9 +78,17 @@ vi.mock("./lib/config.mjs", async (importOriginal) => {
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
       adaptive_context: { ...original.DEFAULT_CONFIG.adaptive_context, enabled: false },
       preconnect: { ...original.DEFAULT_CONFIG.preconnect, enabled: false },
+      output_cap: { ...original.DEFAULT_CONFIG.output_cap, enabled: true },
     })),
     saveConfig: vi.fn(),
   };
+});
+
+// Wrap (never replace) the body transform so a test can assert the runtime
+// inputs it receives (session key) while every request still runs the real one.
+vi.mock("./lib/mimicry/request-body.mjs", async (importOriginal) => {
+  const original = await importOriginal();
+  return { ...original, transformRequestBody: vi.fn(original.transformRequestBody) };
 });
 
 // Mock global fetch for OAuth token exchange and API requests
@@ -92,6 +107,9 @@ import { isBetaRetryAccountUsable } from "./lib/accounts.mjs";
 import { saveAccounts, loadAccounts, clearAccounts } from "./lib/storage.mjs";
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import { loadConfig, loadConfigFresh, saveConfig as saveRuntimeConfig, DEFAULT_CONFIG } from "./lib/config.mjs";
+import { transformRequestBody } from "./lib/mimicry/request-body.mjs";
+import { buildDiagnosticBundle } from "./lib/diagnose.mjs";
+import { WIRE_PROFILE } from "./lib/mimicry/wire-compat.mjs";
 
 describe("legacy tool identity", () => {
   it("preserves prototype-like tool names through the legacy response hook", () => {
@@ -381,7 +399,7 @@ describe("plugin lifecycle", () => {
 
     // Step 2: callback() — user pastes the code
     // At this point, loader() has NOT been called yet, so accountManager is null.
-    const credentials = await authResult.callback("auth-code#state");
+    const credentials = await authResult.callback(`auth-code#${new URL(authResult.url).searchParams.get("state")}`);
 
     expect(credentials.type).toBe("success");
     expect(credentials.refresh).toBe("refresh-from-oauth");
@@ -423,12 +441,13 @@ describe("plugin lifecycle", () => {
     const authResult = await method.authorize();
 
     // Pass a code#state string as the user would paste.
-    await authResult.callback("myauthcode#mystatevalue");
+    const pastedState = new URL(authResult.url).searchParams.get("state");
+    await authResult.callback(`myauthcode#${pastedState}`);
 
-    // The token endpoint body must contain state=mystatevalue.
+    // The token endpoint body must contain the authorize state.
     expect(capturedBody).toBeDefined();
     expect(capturedBody.code).toBe("myauthcode");
-    expect(capturedBody.state).toBe("mystatevalue");
+    expect(capturedBody.state).toBe(pastedState);
   });
 
   it("loader bootstraps from auth.json and saves accounts file immediately", async () => {
@@ -500,7 +519,7 @@ describe("plugin lifecycle", () => {
 
     const method = plugin.auth.methods[0];
     const authResult = await method.authorize();
-    const credentials = await authResult.callback("second-code#state");
+    const credentials = await authResult.callback(`second-code#${new URL(authResult.url).searchParams.get("state")}`);
 
     expect(credentials.type).toBe("success");
     expect(credentials.refresh).toBe("second-refresh");
@@ -876,7 +895,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.280");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.329");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -932,10 +951,12 @@ describe("fetch interceptor", () => {
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     const payloadText = body.system.map((item) => item.text);
-    expect(payloadText).toContain("You are Claude Code, an Claude assistant.");
+    // The host block carries the genuine opening sentence and the empowerment
+    // blocks ahead of the (rewritten) host text.
+    expect(payloadText.at(-1).endsWith("\nYou are Claude Code, an Claude assistant.")).toBe(true);
   });
 
-  it("redacts opencode mentions inside path-like text in system prompt", async () => {
+  it("preserves path-like and URL-like text in the system prompt by default (rewrite_scope base)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -943,7 +964,12 @@ describe("fetch interceptor", () => {
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
         max_tokens: 1024,
-        system: [{ type: "text", text: "Working dir: /Users/rmk/projects/opencode-auth" }],
+        system: [
+          {
+            type: "text",
+            text: "Working dir: /Users/rmk/projects/opencode-auth\nOpenCode docs: https://opencode.ai/docs",
+          },
+        ],
         messages: [],
       }),
     });
@@ -951,11 +977,15 @@ describe("fetch interceptor", () => {
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     const payloadText = body.system.map((item) => item.text);
-    expect(payloadText).toContain("Working dir: /Users/rmk/projects/Claude-auth");
-    expect(payloadText.join("\n")).not.toMatch(/opencode/i);
+    // Paths and URLs survive; the prose mention is still rewritten.
+    expect(
+      payloadText
+        .at(-1)
+        .endsWith("Working dir: /Users/rmk/projects/opencode-auth\nClaude Code docs: https://opencode.ai/docs"),
+    ).toBe(true);
   });
 
-  it("compacts verbose system instructions in minimal mode (default)", async () => {
+  it("compacts verbose system instructions in minimal mode (explicit opt-in)", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -1041,6 +1071,132 @@ describe("fetch interceptor", () => {
     expect(textBlocks.join("\n")).toContain("You are a title generator. You output ONLY a thread title. Nothing else.");
     expect(textBlocks.join("\n")).toContain("- Keep the title at or below 50 characters.");
     expect(textBlocks.join("\n")).not.toContain("<task>");
+  });
+
+  it("keeps a host-labelled title request out of the main prompt correlation", async () => {
+    // The live v2 title shape: a haiku model, a large max_tokens, a host-written
+    // system prompt that names no title generator, and ONE short user message.
+    // Only the host's own request kind (the v2 transport label) marks it a title.
+    const session = { "x-opencode-session": "ses_title_correlation" };
+    const sent = async (extraHeaders, body) => {
+      mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { ...session, ...extraHeaders },
+        body: JSON.stringify(body),
+      });
+      const [, init] = mockFetch.mock.calls.at(-1);
+      const out = JSON.parse(init.body);
+      return { headers: init.headers, system: out.system.map((block) => block.text).join("\n") };
+    };
+    const hostSystem = [{ type: "text", text: `You write short names for threads.\n${"Be precise. ".repeat(400)}` }];
+    const title = await sent(
+      { "x-opencode-request-kind": "title" },
+      {
+        model: "claude-haiku-5-5",
+        max_tokens: 32000,
+        messages: [{ role: "user", content: "Name this thread: how do I rotate my signing keys?" }],
+        system: hostSystem,
+      },
+    );
+    const mainBody = (text) => ({
+      model: "claude-sonnet-4-5",
+      max_tokens: 32000,
+      messages: [{ role: "user", content: text }],
+      system: [{ type: "text", text: "You are a coding agent." }],
+    });
+    const first = await sent({}, mainBody("first typed prompt"));
+
+    // The title is a side query: no turn origin, no prompt index, no main beta set.
+    expect(title.system).not.toContain("cc_prompt_index");
+    expect(title.system).not.toContain("cc_turn_origin=human");
+    expect(title.headers.get("anthropic-beta").split(",")).toContain("claude-code-side-query-2026-09-29");
+    expect(title.headers.get("anthropic-beta").split(",")).not.toContain("claude-code-20250219");
+    // The private label never reaches the wire.
+    expect([...title.headers.keys()].filter((name) => name.startsWith("x-opencode-"))).toEqual([]);
+    // The title did not advance the main correlation: the first typed prompt is index 1.
+    expect(first.system).toContain("cc_turn_origin=human");
+    expect(first.system).toContain("cc_prompt_index=1");
+  });
+
+  it.each([
+    ["main", {}, 32000, 3],
+    ["title", { "x-opencode-request-kind": "title" }, 32000, 1],
+    ["small side query", {}, 200, 1],
+    ["subagent", { "x-parent-session-id": "ses_parent" }, 32000, 3],
+    ["compaction", { "x-opencode-request-kind": "compaction" }, 32000, 3],
+  ])(
+    "never sends the host's environment header in any system block (%s request)",
+    async (_role, extraHeaders, maxTokens, messageCount) => {
+      // The live layout of the refused request's volatile block: MCP instructions,
+      // a project instruction file, the date, the environment, the worktree hint.
+      const cwd = "D:\\git\\claude-code-wire-compat";
+      const liveVolatile = [
+        "<mcp_instructions>\nUse the docs server for library questions.\n</mcp_instructions>",
+        `Instructions from: ${cwd}\\AGENTS.md`,
+        "# Contributor operating guide\nOpenCode is the host.",
+        "Today's date: Fri Nov 20 2026",
+        "Here is some useful information about the environment you are running in:",
+        `<env>\n  Working directory: ${cwd}\n  Platform: win32\n</env>`,
+        "This is a git worktree, so edit only files under the working directory.",
+      ].join("\n");
+      const messages = Array.from({ length: messageCount }, (_unused, index) => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: `turn ${index}`,
+      }));
+      mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-opencode-session": "ses_env_phrase", ...extraHeaders },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: maxTokens,
+          messages,
+          system: [
+            { type: "text", text: "You are OpenCode, an interactive CLI tool." },
+            { type: "text", text: liveVolatile },
+          ],
+        }),
+      });
+
+      const [, init] = mockFetch.mock.calls.at(-1);
+      const system = JSON.parse(init.body).system.map((block) => block.text);
+      expect(system.length).toBeGreaterThan(0);
+      for (const text of system) expect(text).not.toContain("Here is some useful information");
+      expect(system.join("\n")).toContain("Here is useful information about the environment you are running in:");
+      expect(system.join("\n")).toContain(`Instructions from: ${cwd}\\AGENTS.md\n# Contributor operating guide`);
+    },
+  );
+
+  it("recognises a title-generator system prompt at any max_tokens, without a host label", async () => {
+    const session = { "x-opencode-session": "ses_title_unlabelled" };
+    const send = async (body) => {
+      mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+      await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: session,
+        body: JSON.stringify(body),
+      });
+      const [, init] = mockFetch.mock.calls.at(-1);
+      const out = JSON.parse(init.body);
+      return out.system.map((block) => block.text).join("\n");
+    };
+    const title = await send({
+      model: "claude-haiku-5-5",
+      max_tokens: 32000,
+      messages: [{ role: "user", content: "hello" }],
+      system: [{ type: "text", text: "You are a title generator. You output ONLY a thread title." }],
+    });
+    const first = await send({
+      model: "claude-sonnet-4-5",
+      max_tokens: 32000,
+      messages: [{ role: "user", content: "first typed prompt" }],
+      system: [{ type: "text", text: "You are a coding agent." }],
+    });
+
+    expect(title).not.toContain("cc_prompt_index");
+    expect(first).toContain("cc_prompt_index=1");
   });
 
   it("preserves verbose system instructions when prompt compaction is off", async () => {
@@ -1805,7 +1961,8 @@ describe("fetch interceptor — token refresh", () => {
     const [refreshUrl, refreshInit] = mockFetch.mock.calls[0];
     expect(refreshUrl).toBe("https://platform.claude.com/v1/oauth/token");
     expect(JSON.parse(refreshInit.body).grant_type).toBe("refresh_token");
-    expect(refreshInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+    expect(refreshInit.headers["User-Agent"]).toBe("axios/1.15.2");
+    expect(refreshInit.headers).not.toHaveProperty("anthropic-beta");
 
     // Second call should use the fresh token
     const [, apiInit] = mockFetch.mock.calls[1];
@@ -3062,11 +3219,12 @@ describe("OAuth exchange failure", () => {
     const method = plugin.auth.methods[0];
 
     const authResult = await method.authorize();
-    const credentials = await authResult.callback("bad-code#state");
+    const credentials = await authResult.callback(`bad-code#${new URL(authResult.url).searchParams.get("state")}`);
 
     expect(credentials.type).toBe("failed");
     const [, exchangeInit] = mockFetch.mock.calls[0];
-    expect(exchangeInit.headers["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
+    expect(exchangeInit.headers["User-Agent"]).toBe("axios/1.15.2");
+    expect(exchangeInit.headers).not.toHaveProperty("anthropic-beta");
     // saveAccounts should NOT have been called
     expect(saveAccounts).not.toHaveBeenCalled();
   });
@@ -3169,7 +3327,7 @@ describe("auth menu actions", () => {
       }),
     });
 
-    const credentials = await authResult.callback("fresh-code#state");
+    const credentials = await authResult.callback(`fresh-code#${new URL(authResult.url).searchParams.get("state")}`);
     expect(credentials.type).toBe("success");
     expect(credentials.refresh).toBe("fresh-refresh");
   });
@@ -3332,7 +3490,7 @@ describe("header handling", () => {
     // cache-diagnosis is default-on in 2.1.280.
     expect(betaHeader).toContain("thinking-display-updates-2026-08-18");
     expect(betaHeader).toContain("thinking-binding-controls-2026-08-01");
-    expect(betaHeader).toContain("cache-diagnosis-2026-04-07");
+    expect(betaHeader).toContain("thinking-token-count-2026-05-13");
     expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
     expect(JSON.parse(init.body).thinking?.display).toBe("updates");
   });
@@ -3524,7 +3682,7 @@ describe("header handling", () => {
     expect(parsed.output_config?.effort).toBeUndefined();
   });
 
-  it("injects default effort 'high' for adaptive models when effort is absent (v2.1.117+)", async () => {
+  it("injects the default effort 'medium' for adaptive models when effort is absent", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -3538,7 +3696,7 @@ describe("header handling", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const parsed = JSON.parse(init.body);
-    expect(parsed.output_config).toEqual({ effort: "high" });
+    expect(parsed.output_config).toEqual({ effort: "medium" });
   });
 
   it("does not inject default effort for non-adaptive models", async () => {
@@ -3588,12 +3746,19 @@ describe("header handling", () => {
       headers: { "content-type": "application/json" },
       // Canonical Anthropic model ID form — the Claude-3 detection regex
       // matches "claude-3-" prefix which exists in the canonical form.
-      body: JSON.stringify({ model: "claude-3-5-haiku-latest", messages: [] }),
+      // An agentic MAIN-shaped request (real messages, large max_tokens): the
+      // claude-code beta is re-added for Haiku only on those. An empty / small /
+      // title-shaped request does not get it.
+      body: JSON.stringify({
+        model: "claude-3-5-haiku-latest",
+        max_tokens: 8192,
+        messages: [{ role: "user", content: "hello" }],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
     const betaHeader = init.headers.get("anthropic-beta");
-    // Haiku gets CLAUDE_CODE_BETA_FLAG so subagent delegation gets full mimic
+    // Haiku gets CLAUDE_CODE_BETA_FLAG on agentic main requests (genuine isAgenticQuery)
     expect(betaHeader).toContain("claude-code-20250219");
     expect(betaHeader).not.toContain("advanced-tool-use-2025-11-20");
     expect(betaHeader).not.toContain("fast-mode-2026-02-01");
@@ -3611,7 +3776,11 @@ describe("header handling", () => {
     await fetchFn("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "claude-haiku-4-5", messages: [] }),
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        max_tokens: 8192,
+        messages: [{ role: "user", content: "hello" }],
+      }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
@@ -4026,7 +4195,8 @@ describe("header handling", () => {
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
       cache_control: { type: "ephemeral", ttl: "1h" },
     });
-    expect(parsed.system[2].text).toBe("Use Claude Code defaults");
+    expect(parsed.system[2].text.startsWith("You are an agent working with the user toward their goals")).toBe(true);
+    expect(parsed.system[2].text.endsWith("\n\nUse Claude Code defaults")).toBe(true);
   });
 
   it("redacts opencode mentions and compacts duplicated identity prefix", async () => {
@@ -4062,7 +4232,9 @@ describe("header handling", () => {
     // original block is compacted and redacted
     expect(parsed.system[2].text.startsWith("You are Claude Code, Anthropic's official CLI for Claude.")).toBe(false);
     expect(parsed.system[2].text).toContain("Use Claude Code defaults");
-    expect(parsed.system[2].text).not.toMatch(/opencode/i);
+    // The prose is rewritten; the URL and path-like tokens are left as written.
+    expect(parsed.system[2].text).toContain("See https://opencode.ai/docs and github.com/anomalyco/opencode");
+    expect(parsed.system[2].text.replace(/\S*[/\\]\S*/g, "")).not.toMatch(/opencode/i);
     expect(parsed.system[2].text).not.toContain("\n\n\n");
   });
 
@@ -5422,6 +5594,209 @@ describe("adaptive 1M context", () => {
 // ---------------------------------------------------------------------------
 // Slash Command Message Stripping
 // ---------------------------------------------------------------------------
+describe("runtime integration: session key, refused scope, native 1M, pinned version", () => {
+  const SCOPE_BETA = "prompt-caching-scope-2026-01-05";
+  const baseConfig = () => ({
+    ...DEFAULT_CONFIG,
+    account_selection_strategy: "sticky",
+    signature_emulation: {
+      ...DEFAULT_CONFIG.signature_emulation,
+      fetch_claude_code_version_on_startup: false,
+    },
+    override_model_limits: { ...DEFAULT_CONFIG.override_model_limits },
+    idle_refresh: { ...DEFAULT_CONFIG.idle_refresh, enabled: false },
+    adaptive_context: { ...DEFAULT_CONFIG.adaptive_context, enabled: false },
+    custom_betas: [],
+    cache_policy: { ...DEFAULT_CONFIG.cache_policy, boundary_marker: true },
+    // DEFAULT_CONFIG.preconnect.enabled is true; the file-level config mock turns it off, and so must this
+    // config, or the loader fires a fire-and-forget HEAD (no headers, no body) through the fetch mock.
+    preconnect: { ...DEFAULT_CONFIG.preconnect, enabled: false },
+  });
+  const useConfig = (cfg) => {
+    vi.mocked(loadConfig).mockReturnValue(cfg);
+    vi.mocked(loadConfigFresh).mockReturnValue(cfg);
+  };
+  const boundarySystem = [
+    { type: "text", text: "Static instructions" },
+    { type: "text", text: "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" },
+    { type: "text", text: "Dynamic instructions" },
+  ];
+  const ok200 = () => new Response("", { status: 200 });
+  const reject400 = (name) => {
+    const body = JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: `Unexpected value(s) \`${name}\` for the \`anthropic-beta\` header. Please consult our documentation.`,
+      },
+    });
+    return {
+      ok: false,
+      status: 400,
+      headers: { get: () => null },
+      json: async () => JSON.parse(body),
+      text: async () => body,
+      clone() {
+        return this;
+      },
+    };
+  };
+  const send = (fn, { model = "claude-opus-4-5", headers = {}, extra = {} } = {}) =>
+    fn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        model,
+        system: boundarySystem,
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 10,
+        ...extra,
+      }),
+    });
+  const betasOf = (call) =>
+    call[1].headers
+      .get("anthropic-beta")
+      .split(",")
+      .map((s) => s.trim());
+  // Select the Messages API calls by URL; never assume the first fetch is the request under test.
+  const messageCalls = () => mockFetch.mock.calls.filter((call) => String(call[0]).includes("/v1/messages"));
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockFetch.mockReset();
+  });
+
+  it("precondition: boundary mode with a sticky strategy emits scope:global and the scope beta", async () => {
+    useConfig(baseConfig());
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockResolvedValueOnce(ok200());
+    await send(fn);
+    expect(messageCalls()).toHaveLength(1);
+    expect(messageCalls()[0][1].body).toContain('"scope":"global"');
+    expect(betasOf(messageCalls()[0])).toContain(SCOPE_BETA);
+  });
+
+  it("a latched rejection of the scope beta drops scope:global from the retry body", async () => {
+    useConfig(baseConfig());
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce(reject400(SCOPE_BETA)).mockResolvedValueOnce(ok200());
+
+    await send(fn);
+
+    const calls = messageCalls();
+    expect(calls).toHaveLength(2);
+    expect(betasOf(calls[0])).toContain(SCOPE_BETA);
+    expect(calls[0][1].body).toContain('"scope":"global"');
+    expect(betasOf(calls[1])).not.toContain(SCOPE_BETA);
+    expect(calls[1][1].body).not.toContain('"scope":"global"');
+  });
+
+  it("round-robin with boundary_marker emits no scope in the body and no scope beta", async () => {
+    useConfig({ ...baseConfig(), account_selection_strategy: "round-robin" });
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockResolvedValueOnce(ok200());
+    await send(fn);
+    expect(messageCalls()).toHaveLength(1);
+    expect(messageCalls()[0][1].body).not.toContain('"scope"');
+    expect(betasOf(messageCalls()[0])).not.toContain(SCOPE_BETA);
+  });
+
+  it("passes the session key (x-opencode-session, then x-session-id, then the plugin session) to transformRequestBody", async () => {
+    useConfig(baseConfig());
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockImplementation(async () => ok200());
+    vi.mocked(transformRequestBody).mockClear();
+
+    await send(fn, { headers: { "x-opencode-session": "ses_primary", "x-session-id": "ses_secondary" } });
+    await send(fn, { headers: { "x-session-id": "ses_secondary" } });
+    await send(fn);
+
+    const keys = vi.mocked(transformRequestBody).mock.calls.map((call) => call[2].sessionKey);
+    expect(keys[0]).toBe("ses_primary");
+    expect(keys[1]).toBe("ses_secondary");
+    expect(typeof keys[2]).toBe("string");
+    expect(keys[2]).not.toBe("");
+    expect(keys[2]).toBe(vi.mocked(transformRequestBody).mock.calls[2][2].sessionId);
+    // The host's session headers still never reach the wire.
+    expect(messageCalls()).toHaveLength(3);
+    for (const call of messageCalls()) {
+      expect(call[1].headers.get("x-opencode-session")).toBeNull();
+      expect(call[1].headers.get("x-session-id")).toBeNull();
+    }
+  });
+
+  it("an npm-fetched claude-code version never changes the user agent or cc_version", async () => {
+    const cfg = baseConfig();
+    cfg.signature_emulation.fetch_claude_code_version_on_startup = true;
+    useConfig(cfg);
+    mockFetch.mockImplementation(async (url) => {
+      if (String(url).includes("registry.npmjs.org")) {
+        return { ok: true, status: 200, json: async () => ({ version: "9.9.9" }) };
+      }
+      return ok200();
+    });
+    const fn = await setupFetchFn(makeClient());
+    await vi.waitFor(() => {
+      expect(mockFetch.mock.calls.some((call) => String(call[0]).includes("registry.npmjs.org"))).toBe(true);
+    });
+    // Let the fetch's .then() run so the version is recorded before the request.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await send(fn);
+
+    const messageCall = mockFetch.mock.calls.find((call) => String(call[0]).includes("/v1/messages"));
+    const ua = messageCall[1].headers.get("user-agent");
+    expect(ua).toContain(`claude-cli/${WIRE_PROFILE.cliVersion}`);
+    expect(ua).not.toContain("9.9.9");
+    const parsed = JSON.parse(messageCall[1].body);
+    expect(parsed.system[0].text).toContain(`cc_version=${WIRE_PROFILE.cliVersion}.`);
+    expect(JSON.stringify(parsed)).not.toContain("9.9.9");
+
+    // ...but it is surfaced for diagnostics.
+    const bundle = await buildDiagnosticBundle();
+    expect(bundle.meta.latestUpstreamClaudeCodeVersion).toBe("9.9.9");
+    expect(bundle.meta.mimicryVersionNote).toBe(`emulating ${WIRE_PROFILE.cliVersion}; upstream latest 9.9.9`);
+  });
+
+  it("never escalates a natively-1M model to context-1m, but still escalates a non-native one", async () => {
+    const cfg = baseConfig();
+    cfg.adaptive_context = { enabled: true, escalation_threshold: 1_000, deescalation_threshold: 500 };
+    useConfig(cfg);
+    const fn = await setupFetchFn(makeClient());
+    mockFetch.mockImplementation(async () => ok200());
+    const big = { messages: [{ role: "user", content: "x".repeat(200_000) }] };
+
+    await send(fn, { model: "claude-opus-4-6", extra: big });
+    await send(fn, { model: "claude-opus-4-7", extra: big });
+
+    const messageCalls = mockFetch.mock.calls.filter((call) => String(call[0]).includes("/v1/messages"));
+    expect(betasOf(messageCalls[0])).toContain("context-1m-2025-08-07");
+    expect(betasOf(messageCalls[1])).not.toContain("context-1m-2025-08-07");
+  });
+
+  it("override_model_limits covers catalogue natively-1M ids and stays behind the enabled flag", async () => {
+    const provider = (id) => ({
+      models: { [id]: { id, cost: {}, limit: { context: 200_000, output: 32_000 } } },
+    });
+    const run = async (enabled) => {
+      const cfg = baseConfig();
+      cfg.override_model_limits = { enabled, context: 1_000_000, output: 0 };
+      useConfig(cfg);
+      loadAccounts.mockResolvedValue(null);
+      const p = provider("claude-opus-4-7");
+      const plugin = await AnthropicAuthPlugin({ client: makeClient() });
+      await plugin.auth.loader(
+        vi.fn().mockResolvedValue({ type: "oauth", refresh: "r", access: "a", expires: Date.now() + 3_600_000 }),
+        p,
+      );
+      return p.models["claude-opus-4-7"].limit.context;
+    };
+    expect(await run(true)).toBe(1_000_000);
+    expect(await run(false)).toBe(200_000);
+  });
+});
+
 describe("slash command message stripping", () => {
   let fetchFn;
   let client;
@@ -5889,6 +6264,9 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
     idle_refresh: { ...DEFAULT_CONFIG.idle_refresh, enabled: false },
     adaptive_context: { ...DEFAULT_CONFIG.adaptive_context, enabled: false },
     custom_betas: ["afk-mode-2026-01-31"],
+    // The file-level config mock disables the preconnect HEAD; keep it off here too so no
+    // test depends on mockReset() racing the loader's fire-and-forget fetch.
+    preconnect: { ...DEFAULT_CONFIG.preconnect, enabled: false },
   };
 
   let fetchFn;
@@ -6395,11 +6773,13 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 2.1.280: the package composes some betas itself (cache-diagnosis is
-  // default-on), so evicting them from customBetas alone does not take them off
-  // the wire. The latch routes them through the adapter's suppressBetas.
+  // The package composes some betas itself (thinking-token-count is default-on
+  // and NOT body-coupled), so evicting them from customBetas alone does not take
+  // them off the wire. The latch routes them through the adapter's suppressBetas.
+  // (cache-diagnosis was the example under 2.1.280; since 2.1.329 it is paired
+  // with the `diagnostics` body field and is never latched - see the last test.)
   // -------------------------------------------------------------------------
-  describe("package-composed betas and suppressBetas (2.1.280)", () => {
+  describe("package-composed betas and suppressBetas", () => {
     // The API's invalid-beta wording; the sent-beta latch only reads names from it.
     const invalidBeta = (...names) =>
       `Unexpected value(s) ${names.map((n) => "`" + n + "`").join(", ")} for the \`anthropic-beta\` header. ` +
@@ -6462,37 +6842,48 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       }
     };
 
-    it("cache-diagnosis is package-composed even with no custom_betas (precondition)", async () => {
+    it("cache-diagnosis is body-coupled under 2.1.329: a 400 naming it is never latched and it stays on the wire", async () => {
+      const send = await withConfig([]);
+      mockFetch.mockResolvedValue(reject400(invalidBeta("cache-diagnosis-2026-04-07")));
+      await sendQuietly(send);
+      await sendQuietly(send);
+      expect(mockFetch.mock.calls.length).toBeGreaterThan(0);
+      for (const call of mockFetch.mock.calls) {
+        expect(betasOf(call)).toContain("cache-diagnosis-2026-04-07");
+      }
+    });
+
+    it("thinking-token-count is package-composed even with no custom_betas (precondition)", async () => {
       const send = await withConfig([]);
       mockFetch.mockResolvedValueOnce(ok200());
       await send();
-      expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[0])).toContain("thinking-token-count-2026-05-13");
     });
 
     it("rejected package-composed beta: absent on retry, absent next request, back after TTL", async () => {
       let fakeNow = Date.now();
       const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => fakeNow);
       try {
-        const send = await withConfig(["cache-diagnosis-2026-04-07"]);
+        const send = await withConfig(["thinking-token-count-2026-05-13"]);
         mockFetch
-          .mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")))
+          .mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")))
           .mockResolvedValueOnce(ok200())
           .mockResolvedValueOnce(ok200())
           .mockResolvedValueOnce(ok200());
 
         await send();
         expect(mockFetch.mock.calls).toHaveLength(2);
-        expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
-        expect(betasOf(mockFetch.mock.calls[1])).not.toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[0])).toContain("thinking-token-count-2026-05-13");
+        expect(betasOf(mockFetch.mock.calls[1])).not.toContain("thinking-token-count-2026-05-13");
 
         await send();
         expect(mockFetch.mock.calls).toHaveLength(3);
-        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("thinking-token-count-2026-05-13");
 
         fakeNow += 5 * 60 * 1000 + 1;
         await send();
         expect(mockFetch.mock.calls).toHaveLength(4);
-        expect(betasOf(mockFetch.mock.calls[3])).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[3])).toContain("thinking-token-count-2026-05-13");
       } finally {
         dateSpy.mockRestore();
       }
@@ -6511,19 +6902,19 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(first).toContain("afk-mode-2026-01-31");
       expect(retry).not.toContain("afk-mode-2026-01-31");
       // Only the rejected beta leaves: a package default is not collateral damage.
-      expect(retry).toContain("cache-diagnosis-2026-04-07");
+      expect(retry).toContain("thinking-token-count-2026-05-13");
 
       await send();
       const next = betasOf(mockFetch.mock.calls[2]);
       expect(next).not.toContain("afk-mode-2026-01-31");
-      expect(next).toContain("cache-diagnosis-2026-04-07");
+      expect(next).toContain("thinking-token-count-2026-05-13");
     });
 
     it("never suppresses oauth-2025-04-20 or claude-code-20250219 even when the error names them", async () => {
-      const send = await withConfig(["oauth-2025-04-20", "claude-code-20250219", "cache-diagnosis-2026-04-07"]);
+      const send = await withConfig(["oauth-2025-04-20", "claude-code-20250219", "thinking-token-count-2026-05-13"]);
       mockFetch
         .mockResolvedValueOnce(
-          reject400(invalidBeta("oauth-2025-04-20", "claude-code-20250219", "cache-diagnosis-2026-04-07")),
+          reject400(invalidBeta("oauth-2025-04-20", "claude-code-20250219", "thinking-token-count-2026-05-13")),
         )
         .mockResolvedValueOnce(ok200())
         .mockResolvedValueOnce(ok200());
@@ -6532,13 +6923,13 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const retry = betasOf(mockFetch.mock.calls[1]);
       expect(retry).toContain("oauth-2025-04-20");
       expect(retry).toContain("claude-code-20250219");
-      expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+      expect(retry).not.toContain("thinking-token-count-2026-05-13");
 
       await send();
       const next = betasOf(mockFetch.mock.calls[2]);
       expect(next).toContain("oauth-2025-04-20");
       expect(next).toContain("claude-code-20250219");
-      expect(next).not.toContain("cache-diagnosis-2026-04-07");
+      expect(next).not.toContain("thinking-token-count-2026-05-13");
     });
 
     it("empty custom_betas: a rejected SENT package beta is latched, retried once, and returns after TTL", async () => {
@@ -6547,7 +6938,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       try {
         const send = await withConfig([]);
         mockFetch
-          .mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")))
+          .mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")))
           .mockResolvedValueOnce(ok200())
           .mockResolvedValueOnce(ok200())
           .mockResolvedValueOnce(ok200());
@@ -6555,20 +6946,20 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
         const res = await send();
         expect(res.status).toBe(200);
         expect(mockFetch.mock.calls).toHaveLength(2);
-        expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[0])).toContain("thinking-token-count-2026-05-13");
         const retry = betasOf(mockFetch.mock.calls[1]);
-        expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+        expect(retry).not.toContain("thinking-token-count-2026-05-13");
         expect(retry).toContain("oauth-2025-04-20");
         expect(retry).toContain("claude-code-20250219");
 
         await send();
         expect(mockFetch.mock.calls).toHaveLength(3);
-        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("thinking-token-count-2026-05-13");
 
         fakeNow += 5 * 60 * 1000 + 1;
         await send();
         expect(mockFetch.mock.calls).toHaveLength(4);
-        expect(betasOf(mockFetch.mock.calls[3])).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[3])).toContain("thinking-token-count-2026-05-13");
       } finally {
         dateSpy.mockRestore();
       }
@@ -6576,20 +6967,20 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
 
     it("empty custom_betas: a persistent rejection of a SENT beta is retried exactly once", async () => {
       const send = await withConfig([]);
-      mockFetch.mockImplementation(async () => reject400(invalidBeta("cache-diagnosis-2026-04-07")));
+      mockFetch.mockImplementation(async () => reject400(invalidBeta("thinking-token-count-2026-05-13")));
       try {
         await send();
       } catch {
         // A non-retryable 400 may surface as a thrown error; only the call count matters.
       }
       expect(mockFetch.mock.calls).toHaveLength(2);
-      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("thinking-token-count-2026-05-13");
 
       // M3(d): the latch did not help, so it is dropped rather than kept for the TTL.
       mockFetch.mockReset();
       mockFetch.mockResolvedValueOnce(ok200());
       await send();
-      expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[0])).toContain("thinking-token-count-2026-05-13");
     });
 
     it("empty custom_betas: an error naming a beta that was NOT sent latches nothing", async () => {
@@ -6606,7 +6997,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
 
       await send();
       expect(mockFetch.mock.calls).toHaveLength(2);
-      expect(betasOf(mockFetch.mock.calls[1])).toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[1])).toContain("thinking-token-count-2026-05-13");
     });
 
     it("empty custom_betas: an error naming oauth-2025-04-20 latches nothing and does not loop", async () => {
@@ -6627,14 +7018,14 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const next = betasOf(mockFetch.mock.calls[1]);
       expect(next).toContain("oauth-2025-04-20");
       expect(next).toContain("claude-code-20250219");
-      expect(next).toContain("cache-diagnosis-2026-04-07");
+      expect(next).toContain("thinking-token-count-2026-05-13");
     });
 
     // H1: stripping a custom beta must not suppress the package's own copy of it.
     it("H1: custom ['1m'] + package-composed context-1m + 400 naming cache-diagnosis keeps context-1m", async () => {
       const send = await withConfig(["1m"], { model: "claude-sonnet-4-1m" });
       mockFetch
-        .mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")))
+        .mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")))
         .mockResolvedValueOnce(ok200())
         .mockResolvedValueOnce(ok200());
 
@@ -6642,20 +7033,20 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(mockFetch.mock.calls).toHaveLength(2);
       const first = betasOf(mockFetch.mock.calls[0]);
       expect(first).toContain("context-1m-2025-08-07");
-      expect(first).toContain("cache-diagnosis-2026-04-07");
+      expect(first).toContain("thinking-token-count-2026-05-13");
       const retry = betasOf(mockFetch.mock.calls[1]);
       expect(retry).toContain("context-1m-2025-08-07");
-      expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+      expect(retry).not.toContain("thinking-token-count-2026-05-13");
 
       await send();
       expect(mockFetch.mock.calls).toHaveLength(3);
       const next = betasOf(mockFetch.mock.calls[2]);
       expect(next).toContain("context-1m-2025-08-07");
-      expect(next).not.toContain("cache-diagnosis-2026-04-07");
+      expect(next).not.toContain("thinking-token-count-2026-05-13");
     });
 
     it("H1: an unnamed rejection strips custom betas only; package-composed betas stay on the wire", async () => {
-      const send = await withConfig(["1m", "cache-diagnosis-2026-04-07"], { model: "claude-sonnet-4-1m" });
+      const send = await withConfig(["1m", "thinking-token-count-2026-05-13"], { model: "claude-sonnet-4-1m" });
       mockFetch
         .mockResolvedValueOnce(reject400("Unknown beta flag in anthropic-beta header"))
         .mockResolvedValueOnce(ok200())
@@ -6665,12 +7056,12 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(mockFetch.mock.calls).toHaveLength(2);
       for (const call of mockFetch.mock.calls.slice(1)) {
         expect(betasOf(call)).toContain("context-1m-2025-08-07");
-        expect(betasOf(call)).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(call)).toContain("thinking-token-count-2026-05-13");
       }
       await send();
       const next = betasOf(mockFetch.mock.calls[2]);
       expect(next).toContain("context-1m-2025-08-07");
-      expect(next).toContain("cache-diagnosis-2026-04-07");
+      expect(next).toContain("thinking-token-count-2026-05-13");
     });
 
     // M1: suppressing a body-coupled header while the body keeps the paired field
@@ -6695,7 +7086,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const send = await withConfig([], { model: "claude-opus-4-6", extraBody: { thinking: { type: "adaptive" } } });
       mockFetch
         .mockResolvedValueOnce(
-          reject400(invalidBeta("thinking-display-updates-2026-08-18", "cache-diagnosis-2026-04-07")),
+          reject400(invalidBeta("thinking-display-updates-2026-08-18", "thinking-token-count-2026-05-13")),
         )
         .mockResolvedValueOnce(ok200());
 
@@ -6703,7 +7094,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(mockFetch.mock.calls).toHaveLength(2);
       const retry = betasOf(mockFetch.mock.calls[1]);
       expect(retry).toContain("thinking-display-updates-2026-08-18");
-      expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+      expect(retry).not.toContain("thinking-token-count-2026-05-13");
     });
 
     // M2: count_tokens has no suppressBetas, so a latch there only degrades /v1/messages.
@@ -6730,7 +7121,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const send = await withConfig([]);
       mockFetch
         .mockResolvedValueOnce(
-          reject400("anthropic-beta: request failed; see cache-diagnosis-2026-04-07 docs for details"),
+          reject400("anthropic-beta: request failed; see thinking-token-count-2026-05-13 docs for details"),
         )
         .mockResolvedValueOnce(ok200());
 
@@ -6738,7 +7129,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(mockFetch.mock.calls).toHaveLength(1);
 
       await send();
-      expect(betasOf(mockFetch.mock.calls[1])).toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[1])).toContain("thinking-token-count-2026-05-13");
     });
 
     // M3(c): an error that echoes the whole header must not strip every beta.
@@ -6762,18 +7153,18 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
     it("M3d: when the latched retry fails the same way, the latch is dropped", async () => {
       const send = await withConfig([]);
       mockFetch
-        .mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")))
+        .mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")))
         .mockResolvedValueOnce(reject400(invalidBeta("interleaved-thinking-2025-05-14")))
         .mockResolvedValueOnce(ok200());
 
       await sendQuietly(send);
       expect(mockFetch.mock.calls).toHaveLength(2);
-      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("thinking-token-count-2026-05-13");
 
       await send();
       expect(mockFetch.mock.calls).toHaveLength(3);
       const next = betasOf(mockFetch.mock.calls[2]);
-      expect(next).toContain("cache-diagnosis-2026-04-07");
+      expect(next).toContain("thinking-token-count-2026-05-13");
       expect(next).toContain("interleaved-thinking-2025-05-14");
     });
 
@@ -6788,7 +7179,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
         ],
       });
       mockFetch.mockImplementation(async () => ok200());
-      mockFetch.mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")));
+      mockFetch.mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")));
       const authOf = (call) => call[1].headers.get("authorization");
 
       await send();
@@ -6802,15 +7193,15 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const otherAccount = later.filter((c) => authOf(c) !== rejectedAuth);
       expect(sameAccount.length, "round-robin reaches the rejected account again").toBeGreaterThan(0);
       expect(otherAccount.length, "round-robin reaches the other account").toBeGreaterThan(0);
-      for (const call of sameAccount) expect(betasOf(call)).not.toContain("cache-diagnosis-2026-04-07");
-      for (const call of otherAccount) expect(betasOf(call)).toContain("cache-diagnosis-2026-04-07");
+      for (const call of sameAccount) expect(betasOf(call)).not.toContain("thinking-token-count-2026-05-13");
+      for (const call of otherAccount) expect(betasOf(call)).toContain("thinking-token-count-2026-05-13");
     });
 
     // The one-shot latch retry must land on the account that was rejected: the
     // latch is keyed per account, so a rotating strategy moving the retry to
     // another account would resend the beta and burn the only retry.
     describe.each(["round-robin", "hybrid"])("latch retry account pinning (%s)", (strategy) => {
-      const target = "cache-diagnosis-2026-04-07";
+      const target = "thinking-token-count-2026-05-13";
       const authOf = (call) => call[1].headers.get("authorization");
       const twoAccounts = (custom = []) => {
         const far = Date.now() + 3_600_000;

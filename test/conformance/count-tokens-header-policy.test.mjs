@@ -123,7 +123,9 @@ describe("count-tokens extra-header policy is delegated to the package", () => {
       ]),
     );
 
-    expect(built.evidence.droppedExtraHeaderNames).toEqual(["content-type", "host"]);
+    // 2.1.329: the package owns `Accept` as well (the genuine client sends it),
+    // so the host's copy is dropped and audited alongside the other two.
+    expect(built.evidence.droppedExtraHeaderNames).toEqual(["accept", "content-type", "host"]);
   });
 
   it("builds when every host header is dropped", async () => {

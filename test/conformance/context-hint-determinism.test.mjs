@@ -261,8 +261,9 @@ describe("applyContextHintCompaction — determinism regression harness (phase C
     expect(out1.stats.thinkingCleared).toBe(out2.stats.thinkingCleared);
     expect(out1.stats.toolResultsCleared).toBe(out2.stats.toolResultsCleared);
     // Sanity: fixture has 4 thinking blocks and 12 tool_results; default
-    // keepRecent=8, so we expect 4 thinking cleared and 12-8=4 tool_results cleared.
-    expect(out1.stats.thinkingCleared).toBe(4);
+    // keepRecent=8. The LATEST assistant message keeps its thinking (it must
+    // round-trip byte-identical), so 3 thinking cleared and 12-8=4 tool_results cleared.
+    expect(out1.stats.thinkingCleared).toBe(3);
     expect(out1.stats.toolResultsCleared).toBe(4);
   });
 

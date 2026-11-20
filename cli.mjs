@@ -157,7 +157,11 @@ export async function refreshAccessToken(account) {
     const json = await refreshToken(account.refreshToken, {
       signal: AbortSignal.timeout(5000),
       clientId: account.clientId,
+      // The stored grant; undefined for legacy accounts, which then use the
+      // default list with the invalid_scope fallback.
+      scopes: account.scopes,
     });
+    if (Array.isArray(json.scopes) && json.scopes.length > 0) account.scopes = json.scopes;
     account.access = json.access_token;
     account.expires = Date.now() + json.expires_in * 1000;
     warnOnEphemeralTokenRotation(account, json.refresh_token);
@@ -306,10 +310,10 @@ function openBrowser(url) {
 /**
  * Run the OAuth PKCE login flow from the CLI.
  * Opens browser, prompts for code, exchanges for tokens.
- * @returns {Promise<{refresh: string, access: string, expires: number, email?: string} | null>}
+ * @returns {Promise<{refresh: string, access: string, expires: number, email?: string, scopes?: string[]} | null>}
  */
 async function runOAuthFlow() {
-  /** @type {{url: string, verifier: string}} */
+  /** @type {{url: string, verifier: string, state: string}} */
   let authorization;
   try {
     // `authorize()` rejects on a configuration problem before it does any work —
@@ -321,7 +325,7 @@ async function runOAuthFlow() {
     console.error(c.red(`Error: ${err?.message ?? err}`));
     return null;
   }
-  const { url, verifier } = authorization;
+  const { url, verifier, state } = authorization;
 
   console.log("");
   console.log(c.bold("Opening browser for Anthropic OAuth login..."));
@@ -341,7 +345,9 @@ async function runOAuthFlow() {
       return null;
     }
 
-    const credentials = await exchange(trimmed, verifier);
+    // `state` is the value authorize() put in the URL; exchange() refuses a
+    // pasted callback whose state differs and sends it with the code.
+    const credentials = await exchange(trimmed, verifier, { state });
     if (credentials.type === "failed") {
       if (credentials.details) {
         console.error(c.red(`Error: token exchange failed (${credentials.details}).`));
@@ -356,6 +362,7 @@ async function runOAuthFlow() {
       access: credentials.access,
       expires: credentials.expires,
       email: credentials.email,
+      ...(credentials.scopes ? { scopes: credentials.scopes } : {}),
     };
   } finally {
     rl.close();
@@ -391,6 +398,7 @@ export async function cmdLogin() {
     storage.accounts[existingIdx].access = credentials.access;
     storage.accounts[existingIdx].expires = credentials.expires;
     if (credentials.email) storage.accounts[existingIdx].email = credentials.email;
+    if (credentials.scopes) storage.accounts[existingIdx].scopes = credentials.scopes;
     storage.accounts[existingIdx].enabled = true;
     await saveAccounts(storage);
 
@@ -412,6 +420,7 @@ export async function cmdLogin() {
     refreshToken: credentials.refresh,
     access: credentials.access,
     expires: credentials.expires,
+    ...(credentials.scopes ? { scopes: credentials.scopes } : {}),
     token_updated_at: now,
     addedAt: now,
     lastUsed: 0,
@@ -448,7 +457,7 @@ export function describeRevokeOutcome(outcome) {
     return "Token discarded locally (server-side revocation is off; set oauth.revoke_on_logout to enable).";
   }
   if (outcome.ok) return "Token revoked server-side.";
-  const detail = outcome.status ? `HTTP ${outcome.status}` : outcome.error || "unknown error";
+  const detail = outcome.error || (outcome.status ? `HTTP ${outcome.status}` : "unknown error");
   return `Server-side revocation failed (${detail}). Token removed locally; it may still be valid.`;
 }
 
@@ -635,6 +644,9 @@ export async function cmdReauth(arg) {
   existing.access = credentials.access;
   existing.expires = credentials.expires;
   if (credentials.email) existing.email = credentials.email;
+  // The new grant replaces the old one; keeping the old scopes would make the
+  // next refresh request them again and undo the re-authorization.
+  if (credentials.scopes) existing.scopes = credentials.scopes;
 
   // Re-enable and reset failure tracking
   existing.enabled = true;

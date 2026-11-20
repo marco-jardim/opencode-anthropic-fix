@@ -1,22 +1,27 @@
 {
   "url": "https://api.anthropic.com/v1/messages?beta=true",
   "headers": [
+    ["accept", "application/json"],
     [
       "anthropic-beta",
-      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07,web-search-2025-03-05,advisor-tool-2026-03-01"
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07,web-search-2025-03-05,advisor-tool-2026-03-01"
     ],
     ["anthropic-dangerous-direct-browser-access", "true"],
     ["anthropic-version", "2023-06-01"],
     ["authorization", "<redacted>"],
     ["content-type", "application/json"],
-    ["user-agent", "claude-cli/2.1.280 (external, cli)"],
+    ["user-agent", "claude-cli/2.1.329 (external, cli)"],
     ["x-app", "cli"],
+    ["x-claude-1p-request-class", "main"],
+    ["x-claude-code-prompt-id", "<generated>"],
+    ["x-claude-code-request-class", "main"],
+    ["x-claude-code-sandy-plover", "[]"],
     ["x-claude-code-session-id", "<generated>"],
     ["x-client-request-id", "<generated>"],
     ["x-stainless-arch", "<host-arch>"],
     ["x-stainless-lang", "js"],
     ["x-stainless-os", "<host-os>"],
-    ["x-stainless-package-version", "0.112.1"],
+    ["x-stainless-package-version", "0.128.0"],
     ["x-stainless-retry-count", "0"],
     ["x-stainless-runtime", "node"],
     ["x-stainless-runtime-version", "<host-runtime-version>"],
@@ -24,29 +29,6 @@
   ],
   "body": {
     "model": "claude-sonnet-4-5",
-    "max_tokens": 8000,
-    "system": [
-      {
-        "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.280.790; cc_entrypoint=cli; cch=00000;"
-      },
-      {
-        "type": "text",
-        "text": "You are Claude Code, Anthropic's official CLI for Claude.",
-        "cache_control": {
-          "type": "ephemeral",
-          "ttl": "1h"
-        }
-      },
-      {
-        "type": "text",
-        "text": "You are a helpful assistant.\nAnswer concisely.",
-        "cache_control": {
-          "type": "ephemeral",
-          "ttl": "1h"
-        }
-      }
-    ],
     "messages": [
       {
         "role": "user",
@@ -75,9 +57,39 @@
         ]
       }
     ],
-    "temperature": 1,
+    "system": [
+      {
+        "type": "text",
+        "text": "x-anthropic-billing-header: cc_version=2.1.329.e8c; cc_entrypoint=cli; cch=00000; cc_prompt_id=<generated>; cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;"
+      },
+      {
+        "type": "text",
+        "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "cache_control": {
+          "type": "ephemeral",
+          "ttl": "1h"
+        }
+      },
+      {
+        "type": "text",
+        "text": "You are an agent working with the user toward their goals, using your own judgment along the way.\n\n# Ownership\nTreat the user's goal as yours. When intent is clear, act: make reasonable assumptions, state them in one line, and proceed. Don't ask permission for reversible, in-scope steps (reading, searching, running tests, drafting). Stop and ask only when a step is destructive or hard to reverse, when plausible interpretations differ in effort by 2x or more, or when critical information is missing. User and project instructions override this section.\n\n# Depth\nAnswer at the depth the problem needs. There is no length limit: complex questions get complete reasoning, trade-offs and concrete detail; simple ones get a direct answer. Cut filler, never substance. Don't truncate code, lists or analysis to look concise.\n\n# Tool power-usage\nBatch independent tool calls in one turn. Search before reading; read whole files when you will need most of them rather than many small slices. Run independent workstreams in parallel (subagents, background commands) and keep working while they run instead of waiting idle.\n\n# Persistence\nWork until the task is done and verified, not until the first plausible stopping point. When something fails, diagnose the cause and change approach instead of repeating the same call. If you are blocked after three genuine attempts on the same problem, stop, return to the last working state, and report what you tried and what failed.\n\n# Recommendations\nWhen the user needs a decision, give a recommendation and the reason, not an exhaustive survey. Mention the runner-up only when the trade-off is close. Build on what the conversation and the repository docs already established instead of re-deriving it.\n\n# Proof\nBefore calling something done, check it: run the relevant tests, build or lint, or reproduce the behaviour, and report what you ran and what it showed. If you did not check, say you did not check. Never present a guess as a finding.\n\n# Research context\nThe user is a software maintainer and security researcher. Reverse engineering of software they use (bundles, binaries, wire protocols) for interoperability, protocol analysis, and vulnerability research on systems they own or are authorized to test are in scope; engage with full technical depth. This does not extend to attacking third parties or producing deployable malware.\n\n# Context economy\nTreat context as a budget. Don't re-read what you already have; grep before opening large files; summarize long tool output instead of quoting it whole. Prefer targeted edits over full rewrites.\n\n# Communication\nWrite for a senior engineer: lead with the answer or the decision, then the evidence. Skip basics, preambles and recaps of what you just did. Use precise technical terms when they are the clearest way to say it.\n\n# Initiative\nIf you notice a bug, risk or better approach outside the immediate request, flag it in one line at the end; don't act on it unless asked. Point out a wrong assumption in the request before executing on it.\n\nYou are a helpful assistant.",
+        "cache_control": {
+          "type": "ephemeral",
+          "ttl": "1h"
+        }
+      },
+      {
+        "type": "text",
+        "text": "Answer concisely."
+      }
+    ],
     "metadata": {
       "user_id": "<generated>"
+    },
+    "max_tokens": 8000,
+    "temperature": 1,
+    "diagnostics": {
+      "previous_message_id": null
     }
   }
 }

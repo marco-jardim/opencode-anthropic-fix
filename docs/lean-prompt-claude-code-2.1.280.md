@@ -6,7 +6,9 @@
 > below describes, characterises or estimates the content or the length of the
 > shorter prompt. The word "shorter", here and below, repeats the analysis
 > document's reading of the capability's name and of the inverted return; no
-> length was measured. See [§3](#3-unknown-the-prompt-text-delta).
+> length was measured here. See [§3](#3-the-prompt-text-delta-no-longer-fully-unknown-update-2026-11-19),
+> which records that the 2.1.329 analysis has since located the lean body and
+> named the flag (`tengu_velvet_tide`).
 
 > **Read the name backwards.** The upstream predicate that consults
 > `lean_prompt` returns the answer to "send the **FULL**, verbose system
@@ -92,10 +94,33 @@ The analysis document does not name the remote feature gate or flag key behind
 consequence is that a static reading of the catalogue cannot tell which prompt a
 given account's client is actually sending on a given day.
 
-## 3) UNKNOWN: the prompt text delta
+## 3) The prompt text delta: no longer fully unknown (update 2026-11-19)
+
+> **Update 2026-11-19 (Claude Code 2.1.329 analysis).** Two things in this
+> section are superseded by the library's
+> `docs/protocol/versions/claude-code-2.1.329-analysis.md` (§9.3, §9.4):
+>
+> - **The flag.** The remote flag behind the lean-prompt choice is
+>   **`tengu_velvet_tide`** (2.1.329 offset 11067946). Plugin comments that
+>   said `tengu_velvet_cascade` were wrong and have been corrected. The
+>   catalogue string still decides first and the name-based fallback is
+>   unchanged; Haiku 5.5 and Sonnet 5.5 are now lean in 2.1.329.
+> - **The lean body is now transcribable.** The 2.1.329 bundle holds it as the
+>   `# Harness` section at library view offsets **19616335–19617184**
+>   (about 1.25 KB, the same size on 2.1.280 and 2.1.329). The full static
+>   prompt is about 10.2 KB on both versions and is byte-identical across them
+>   except for its opening sentence (2.1.329 opens "You are an agent working
+>   with the user toward their goals, using your own judgment along the way.").
+>   This document does **not** transcribe either text, and the plugin still
+>   does not model the genuine client's selection: it sends its own host
+>   system block (see
+>   [`mimese-http-header-system-prompt.md`](./mimese-http-header-system-prompt.md)
+>   §6). The remainder of this section is the original 2.1.280 record and is
+>   kept as written.
 
 **The text of the full prompt and the text of the shorter prompt were NOT
-extracted.** The analysis document marks this `[UNR]` (unresolved):
+extracted** (as of the 2.1.280 analysis). The analysis document marks this
+`[UNR]` (unresolved):
 
 > The **text** of the two prompts was not extracted `[UNR]`. The semantic
 > reading of `te()` as "verbose" rests on the inverted return and the model

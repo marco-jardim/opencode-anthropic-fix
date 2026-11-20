@@ -73,6 +73,7 @@ vi.stubGlobal("fetch", mockFetch);
 import { AnthropicAuthPlugin } from "../../index.mjs";
 import { saveAccounts, loadAccounts } from "../../lib/storage.mjs";
 import { loadConfig } from "../../lib/config.mjs";
+import { WIRE_PROFILE } from "../../lib/mimicry/wire-compat.mjs";
 
 const { authorize, refreshToken } = await import("../../lib/oauth.mjs");
 
@@ -330,21 +331,15 @@ describe("Fix #4: OAuth state validation (CSRF protection)", () => {
     expect(result.type).toBe("success");
   });
 
-  it("rejects callback with mismatched state via server-side validation", async () => {
-    // The main auth flow sends state to the server for validation.
-    // Mock the server rejecting the mismatched state.
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      text: async () => "invalid_state",
-    });
-
+  it("rejects a callback with a mismatched state locally, before any token request", async () => {
     const plugin = await AnthropicAuthPlugin({ client });
     const method = plugin.auth.methods[0];
     const authResult = await method.authorize();
 
     const result = await authResult.callback("auth-code#wrong-state");
     expect(result.type).toBe("failed");
+    expect(result.code).toBe("state_mismatch");
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
 
@@ -362,7 +357,7 @@ describe("OAuth wire contract (CC 2.1.280)", () => {
     expect(url).not.toContain("claude.ai/oauth");
   });
 
-  it("uses the attested token User-Agent rather than the old SDK or axios", async () => {
+  it("uses the genuine axios token User-Agent rather than the SDK one", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
@@ -370,12 +365,11 @@ describe("OAuth wire contract (CC 2.1.280)", () => {
     await refreshToken("refresh-token");
     const [, init] = mockFetch.mock.calls[0];
     const userAgent = init.headers["User-Agent"];
-    expect(userAgent).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
-    expect(userAgent).not.toContain("0.94.0");
-    expect(userAgent).not.toContain("axios/");
+    expect(userAgent).toBe("axios/1.15.2");
+    expect(userAgent).not.toContain("anthropic-sdk-typescript");
   });
 
-  it("keeps every outbound OAuth header value free of axios/", async () => {
+  it("keeps every outbound OAuth header value free of the SDK identifier and the oauth beta", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
@@ -386,11 +380,12 @@ describe("OAuth wire contract (CC 2.1.280)", () => {
     expect(values.length).toBeGreaterThan(0);
     for (const value of values) {
       expect(typeof value).toBe("string");
-      expect(value.includes("axios/")).toBe(false);
+      expect(value.includes("anthropic-sdk")).toBe(false);
+      expect(value.includes("oauth-2025")).toBe(false);
     }
   });
 
-  it("sends exactly three refresh body keys without scope", async () => {
+  it("sends the four genuine refresh body keys, scope last", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ access_token: "a", refresh_token: "r", expires_in: 3600 }),
@@ -398,8 +393,8 @@ describe("OAuth wire contract (CC 2.1.280)", () => {
     await refreshToken("refresh-token");
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id"]);
-    expect("scope" in body).toBe(false);
+    expect(Object.keys(body)).toEqual(["grant_type", "refresh_token", "client_id", "scope"]);
+    expect(body.scope).toContain("user:inference");
   });
 });
 
@@ -1189,7 +1184,8 @@ describe("E2E: Full header set on a standard request", () => {
     expect(headers.get("anthropic-version")).toBe("2023-06-01");
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.get("x-stainless-runtime")).toBe("node");
-    expect(headers.get("x-stainless-runtime-version")).toBe(process.version);
+    // The profile records the runtime version the genuine binary reported.
+    expect(headers.get("x-stainless-runtime-version")).toBe(WIRE_PROFILE.runtimeVersion);
     // x-stainless-package-version: passthrough from host SDK (or fallback "0.208.0")
     expect(headers.get("x-stainless-retry-count")).toBe("0");
     expect(headers.get("x-app")).toBe("cli");
@@ -1300,7 +1296,13 @@ describe("E2E: Beta composition is complete and correct", () => {
     // Use opus-4-6: real CC's Kw(model) pushes effort-2025-11-24 for Opus 4.5/4.6/
     // 4.7/4.8 and Sonnet 4.6, and n0d(model) pushes context-management for any
     // first-party non-claude-3 model — so this model carries BOTH.
-    const { headers, body } = await sendRequest(fetchFn, { model: "claude-opus-4-6" });
+    // A MAIN-shaped request (real message, large max_tokens): the 1h marker, and
+    // therefore `extended-cache-ttl`, only apply to the main thread.
+    const { headers, body } = await sendRequest(fetchFn, {
+      model: "claude-opus-4-6",
+      max_tokens: 8192,
+      messages: [{ role: "user", content: "hello there" }],
+    });
     const beta = headers.get("anthropic-beta");
     // The body half of the display-updates pairing: thinking carries display "updates".
     expect(body.thinking?.display).toBe("updates");
@@ -1354,6 +1356,19 @@ describe("E2E: Beta composition is complete and correct", () => {
     expect(beta).not.toContain("code-execution-2025-01-24");
     expect(beta).not.toContain("prompt-caching-2024-07-31");
     expect(beta).not.toContain("token-efficient-tools-2025-02-19");
+  });
+
+  it("omits extended-cache-ttl on a role-scoped 5m request and sends no claude-code beta for Haiku outside agentic main", async () => {
+    // A title/small-shaped request resolves to the role-scoped 5m ttl; the
+    // genuine client sends extended-cache-ttl only with a 1h marker.
+    const small = await sendRequest(fetchFn, {
+      model: "claude-haiku-4-5",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "title this" }],
+    });
+    const smallBeta = small.headers.get("anthropic-beta");
+    expect(smallBeta).not.toContain("extended-cache-ttl-2025-04-11");
+    expect(smallBeta).not.toContain("claude-code-20250219");
   });
 
   it("betas are in header only, not in body (first-party API)", async () => {
@@ -1610,13 +1625,16 @@ describe("E2E: systemPromptTailing default (A2)", () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: longText }],
     });
-    // With opt-in, the long block must have been truncated below its original size.
+    // With opt-in, the long block must have been truncated below its original
+    // size. The host block now opens with the genuine opening sentence and the
+    // empowerment blocks (the tailer keeps the first paragraph and the headers),
+    // so the block is found by its trim marker rather than by the X filler.
     const textBlock = body.system.find(
-      (b) => b.type === "text" && typeof b.text === "string" && b.text.startsWith("X".repeat(100)),
+      (b) => b.type === "text" && typeof b.text === "string" && b.text.includes("Verbose instructions trimmed"),
     );
     expect(textBlock).toBeDefined();
     expect(textBlock.text.length).toBeLessThan(longText.length);
-    expect(textBlock.text).toContain("Verbose instructions trimmed");
+    expect(textBlock.text).not.toContain("X".repeat(100));
   });
 });
 
@@ -1634,7 +1652,7 @@ describe("context_management body field — field ⊆ beta invariant", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("emits the beta by default but omits the body field unless opted in", async () => {
+  it("emits the beta and, under 2.1.329, the genuine default context_management body field", async () => {
     const { body, headers } = await sendRequest(fetchFn, {
       model: "claude-opus-4-6",
       messages: [{ role: "user", content: "hi" }],
@@ -1643,12 +1661,14 @@ describe("context_management body field — field ⊆ beta invariant", () => {
     expect(body.thinking?.type).toBe("adaptive");
     // v2.1.195: beta is default-on for first-party non-claude-3 models.
     expect(headers.get("anthropic-beta") || "").toContain("context-management-2025-06-27");
-    // Field stays opt-in → absent by default (keeps field ⊆ beta; no 400).
-    expect(body.context_management).toBeUndefined();
+    // 2.1.329: the genuine client sends the field by default (LIVE capture), and
+    // the package now composes it together with the beta, so the field ⊆ beta
+    // invariant holds by construction. The plugin does not suppress it.
+    expect(body.context_management).toEqual({ edits: [{ type: "clear_thinking_20251015", keep: "all" }] });
   });
 });
 
-describe("E2E: Version is 2.1.280", () => {
+describe("E2E: Version is the pinned profile's", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1657,17 +1677,17 @@ describe("E2E: Version is 2.1.280", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.280", async () => {
+  it("User-Agent carries the pinned profile version", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.280");
+    expect(headers.get("user-agent")).toContain(WIRE_PROFILE.cliVersion);
   });
 
-  it("billing header contains 2.1.280", async () => {
+  it("billing header carries the pinned profile version", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.280");
+    expect(body.system[0].text).toContain(WIRE_PROFILE.cliVersion);
   });
 });
 
@@ -1828,7 +1848,12 @@ describe("Opus 4.8", () => {
     expect(body.speed).toBe("fast");
   });
 
-  it("(e) fast mode enabled: speed:'fast' injected for claude-opus-4-7", async () => {
+  // Eligibility is the emulated catalogue's `fast_mode` capability; Opus 4.7 lost
+  // it, so it only gets `speed: "fast"` through the `fast_mode_legacy_models` opt-in.
+  it.each([
+    [false, undefined],
+    [true, "fast"],
+  ])("(e) fast mode enabled for claude-opus-4-7 with fast_mode_legacy_models=%s", async (legacy, expectedSpeed) => {
     const original = await vi.importActual("../../lib/config.mjs");
     loadConfig.mockImplementation(() => ({
       ...original.DEFAULT_CONFIG,
@@ -1841,10 +1866,11 @@ describe("Opus 4.8", () => {
       custom_betas: [...(original.DEFAULT_CONFIG.custom_betas || [])],
       idle_refresh: { ...original.DEFAULT_CONFIG.idle_refresh, enabled: false },
       fast_mode: true,
+      fast_mode_legacy_models: legacy,
     }));
     const fastModeFetchFn = await setupFetchFn(makeClient());
     const { body } = await sendRequest(fastModeFetchFn, { model: "claude-opus-4-7" });
-    expect(body.speed).toBe("fast");
+    expect(body.speed).toBe(expectedSpeed);
   });
 
   // ── (f) Fast mode: anthropic-beta header must contain fast-mode-2026-02-01 ──

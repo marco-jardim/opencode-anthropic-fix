@@ -19,15 +19,16 @@ remain literal names in definitions, history, references, and responses; they
 never resolve to inherited JavaScript object properties.
 See [OpenCode v2 adapter](opencode-v2.md) for transport and lifecycle boundaries.
 
-> **Note on the production wire shape (updated for the `0.7.0` dependency bump).**
-> The composition that actually goes on the wire follows the `DEFAULT_PROFILE` the
-> plugin binds at `lib/mimicry/wire-compat.mjs`, which is now **Claude Code 2.1.280**
-> (`claude-code-2.1.280-sdk-0.112.1`) as of this note. The plugin inherits the wire
-> shape by omitting the `profile` argument on every call, so a package release can
-> advance it; see [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md)
-> for the current emulation claim, and
-> [`claude-code-2.1.233-analysis.md`](claude-code-2.1.233-analysis.md) for the
-> previous one.
+> **Note on the production wire shape (updated for Claude Code 2.1.329).**
+> The composition that actually goes on the wire follows the profile the plugin pins at
+> `lib/mimicry/wire-compat.mjs` (`WIRE_PROFILE`), which is now **Claude Code 2.1.329**
+> (`CLAUDE_CODE_2_1_329_PROFILE`). The profile is passed explicitly on every call, so a
+> library release cannot move it; moving it is a deliberate one-line change. See
+> [`claude-code-2.1.329-analysis.md`](claude-code-2.1.329-analysis.md) for the current
+> emulation claim, [`claude-code-2.1.280-analysis.md`](claude-code-2.1.280-analysis.md) and
+> [`claude-code-2.1.233-analysis.md`](claude-code-2.1.233-analysis.md) for the previous
+> ones, and §14.4 for the 2.1.329 wire as the plugin sends it. Statements below that say
+> "under the 2.1.280 profile" record what that profile composed and are kept as history.
 >
 > **The body of this document remains the verified 2.1.195 decompilation** and is
 > still the right reference for how each header and system-prompt segment is
@@ -42,6 +43,15 @@ See [OpenCode v2 adapter](opencode-v2.md) for transport and lifecycle boundaries
 > then removed again whenever thinking is active and the caller supplied no
 > `thinking.display` — see §11.3 below for what that means for
 > `token_economy.redact_thinking`.
+
+> **Claude Code 2.1.329 work (2026-11-19).** The plugin is repointed to the library's
+> 2.1.329 profile. What changed is described in §14 and in
+> [`claude-code-2.1.329-analysis.md`](claude-code-2.1.329-analysis.md): the OAuth
+> token layer (§4.3, [`oauth-2.1.329-contract.md`](oauth-2.1.329-contract.md)), the
+> leaked-header strip (§4.2), the version pinned to the profile (§2), the effort
+> default `medium` and per-turn effort (§7.5), the system-prompt changes (§6.2, §6.9),
+> and the repoint with session correlation (§14.3, §14.4). The plugin requires
+> `@tormentalabs/claude-code-wire-compat` 0.8.0 or later.
 
 <!-- Last verified against: Claude Code 2.1.195 — DECOMPILED from the real
      linux-x64 native binary (@anthropic-ai/claude-code-linux-x64@2.1.195, Bun-
@@ -248,7 +258,8 @@ Verified by diffing the linux-x64 native binaries of 2.1.154 and 2.1.159.
 budget_tokens:N}` returns a **400** on Opus 4.7 AND 4.8. The plugin's
   `normalizeThinkingBlock()` in `lib/mimicry/request-body.mjs` converts any incoming manual thinking to
   `{type:"adaptive"}` for these models; top-level `effort` is moved into
-  `output_config.effort` (default `high` for Pro/Max).
+  `output_config.effort` (the injected default was `high` here; it is now `medium`,
+  see §7.5).
 - **Fast mode.** Per Anthropic fast-mode docs, `speed:"fast"` (beta
   `fast-mode-2026-02-01`) is a research preview supported on Opus 4.6, 4.7,
   **and** 4.8. Opus 4.7 is the `/fast` default in real Claude Code v2.1.142+.
@@ -479,17 +490,27 @@ below.
 
 ## 2) Claude CLI version used in signature behavior
 
-In `AnthropicAuthPlugin`:
+**The emulated version is the pinned wire profile's `cliVersion` and nothing else.**
+The runtime (`lib/host/runtime.mjs`) reads it from `WIRE_PROFILE.cliVersion`
+(`lib/mimicry/wire-compat.mjs`) and never reassigns it. The adapter
+(`resolveProfileOverride`, `lib/mimicry/adapter-input.mjs`) always uses the profile's
+version; only the env-driven user-agent suffix (entrypoint, agent-sdk, client-app) can
+produce an override. A newer upstream version never changes the wire: the beta set,
+body shape and fingerprint input belong to the pinned profile, so claiming a different
+version would assert a protocol the bytes do not follow (and would pair a new UA with
+the old Stainless and runtime versions, a combination no genuine build produces).
 
-- initial fallback version: `2.1.2`
-- if `fetch_claude_code_version_on_startup=true`, it performs GET on:
-  - `https://registry.npmjs.org/@anthropic-ai/claude-code/latest`
-- short timeout (AbortController); failures are silent and fallback remains active
+- if `fetch_claude_code_version_on_startup=true`, the plugin performs GET on
+  `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` with a short timeout
+  (AbortController); failures are silent
+- the result is **informational only**: it is logged (`emulating X; upstream latest Y`)
+  and shown by `/anthropic diagnose` (`latestUpstreamClaudeCodeVersion`,
+  `mimicryVersionNote`), and never read by the wire path
 
-This version is used by:
+The pinned version is used by:
 
 - `user-agent`
-- `x-stainless-package-version`
+- `x-stainless-package-version` (the profile's SDK version)
 - `x-anthropic-billing-header` generation in `system`
 
 ## 3) Request flow where mimicry is applied
@@ -580,8 +601,23 @@ With emulation on, both remaining constructions ensure:
     - `CLAUDE_AGENT_SDK_VERSION`
     - `CLAUDE_AGENT_SDK_CLIENT_APP`
 - always removes `x-api-key` (and `x-session-affinity`, a host-side session hint)
+- removes the **host-leaked headers** (see §4.2)
 
 ### 4.2 Extra headers when mimicry is enabled
+
+**Leaked host headers are stripped.** A live capture of the plugin's request to
+`api.anthropic.com` carried `x-opencode-client`, `x-opencode-project`,
+`x-opencode-session`, `x-opencode-session-id` and `x-session-id`, each a direct
+fingerprint of a foreign client. With emulation on they are removed on both emulated
+paths: the adapter's `collectExtraHeaders` (`lib/mimicry/adapter-input.mjs`, including
+`count_tokens`) and the frozen legacy forge (`buildRequestHeaders`,
+`lib/mimicry/headers.mjs`). The set is `HOST_LEAKED_HEADER_NAMES` plus the prefix
+`x-opencode-` (`HOST_LEAKED_HEADER_PREFIXES`, `isHostLeakedHeader`). The strip runs
+**before** the `ANTHROPIC_CUSTOM_HEADERS` merge, so a user can still send one
+deliberately. **Pass-through mode (emulation off) keeps them**, because nothing is
+forged there. The runtime reads the session key from `x-opencode-session`, then
+`x-session-id`, before the strip, to key the cold-cache map, the org-affinity tracker
+and idle compaction.
 
 With `signature.enabled=true`, it adds:
 
@@ -620,47 +656,62 @@ It also injects optional env-driven headers:
 ### 4.3 OAuth token-layer user-agent mimicry
 
 > **This section is a summary. The authoritative OAuth-layer contract is
-> [`docs/oauth-2.1.280-contract.md`](./oauth-2.1.280-contract.md), and its
-> executable half is `test/conformance/oauth-wire-parity.test.mjs`.** That
-> document records every OAuth endpoint, header, body key and scope with the byte
-> offset in the 2.1.280 bundle that attests it, marks every value the evidence
-> does **not** attest, and lists the divergences this plugin knowingly keeps.
-> Change a value here only together with that document.
+> [`docs/oauth-2.1.329-contract.md`](./oauth-2.1.329-contract.md)** (current), with
+> [`docs/oauth-2.1.280-contract.md`](./oauth-2.1.280-contract.md) holding the URLs,
+> client id, authorize parameter order and its dated "Corrections 2026-11-19". The
+> executable half is `test/conformance/oauth-wire-parity.test.mjs` and
+> `test/fixtures/oauth/genuine-2.1.329-exchange.json`. Change a value here only
+> together with those documents.
 
-OAuth token calls (`POST /v1/oauth/token`, exchange and refresh) send exactly one
-fingerprint: Claude Code 2.1.280's SDK OAuth-provider shape
-(`userOAuthProvider`). There is no second path and no switch.
+OAuth token calls (`POST /v1/oauth/token`: exchange, refresh and revoke) send the
+genuine client's **axios** shape, which is the same in 2.1.280 and 2.1.329. The SDK
+`userOAuthProvider` shape belongs only to SDK credentials-file profiles that Claude
+Code's own login never takes. There is no second path and no switch.
 
 Headers sent on every token request, in emission order:
 
+- `Accept: application/json, text/plain, */*`
 - `Content-Type: application/json`
-- `anthropic-beta: oauth-2025-04-20`
-- `User-Agent: anthropic-sdk-typescript/0.112.1 userOAuthProvider`
-- (no explicit `Accept` — §13.8 lists none at either token call site)
+- `User-Agent: axios/1.15.2`
+- `Accept-Encoding: gzip, compress, deflate, br`
+- **no `anthropic-beta`** and no SDK user agent
 
-Attested for the **refresh** grant at byte `4429828`; the **exchange** grant
-reuses the same triple as an explicit assumption, because §13.8 contains no
-`authorization_code` constant and no offset locating that call site. See contract
-§2.2 and divergence D8.
+Redirects are refused (`redirect: "manual"`, any non-2xx is a failure), matching the
+genuine `maxRedirects: 0` and 2xx-only rule. `Content-Length`, `Host` and
+`Connection` are added by the runtime and cannot be controlled from `fetch`.
 
-The refresh body is exactly `{ grant_type, refresh_token, client_id }`. It has
-**no `scope` key** — emitting one is a positive fingerprint no genuine 2.1.280
-client produces (contract §2.3, divergence D5).
+Bodies, key order as captured live: exchange `grant_type, code, redirect_uri,
+client_id, code_verifier, state` (`state` always sent, a mismatch is refused locally);
+refresh `grant_type, refresh_token, client_id, scope` (the account's stored scopes, or
+the Claude.ai base plus `user:plugins`; one retry without `scope` on `invalid_scope`);
+revoke `{token, token_type_hint, client_id}` to `${TOKEN_URL}/revoke`.
 
-> ⚠️ **RETIRED — the axios fallback no longer exists.** Earlier releases sent
-> `User-Agent: axios/1.13.6` with `Accept: application/json, text/plain, */*`
-> when `oauth.sdk_token_useragent` was `false`. §13.8 records no axios usage
-> anywhere in the 2.1.280 OAuth path, so that flag could only ever make a user
-> _more_ identifiable: they became the only client on the network sending that
-> shape. The code path is gone. The config key is still **recognised** so existing
-> `opencode.json` files keep loading, but it is inert and emits a one-time
-> deprecation warning. See contract divergence D2.
+**Scope and TTL rules.**
 
-> ⚠️ **The SDK version moved `0.94.0` → `0.112.1`** (contract §3, byte `4407908`
-> — the only such declaration in the dump), and the consumer authorize host moved
-> `claude.ai/oauth/authorize` → **`claude.com/cai/oauth/authorize`** (byte
-> `4655440`). Both were live fingerprints and are recorded as divergences D3 and
-> D4, now closed.
+- The authorize URL carries the same de-duplicated scope union for the console and
+  the Claude.ai login: `org:create_api_key user:profile user:inference
+user:sessions:claude_code user:mcp_servers user:file_upload user:plugins
+user:privacy_consents:write org:desktop_config`. The authorize host still depends on
+  the mode.
+- `user:plugins` is on by default (`oauth.plugins_scope: true`); an explicit `false`
+  removes it, diverges from genuine, and warns once. Project scopes are never sent
+  (`oauth.project_scopes` is deprecated and has no effect).
+- 2.1.329's default login also requests `user:privacy_consents:write org:desktop_config`.
+  The authorize request takes the pinned profile's nine `oauthAuthorizeScopes`
+  (`lib/oauth.mjs`), so both are requested; an explicit `extraScopes` option wins.
+- Account scopes are persisted per account (`scopes`, optional); an `env` account keeps
+  its scopes in memory only.
+- `oauth.sdk_token_useragent` is still recognised so existing config files load, is
+  inert, and its warning says token requests send the genuine axios fingerprint.
+
+> ⚠️ **Retired claims.** Earlier text here said the token layer sends
+> `anthropic-sdk-typescript/0.112.1 userOAuthProvider` with `anthropic-beta`, a refresh
+> body without `scope`, and that the 2.1.280 bundle has no axios OAuth path. The
+> 2.1.280 bundle does contain the axios path (refresh and exchange), so those claims
+> and the corresponding divergences (D1, D2, D5, D8, D9 of the 2.1.280 contract) were
+> corrected on 2026-11-19. The consumer authorize host
+> `claude.com/cai/oauth/authorize` and the SDK-version move `0.94.0` → `0.112.1` remain
+> as recorded (the SDK version is no longer sent on token calls).
 
 ### 4.4 WebFetch user-agent (intentional divergence)
 
@@ -872,11 +923,21 @@ This plugin no longer auto-includes `fine-grained-tool-streaming-2025-05-14` in 
 
 ### 6.2 Text sanitization
 
-`sanitizeSystemText(text)` in `lib/mimicry/system-prompt.mjs` applies:
+`sanitizeSystemText(text, { rewriteScope })` in `lib/mimicry/system-prompt.mjs` applies
+the OpenCode → Claude Code rewrite:
 
 - `OpenCode` => `Claude Code`
 - `opencode`/`OpenCode` variants => `Claude`
-  - except when preceded by `/` (path-like occurrence preserved)
+  - never on a path-like or URL-like token (word boundaries, so identifiers survive)
+
+**Segment-aware scope (`system_prompt.rewrite_scope`, default `"base"`).** The text is
+first segmented (`segmentSystemText`) and the rewrite applies only to the opencode
+base prompt and the `<env>` header. It **never touches** `Instructions from:` instruction
+files, file paths, URLs or skill text: a user's own AGENTS.md or a skill that names
+`opencode` reaches the model verbatim. `"all"` restores the legacy behaviour (a plain
+rewrite of the whole text). The obsolete "You are an interactive" prefix cut was
+removed, so text before a mid-text match is never dropped. See §6.9 for the rest of the
+system-prompt changes.
 
 ### 6.3 Identity string selection
 
@@ -941,6 +1002,28 @@ CC, which derives a single TTL per `querySource`, and prevents the
 subagent delegation. The `ttl: "1h"` values in the tables below are the
 main-thread case; substitute `"5m"` for non-main/subagent requests.
 
+**Scope rule: a refused scope beta drops `scope` from the body.**
+`getCacheControlForScope(cacheScope, cachePolicy, { scopeRefused })` omits the `scope`
+field when the scope beta is not on the wire, as the genuine client does. The runtime
+passes `cacheScopeRefused: isPromptCachingScopeSuppressed({ strategy, env,
+rejectedBetas })` (`lib/mimicry/adapter-input.mjs`), the same predicate that feeds the
+header-side `suppressBetas`: round-robin, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`, or
+a latched rejection of `prompt-caching-scope-2026-01-05` (case-insensitive). So the
+retry after a scope-beta rejection no longer carries `scope: "global"`. When emitted,
+the key order is `type, ttl, scope`.
+
+**TTL precedence** (`resolveCacheTtl`, `lib/mimicry/cache.mjs`; the library analysis
+§8.3): `FORCE_PROMPT_CACHING_5M` (truthy) → `5m`; on the main thread
+`CLAUDE_CODE_PROMPT_CACHE_TTL`, otherwise `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` (only
+`5m` and `1h` accepted; an invalid value is ignored); `ENABLE_PROMPT_CACHING_1H` → `1h`;
+role-scoped `5m`; the configured TTL. The genuine settings-file slots have no plugin
+equivalent. The **messages** breakpoint alone may be shorter than system and tools:
+`CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL=5m` (exact value) lowers only the last marker
+(`resolveMessagesCacheTtl`), which cannot violate the "1h must not follow 5m" rule.
+`extended-cache-ttl-2025-04-11` is sent only when the resolved system TTL is `1h`. All
+five TTL variables are snapshotted by the adapter so the identity block, the beta and
+the body markers resolve from the same inputs.
+
 #### Path selection (`splitSystemCacheScopes`)
 
 The real CC's `splitSysPromptPrefix()` has 3 code paths. Paths A and C produce identical wire output, so the plugin's scoping half implements 2 effective paths:
@@ -982,6 +1065,12 @@ In both paths, user system blocks are joined with `\n\n` into a single text bloc
 - `cch=00000` is always the static placeholder — xxHash64 attestation was **removed in v2.1.97**.
   It is emitted **unconditionally**: the function takes no `provider` argument and there is no
   provider gate. See [Provider Scope](../README.md#provider-scope).
+  > **Update 2026-11-19.** A live capture of the genuine client shows the wire carries a
+  > per-request 5-hex `cch` on 2.1.280 and 2.1.329, substituted natively below the JS
+  > (which writes only `cch=00000`). The plugin still sends `cch=00000`, which the server
+  > accepts, but the request is distinguishable; see
+  > [`claude-code-2.1.329-analysis.md`](claude-code-2.1.329-analysis.md) §6 and
+  > [`mimicry/wire-compat-divergences.md`](mimicry/wire-compat-divergences.md) row 9.
 - builds:
 
 ```text
@@ -1106,6 +1195,46 @@ Failures at either gate result in 401 or billing-related 403 errors.
 - Account persistence: `lib/account-manager.mjs` (`saveAccount()`)
 - Request building: `lib/billing-header.mjs` (`buildMetadataUserId()`)
 
+### 6.9 Host system block: opening, empowerment and the stable/volatile split (2.1.329 work)
+
+All of this is **host content placed after the canonical billing and identity blocks**,
+which the wire package composes. The evidence says host system content is not checked
+server-side, so these are class (b)-neutral: they change content and cache behaviour, not
+the fingerprint. Settings live under `system_prompt` (`lib/config.mjs`), reach
+`buildSystemPromptBlocks` as `signature.systemPrompt`, and apply to every request except
+the title-generator swap.
+
+1. **Genuine opening sentence** (`system_prompt.genuine_opening`, default `true`). The
+   stable block starts with exactly "You are an agent working with the user toward their
+   goals, using your own judgment along the way." (the 2.1.329 shared static block's new
+   opening, library analysis §9.4).
+2. **Empowerment blocks** (`system_prompt.empowerment`, default `"max"`;
+   `lib/system-prompt-empowerment.mjs`). Inserted right after the opening sentence and
+   **before** the instruction files, so user and project instructions keep the last word.
+   `"off"` inserts nothing; `"power"` is ownership, depth, persistence, recommendations,
+   context economy and initiative; `"research"` is `power` plus research; `"max"` is all
+   ten (`ownership`, `depth`, `tool_power`, `persistence`, `recommendations`, `proof`,
+   `research`, `context_economy`, `communication`, `initiative`); an array of those ids
+   selects blocks (unknown ids are dropped with a one-time warning, an unknown scalar falls
+   back to `"max"`). The text is byte-stable: no dates, ids or config-dependent wording,
+   because it is part of the cached prefix. They are added only when there is host text to
+   carry them.
+3. **Stable and volatile split** (`system_prompt.split_stable_volatile`, default `true`,
+   outside boundary mode). The **stable** block is the opening, the empowerment blocks,
+   the opencode base prompt, global instruction files and skills, in their original
+   relative order; it takes the organization-scope breakpoint `{type: "ephemeral", ttl}`
+   (never `scope: "global"` for user content). The **volatile** block holds the `<env>`
+   header (date, cwd, platform), project-level instruction files, MCP instructions,
+   references and anything unclassified (classification is by structure, and doubt means
+   volatile); it carries **no** breakpoint, because the package joins adjacent blocks
+   that share an equal `cache_control` and a second marker would merge the two back
+   together. A date or cwd change therefore alters only the volatile block's bytes, and the
+   message breakpoint covers it. Every byte of instruction text is preserved, and the
+   breakpoint budget (API maximum four) is unchanged.
+4. **Rewrite scope** (`system_prompt.rewrite_scope`): see §6.2.
+5. **Anti-verbosity** (`anti_verbosity.enabled`) is off by default; the byte-identical
+   text is kept for the opt-in.
+
 ## 7) Body fields related to mimicry
 
 When mimicry is enabled, `transformRequestBody(...)` in
@@ -1168,10 +1297,46 @@ There is no longer a pre-transform beta call site: `computedBetaHeader` and the
 session beta latch it fed were removed (see §11.6). Can be disabled via
 `OPENCODE_ANTHROPIC_DISABLE_FAST_MODE=1`.
 
-Eligibility is `isOpus46Model(model) || isOpus47Model(model) || isOpus48Model(model)`,
-all three re-exported from the shared package through `lib/mimicry/wire-compat.mjs`.
-Sonnet is NOT fast-mode eligible. Note: switching `speed` invalidates system +
-message prompt caches, so it should only be toggled deliberately.
+Eligibility follows the **catalogue**: a model is eligible when the pinned profile's
+catalogue entry carries the `fast_mode` capability (`supportsFastModeWire`,
+`lib/mimicry/wire-compat.mjs`). Opus 4.6 and 4.7 do not carry it in the genuine
+catalogue, so they are eligible only with the opt-in `fast_mode_legacy_models: true`
+(default `false`). Before this change eligibility was the hard-coded
+`isOpus46Model || isOpus47Model || isOpus48Model`. Sonnet is NOT fast-mode eligible.
+Note: switching `speed` invalidates system + message prompt caches, so it should only be
+toggled deliberately.
+
+### 7.5 `output_config.effort` default and thinking stability
+
+`output_config.effort` (and the top-level `effort` spelling it is moved from) exists
+only when the model is adaptive **and** the pinned catalogue marks it as supporting
+effort; everywhere else both spellings are removed, because the API rejects effort
+instead of ignoring it. When the host sends none, `transformRequestBody` injects a
+default:
+
+1. `CLAUDE_CODE_EFFORT_LEVEL` when it is a valid level (or `auto`);
+2. otherwise `default_effort` (default **`"medium"`**; values `auto`, `low`, `medium`,
+   `high`, `xhigh`, `max`; an invalid value becomes `medium`);
+3. `auto` resolves to the catalogue's default effort for the model, then `high`;
+4. a level the model does not support (`xhigh` / `max`) is clamped to `high`.
+
+Host-supplied effort always wins. The genuine catalogue default is `medium` for the
+5.5 / 5.2 models (live capture); the plugin's default is `medium` for every
+effort-capable model, with `auto` to follow the catalogue. Before this change the
+default was `high`.
+
+**Thinking is never toggled per question.** It stays `adaptive` and stable: a change in
+the thinking configuration invalidates the message cache, and the new models reject
+`thinking: {type: "disabled"}`. `token_economy.adaptive_thinking_zero_simple` therefore
+defaults to `false`. A `disabled` thinking block is converted to adaptive for adaptive
+models, and dropped for ids the pinned catalogue does not know (an exact-key catalogue
+lookup that stays as a defensive guard). Effort changes **mid-conversation** go through
+the genuine per-turn mechanism (a `role: "system"` message inside `messages`), never by
+changing the top-level `output_config.effort`; see §14.3 for the rules and the escape
+hatch (`per_turn_effort.enabled`, `per_turn_effort.auto_low_short_questions`).
+
+**`max_tokens`.** The host's value passes through (`output_cap.enabled` defaults to
+`false`); the catalogue default output limit is filled in only when the host sent none.
 
 ## 8) Related URL shaping
 
@@ -1454,3 +1619,149 @@ To audit whether mimicry is active at runtime:
    - `system[0..]` includes identity block (and billing block unless disabled)
    - `metadata.user_id` follows composed format
    - `betas` is aligned with header
+
+## 14) Claude Code 2.1.329 work (2026-11-19)
+
+Analysis and evidence: [`claude-code-2.1.329-analysis.md`](claude-code-2.1.329-analysis.md).
+OAuth: [`oauth-2.1.329-contract.md`](oauth-2.1.329-contract.md). Divergence rows:
+[`mimicry/wire-compat-divergences.md`](mimicry/wire-compat-divergences.md) rows 7–12.
+
+### 14.1 Behaviour changes and their escape hatches
+
+| Change                                                                                                                                       | Where documented  | Escape hatch                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | -------------------------------------------------------------- |
+| Effort default `medium`                                                                                                                      | §7.5              | `default_effort`, `CLAUDE_CODE_EFFORT_LEVEL`                   |
+| Fast mode by catalogue                                                                                                                       | §7.3              | `fast_mode_legacy_models`                                      |
+| User-agent version pinned to the profile                                                                                                     | §2                | none (informational npm lookup only)                           |
+| OAuth axios fingerprint, scope union, `state`, refresh `scope`                                                                               | §4.3              | `oauth.plugins_scope: false`                                   |
+| Leaked host headers stripped (emulated paths only)                                                                                           | §4.2              | none; pass-through mode keeps them; `ANTHROPIC_CUSTOM_HEADERS` |
+| System prompt: opening, empowerment, split, rewrite scope                                                                                    | §6.2, §6.9        | `system_prompt.*`                                              |
+| Scope dropped from the body when the scope beta is refused                                                                                   | §6.4              | none                                                           |
+| TTL variables and `extended-cache-ttl` only at a 1h TTL                                                                                      | §6.4              | the environment variables                                      |
+| Haiku `claude-code` beta on agentic main requests only                                                                                       | divergences row 1 | none                                                           |
+| Defaults off: `lean_system_non_main`, `output_cap.enabled`, `prompt_compaction` (`"off"`), `anti_verbosity`, `adaptive_thinking_zero_simple` | `lib/config.mjs`  | set each key to its old value                                  |
+| Opt-ins: `token_economy.cold_cache_only`, `idle_tool_result_clearing`, `idle_compaction`, `account_affinity.*`, `account_features.*`         | §14.2             | off by default                                                 |
+
+### 14.2 Cold-cache rewrites, idle compaction, org affinity
+
+- **Cold-cache only** (`token_economy.cold_cache_only`, off). History and tool rewrites
+  (`conservative: false`) run only when the conversation's prompt cache is already cold,
+  judged against the messages TTL and the time of the last **main-role** request of the
+  same session (`isCacheCold`, `lib/mimicry/cache.mjs`; the map is bounded). A rewrite on a
+  warm cache would invalidate it and force a fresh write. `idle_tool_result_clearing` (off)
+  additionally replaces old tool results with the genuine placeholder
+  `[Old tool result content cleared]` after a long idle (thresholds from the genuine client:
+  keep the last 12 tool uses, clear at least 20000 tokens, trigger from 27 tool uses, idle
+  at least 3,900,000 ms). Neither runs on a warm cache.
+- **Idle compaction** (`token_economy.idle_compaction`, off; v1 host only;
+  `lib/idle-compaction.mjs`). On the host's `session.idle` event, a conversation whose
+  cache TTL is `1h` is compacted at 0.9 of the cache's life through `client.session.summarize`,
+  so the compaction still reads the cached prefix. Requirements: context of at least
+  `max(100000, idle_compaction_min_tokens)` tokens (default 200000;
+  `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` is honoured), a timer no more than 60 s late, usage
+  not limited. A new request for the session cancels it and disposal clears it; the config is
+  re-read when the timer fires. If the host has no `summarize`, it is logged once and skipped.
+- **Org affinity** (`account_affinity.org_locked_thinking`, default on; `lib/org-affinity.mjs`).
+  For models with the `org_locked_thinking` capability, thinking written under one
+  organization cannot be replayed under another, so the first attempt of a request prefers a
+  usable account in the organization that last served that conversation. With none available
+  it continues on the selected account and toasts once; it strips older thinking (keeping the
+  latest assistant turn) only when `strip_thinking_on_org_switch` is `true` (default `false`).
+  The 2.1.329 catalogue marks the models that carry the capability, so it is effective for those.
+- **Native-1M context.** A model the catalogue marks natively 1M never escalates to
+  `context-1m` in the adaptive-context path, and the opt-in context-limit override covers it.
+
+### 14.3 Repoint, session correlation and per-turn effort
+
+Implemented and committed; see
+[`claude-code-2.1.329-analysis.md`](claude-code-2.1.329-analysis.md) §5 for the evidence
+and [`mimicry/wire-compat-divergences.md`](mimicry/wire-compat-divergences.md) for the
+recorded divergences.
+
+- **Repoint.** `WIRE_PROFILE` is the 2.1.329 profile and `WIRE_BETA_REGISTRY` its registry
+  (`lib/mimicry/wire-compat.mjs`). User agent, SDK 0.128.0, the registry and its order,
+  header names, order and `Accept`, the body key order and the request-class headers
+  are composed by the library. The runtime version and the nine authorize scopes come from
+  the profile.
+- **Session correlation** (`signature_emulation.session_correlation`, default on). A
+  per-conversation snapshot (`lib/session-correlation.mjs`) supplies the prompt id
+  (`x-claude-code-prompt-id` and the billing `cc_prompt_id`), the turn origin (`human` on
+  the main thread), the prompt and turn index (the first typed prompt is 1/1), the
+  previous response's `request-id` (billing `cc_prev_req`) and message id
+  (`diagnostics.previous_message_id`), and the tools used (`x-claude-code-sandy-plover`).
+  Only the first request and the typed-prompt boundary are attested; later increments are
+  inferred.
+- **Request kinds.** Title requests send `sideQuery`; main requests send `agenticQuery`,
+  which replaces the plugin's former Haiku `claude-code` append.
+- **Account features** (`account_features.*`, off by default): `dispatch_id`,
+  `message_threads`, `inline_tools`, `tool_provenance`, and `advisor`, which sends the
+  `advisor_20260301` tool and lets the library derive the beta.
+- **Per-turn effort** (`per_turn_effort.enabled`, default on;
+  `per_turn_effort.auto_low_short_questions`, default on;
+  `per_turn_effort.short_question_max_chars`, default 280). Applied after every history
+  transform and before the cache breakpoints (`lib/mimicry/request-body.mjs`, logic in
+  `lib/per-turn-effort.mjs`), for main-thread, non-subagent requests on models whose
+  catalogue entry declares `per_turn_effort`:
+  - A turn whose effort differs from the one in force gets
+    `{"role":"system","content":[],"output_config":{"effort":"<level>"}}` right before it
+    (merged into a host system entry already there). The top-level `output_config.effort`
+    stays the conversation's base. The library composes `per-turn-control-2026-07-01` for
+    the same models.
+  - The decision for a turn is made once, when it is the newest message, and remembered, so
+    older control messages are re-derived identically and the request stays a byte-for-byte
+    continuation of the previous one.
+  - The first turn never gets a control message; a typed turn right after an assistant
+    `tool_use` gets none; memory resets on a model change or a new conversation.
+  - Auto-`low` applies to a short, typed-only message (no code fence) that is the last
+    message of the request.
+
+### 14.4 The 2.1.329 wire as the plugin sends it
+
+What a default interactive main request carries (evidence: the live captures summarised in
+[`claude-code-2.1.329-analysis.md`](claude-code-2.1.329-analysis.md) §2.1; the library
+composes it, the plugin supplies the inputs of §14.3).
+
+**Headers**, in the library's logical order and genuine spelling: `Accept: application/json`,
+`Authorization`, `Content-Type`, `User-Agent` (`claude-cli/2.1.329 (external, cli)`),
+`X-Claude-Code-Session-Id`, `X-Stainless-Arch`, `-Lang`, `-OS`, `-Package-Version` (0.128.0),
+`-Retry-Count`, `-Runtime`, `-Runtime-Version` (from the profile), `-Timeout`; then the
+lowercase block `anthropic-beta`, `anthropic-dangerous-direct-browser-access`,
+`anthropic-dispatch-id` (only with `account_features.dispatch_id`), `anthropic-version`,
+`x-app`, `x-claude-1p-request-class`, `x-claude-code-prompt-id`, `x-claude-code-request-class`,
+`x-claude-code-sandy-plover`, `x-client-request-id`.
+
+> **Recorded divergence: header names and order.** The library returns header pairs with
+> the genuine capitalisation and order, but `buildWireCompatibleRequest` converts them to a
+> `Headers` object (`lib/mimicry/wire-compat.mjs`), and `fetch` lowercases every name and
+> does not promise order. The set of headers and their values are the genuine ones; the
+> case and position that a case-preserving transport would keep are not. See
+> [`mimicry/wire-compat-divergences.md`](mimicry/wire-compat-divergences.md).
+
+**Beta header.** The 2.1.329 registry order, without `mid-conversation-system-2026-04-07`
+(graduated; its slot stays header-less), with `thinking-token-count-2026-05-13` after the
+per-request betas, and without `context-1m` for natively-1M models. Plugin additions
+(`web-search`, `advisor-tool` without `account_features.advisor`, files, structured outputs,
+custom betas) still ride `additionalBetas` and land last. The Haiku `claude-code` beta comes
+from `agenticQuery`.
+
+**Billing block** (`system[0]`), segments in the library's order:
+`x-anthropic-billing-header: cc_version=2.1.329.<fp>; cc_entrypoint=cli; cch=00000;`
+then `cc_prev_req=<request id>;` (from the second request on, when the previous response
+carried a valid `request-id`), `cc_prompt_id=<uuid>;`, `cc_turn_origin=human;`,
+`cc_prompt_index=<n>;`, `cc_turn_index=<m>;`. `cch` is always `00000` (the genuine value is
+per-request and computed natively), and the fingerprint algorithm is unchanged.
+
+**Body order.** `model, messages, system, tools, metadata, max_tokens, thinking,
+context_management, output_config, thread, diagnostics, stream`, as the library writes the
+keys it models (the genuine capture also has a `safeguards` key between `context_management`
+and `output_config`):
+
+- `context_management` is generated by the library when thinking is active
+  (`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`); the plugin accepts it.
+- `output_config.effort` is the catalogue-derived default (`medium` for the 5.5 / 5.2 models)
+  or the resolved `default_effort`, fixed for the conversation (§14.3).
+- `thread: {"type":"create"}` only with `account_features.message_threads`.
+- `diagnostics` is `{"previous_message_id": null}` on the first request and the previous
+  response's message id afterwards. It travels with the `cache-diagnosis-2026-04-07` beta
+  (body-coupled: the rejected-beta latch never suppresses it).
+- `messages` may contain per-turn effort control messages (§14.3).
