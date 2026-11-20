@@ -127,16 +127,24 @@ describe("header transport — ORDER IS NOT A GUARANTEE", () => {
     expect(new Set(roundTripped)).toEqual(new Set(pairs.map(([name]) => name.toLowerCase())));
   });
 
-  it("only looks order-preserving because the package's canonical order is already sorted", async () => {
+  it("no longer looks order-preserving: the 2.1.329 layout is sorted by case-preserved name", async () => {
     const { pairs, headers } = await bothSides();
 
-    const packageOrder = pairs.map(([name]) => name.toLowerCase());
-    // Pinned deliberately. The day the package adopts a canonical order that is
-    // NOT alphabetical, this fails — and that failure is the warning that the
-    // `Headers` conversion has started silently reordering the wire, which no
-    // parity or golden test would catch, because both compare sets.
-    expect(packageOrder).toEqual([...packageOrder].sort());
-    expect([...headers.keys()]).toEqual(packageOrder);
+    const packageNames = pairs.map(([name]) => name);
+    const packageOrder = packageNames.map((name) => name.toLowerCase());
+    // The 2.1.329 package layout sorts by UTF-16 code unit over the CASE-PRESERVED
+    // names (`Accept`, `Authorization`, `Content-Type`, `User-Agent`, `X-Stainless-*`
+    // and `X-Claude-Code-Session-Id` capitalised, the rest lower case), so capitals
+    // come first. Pinned deliberately: if the package ever stops sorting this way
+    // the warning below is obsolete.
+    expect(packageNames).toEqual([...packageNames].sort());
+    // `Headers` lowercases and re-sorts, so the order the plugin hands to fetch is
+    // plain lowercase order and DIFFERS from the package's. Neither the package's
+    // capitalisation nor its order survives the conversion (Node's fetch lowercases
+    // names on the wire; only a case-preserving transport would keep them), which
+    // is a recorded divergence, not something this test can fix.
+    expect([...headers.keys()]).toEqual([...packageOrder].sort());
+    expect([...headers.keys()]).not.toEqual(packageOrder);
   });
 });
 

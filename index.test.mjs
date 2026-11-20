@@ -895,7 +895,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("authorization")).toBe("Bearer test-access");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
-    expect(headers.get("user-agent")).toContain("claude-cli/2.1.280");
+    expect(headers.get("user-agent")).toContain("claude-cli/2.1.329");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("X-Claude-Code-Session-Id")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -3364,7 +3364,7 @@ describe("header handling", () => {
     // cache-diagnosis is default-on in 2.1.280.
     expect(betaHeader).toContain("thinking-display-updates-2026-08-18");
     expect(betaHeader).toContain("thinking-binding-controls-2026-08-01");
-    expect(betaHeader).toContain("cache-diagnosis-2026-04-07");
+    expect(betaHeader).toContain("thinking-token-count-2026-05-13");
     expect(betaHeader).not.toContain("redact-thinking-2026-02-12");
     expect(JSON.parse(init.body).thinking?.display).toBe("updates");
   });
@@ -6633,11 +6633,13 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 2.1.280: the package composes some betas itself (cache-diagnosis is
-  // default-on), so evicting them from customBetas alone does not take them off
-  // the wire. The latch routes them through the adapter's suppressBetas.
+  // The package composes some betas itself (thinking-token-count is default-on
+  // and NOT body-coupled), so evicting them from customBetas alone does not take
+  // them off the wire. The latch routes them through the adapter's suppressBetas.
+  // (cache-diagnosis was the example under 2.1.280; since 2.1.329 it is paired
+  // with the `diagnostics` body field and is never latched - see the last test.)
   // -------------------------------------------------------------------------
-  describe("package-composed betas and suppressBetas (2.1.280)", () => {
+  describe("package-composed betas and suppressBetas", () => {
     // The API's invalid-beta wording; the sent-beta latch only reads names from it.
     const invalidBeta = (...names) =>
       `Unexpected value(s) ${names.map((n) => "`" + n + "`").join(", ")} for the \`anthropic-beta\` header. ` +
@@ -6700,37 +6702,48 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       }
     };
 
-    it("cache-diagnosis is package-composed even with no custom_betas (precondition)", async () => {
+    it("cache-diagnosis is body-coupled under 2.1.329: a 400 naming it is never latched and it stays on the wire", async () => {
+      const send = await withConfig([]);
+      mockFetch.mockResolvedValue(reject400(invalidBeta("cache-diagnosis-2026-04-07")));
+      await sendQuietly(send);
+      await sendQuietly(send);
+      expect(mockFetch.mock.calls.length).toBeGreaterThan(0);
+      for (const call of mockFetch.mock.calls) {
+        expect(betasOf(call)).toContain("cache-diagnosis-2026-04-07");
+      }
+    });
+
+    it("thinking-token-count is package-composed even with no custom_betas (precondition)", async () => {
       const send = await withConfig([]);
       mockFetch.mockResolvedValueOnce(ok200());
       await send();
-      expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[0])).toContain("thinking-token-count-2026-05-13");
     });
 
     it("rejected package-composed beta: absent on retry, absent next request, back after TTL", async () => {
       let fakeNow = Date.now();
       const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => fakeNow);
       try {
-        const send = await withConfig(["cache-diagnosis-2026-04-07"]);
+        const send = await withConfig(["thinking-token-count-2026-05-13"]);
         mockFetch
-          .mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")))
+          .mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")))
           .mockResolvedValueOnce(ok200())
           .mockResolvedValueOnce(ok200())
           .mockResolvedValueOnce(ok200());
 
         await send();
         expect(mockFetch.mock.calls).toHaveLength(2);
-        expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
-        expect(betasOf(mockFetch.mock.calls[1])).not.toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[0])).toContain("thinking-token-count-2026-05-13");
+        expect(betasOf(mockFetch.mock.calls[1])).not.toContain("thinking-token-count-2026-05-13");
 
         await send();
         expect(mockFetch.mock.calls).toHaveLength(3);
-        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("thinking-token-count-2026-05-13");
 
         fakeNow += 5 * 60 * 1000 + 1;
         await send();
         expect(mockFetch.mock.calls).toHaveLength(4);
-        expect(betasOf(mockFetch.mock.calls[3])).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[3])).toContain("thinking-token-count-2026-05-13");
       } finally {
         dateSpy.mockRestore();
       }
@@ -6749,19 +6762,19 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(first).toContain("afk-mode-2026-01-31");
       expect(retry).not.toContain("afk-mode-2026-01-31");
       // Only the rejected beta leaves: a package default is not collateral damage.
-      expect(retry).toContain("cache-diagnosis-2026-04-07");
+      expect(retry).toContain("thinking-token-count-2026-05-13");
 
       await send();
       const next = betasOf(mockFetch.mock.calls[2]);
       expect(next).not.toContain("afk-mode-2026-01-31");
-      expect(next).toContain("cache-diagnosis-2026-04-07");
+      expect(next).toContain("thinking-token-count-2026-05-13");
     });
 
     it("never suppresses oauth-2025-04-20 or claude-code-20250219 even when the error names them", async () => {
-      const send = await withConfig(["oauth-2025-04-20", "claude-code-20250219", "cache-diagnosis-2026-04-07"]);
+      const send = await withConfig(["oauth-2025-04-20", "claude-code-20250219", "thinking-token-count-2026-05-13"]);
       mockFetch
         .mockResolvedValueOnce(
-          reject400(invalidBeta("oauth-2025-04-20", "claude-code-20250219", "cache-diagnosis-2026-04-07")),
+          reject400(invalidBeta("oauth-2025-04-20", "claude-code-20250219", "thinking-token-count-2026-05-13")),
         )
         .mockResolvedValueOnce(ok200())
         .mockResolvedValueOnce(ok200());
@@ -6770,13 +6783,13 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const retry = betasOf(mockFetch.mock.calls[1]);
       expect(retry).toContain("oauth-2025-04-20");
       expect(retry).toContain("claude-code-20250219");
-      expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+      expect(retry).not.toContain("thinking-token-count-2026-05-13");
 
       await send();
       const next = betasOf(mockFetch.mock.calls[2]);
       expect(next).toContain("oauth-2025-04-20");
       expect(next).toContain("claude-code-20250219");
-      expect(next).not.toContain("cache-diagnosis-2026-04-07");
+      expect(next).not.toContain("thinking-token-count-2026-05-13");
     });
 
     it("empty custom_betas: a rejected SENT package beta is latched, retried once, and returns after TTL", async () => {
@@ -6785,7 +6798,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       try {
         const send = await withConfig([]);
         mockFetch
-          .mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")))
+          .mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")))
           .mockResolvedValueOnce(ok200())
           .mockResolvedValueOnce(ok200())
           .mockResolvedValueOnce(ok200());
@@ -6793,20 +6806,20 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
         const res = await send();
         expect(res.status).toBe(200);
         expect(mockFetch.mock.calls).toHaveLength(2);
-        expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[0])).toContain("thinking-token-count-2026-05-13");
         const retry = betasOf(mockFetch.mock.calls[1]);
-        expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+        expect(retry).not.toContain("thinking-token-count-2026-05-13");
         expect(retry).toContain("oauth-2025-04-20");
         expect(retry).toContain("claude-code-20250219");
 
         await send();
         expect(mockFetch.mock.calls).toHaveLength(3);
-        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[2])).not.toContain("thinking-token-count-2026-05-13");
 
         fakeNow += 5 * 60 * 1000 + 1;
         await send();
         expect(mockFetch.mock.calls).toHaveLength(4);
-        expect(betasOf(mockFetch.mock.calls[3])).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(mockFetch.mock.calls[3])).toContain("thinking-token-count-2026-05-13");
       } finally {
         dateSpy.mockRestore();
       }
@@ -6814,20 +6827,20 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
 
     it("empty custom_betas: a persistent rejection of a SENT beta is retried exactly once", async () => {
       const send = await withConfig([]);
-      mockFetch.mockImplementation(async () => reject400(invalidBeta("cache-diagnosis-2026-04-07")));
+      mockFetch.mockImplementation(async () => reject400(invalidBeta("thinking-token-count-2026-05-13")));
       try {
         await send();
       } catch {
         // A non-retryable 400 may surface as a thrown error; only the call count matters.
       }
       expect(mockFetch.mock.calls).toHaveLength(2);
-      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("thinking-token-count-2026-05-13");
 
       // M3(d): the latch did not help, so it is dropped rather than kept for the TTL.
       mockFetch.mockReset();
       mockFetch.mockResolvedValueOnce(ok200());
       await send();
-      expect(betasOf(mockFetch.mock.calls[0])).toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[0])).toContain("thinking-token-count-2026-05-13");
     });
 
     it("empty custom_betas: an error naming a beta that was NOT sent latches nothing", async () => {
@@ -6844,7 +6857,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
 
       await send();
       expect(mockFetch.mock.calls).toHaveLength(2);
-      expect(betasOf(mockFetch.mock.calls[1])).toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[1])).toContain("thinking-token-count-2026-05-13");
     });
 
     it("empty custom_betas: an error naming oauth-2025-04-20 latches nothing and does not loop", async () => {
@@ -6865,14 +6878,14 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const next = betasOf(mockFetch.mock.calls[1]);
       expect(next).toContain("oauth-2025-04-20");
       expect(next).toContain("claude-code-20250219");
-      expect(next).toContain("cache-diagnosis-2026-04-07");
+      expect(next).toContain("thinking-token-count-2026-05-13");
     });
 
     // H1: stripping a custom beta must not suppress the package's own copy of it.
     it("H1: custom ['1m'] + package-composed context-1m + 400 naming cache-diagnosis keeps context-1m", async () => {
       const send = await withConfig(["1m"], { model: "claude-sonnet-4-1m" });
       mockFetch
-        .mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")))
+        .mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")))
         .mockResolvedValueOnce(ok200())
         .mockResolvedValueOnce(ok200());
 
@@ -6880,20 +6893,20 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(mockFetch.mock.calls).toHaveLength(2);
       const first = betasOf(mockFetch.mock.calls[0]);
       expect(first).toContain("context-1m-2025-08-07");
-      expect(first).toContain("cache-diagnosis-2026-04-07");
+      expect(first).toContain("thinking-token-count-2026-05-13");
       const retry = betasOf(mockFetch.mock.calls[1]);
       expect(retry).toContain("context-1m-2025-08-07");
-      expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+      expect(retry).not.toContain("thinking-token-count-2026-05-13");
 
       await send();
       expect(mockFetch.mock.calls).toHaveLength(3);
       const next = betasOf(mockFetch.mock.calls[2]);
       expect(next).toContain("context-1m-2025-08-07");
-      expect(next).not.toContain("cache-diagnosis-2026-04-07");
+      expect(next).not.toContain("thinking-token-count-2026-05-13");
     });
 
     it("H1: an unnamed rejection strips custom betas only; package-composed betas stay on the wire", async () => {
-      const send = await withConfig(["1m", "cache-diagnosis-2026-04-07"], { model: "claude-sonnet-4-1m" });
+      const send = await withConfig(["1m", "thinking-token-count-2026-05-13"], { model: "claude-sonnet-4-1m" });
       mockFetch
         .mockResolvedValueOnce(reject400("Unknown beta flag in anthropic-beta header"))
         .mockResolvedValueOnce(ok200())
@@ -6903,12 +6916,12 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(mockFetch.mock.calls).toHaveLength(2);
       for (const call of mockFetch.mock.calls.slice(1)) {
         expect(betasOf(call)).toContain("context-1m-2025-08-07");
-        expect(betasOf(call)).toContain("cache-diagnosis-2026-04-07");
+        expect(betasOf(call)).toContain("thinking-token-count-2026-05-13");
       }
       await send();
       const next = betasOf(mockFetch.mock.calls[2]);
       expect(next).toContain("context-1m-2025-08-07");
-      expect(next).toContain("cache-diagnosis-2026-04-07");
+      expect(next).toContain("thinking-token-count-2026-05-13");
     });
 
     // M1: suppressing a body-coupled header while the body keeps the paired field
@@ -6933,7 +6946,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const send = await withConfig([], { model: "claude-opus-4-6", extraBody: { thinking: { type: "adaptive" } } });
       mockFetch
         .mockResolvedValueOnce(
-          reject400(invalidBeta("thinking-display-updates-2026-08-18", "cache-diagnosis-2026-04-07")),
+          reject400(invalidBeta("thinking-display-updates-2026-08-18", "thinking-token-count-2026-05-13")),
         )
         .mockResolvedValueOnce(ok200());
 
@@ -6941,7 +6954,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(mockFetch.mock.calls).toHaveLength(2);
       const retry = betasOf(mockFetch.mock.calls[1]);
       expect(retry).toContain("thinking-display-updates-2026-08-18");
-      expect(retry).not.toContain("cache-diagnosis-2026-04-07");
+      expect(retry).not.toContain("thinking-token-count-2026-05-13");
     });
 
     // M2: count_tokens has no suppressBetas, so a latch there only degrades /v1/messages.
@@ -6968,7 +6981,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const send = await withConfig([]);
       mockFetch
         .mockResolvedValueOnce(
-          reject400("anthropic-beta: request failed; see cache-diagnosis-2026-04-07 docs for details"),
+          reject400("anthropic-beta: request failed; see thinking-token-count-2026-05-13 docs for details"),
         )
         .mockResolvedValueOnce(ok200());
 
@@ -6976,7 +6989,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       expect(mockFetch.mock.calls).toHaveLength(1);
 
       await send();
-      expect(betasOf(mockFetch.mock.calls[1])).toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[1])).toContain("thinking-token-count-2026-05-13");
     });
 
     // M3(c): an error that echoes the whole header must not strip every beta.
@@ -7000,18 +7013,18 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
     it("M3d: when the latched retry fails the same way, the latch is dropped", async () => {
       const send = await withConfig([]);
       mockFetch
-        .mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")))
+        .mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")))
         .mockResolvedValueOnce(reject400(invalidBeta("interleaved-thinking-2025-05-14")))
         .mockResolvedValueOnce(ok200());
 
       await sendQuietly(send);
       expect(mockFetch.mock.calls).toHaveLength(2);
-      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("cache-diagnosis-2026-04-07");
+      expect(betasOf(mockFetch.mock.calls[1])).not.toContain("thinking-token-count-2026-05-13");
 
       await send();
       expect(mockFetch.mock.calls).toHaveLength(3);
       const next = betasOf(mockFetch.mock.calls[2]);
-      expect(next).toContain("cache-diagnosis-2026-04-07");
+      expect(next).toContain("thinking-token-count-2026-05-13");
       expect(next).toContain("interleaved-thinking-2025-05-14");
     });
 
@@ -7026,7 +7039,7 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
         ],
       });
       mockFetch.mockImplementation(async () => ok200());
-      mockFetch.mockResolvedValueOnce(reject400(invalidBeta("cache-diagnosis-2026-04-07")));
+      mockFetch.mockResolvedValueOnce(reject400(invalidBeta("thinking-token-count-2026-05-13")));
       const authOf = (call) => call[1].headers.get("authorization");
 
       await send();
@@ -7040,15 +7053,15 @@ describe("custom_betas retry latch (400/anthropic-beta and 413)", () => {
       const otherAccount = later.filter((c) => authOf(c) !== rejectedAuth);
       expect(sameAccount.length, "round-robin reaches the rejected account again").toBeGreaterThan(0);
       expect(otherAccount.length, "round-robin reaches the other account").toBeGreaterThan(0);
-      for (const call of sameAccount) expect(betasOf(call)).not.toContain("cache-diagnosis-2026-04-07");
-      for (const call of otherAccount) expect(betasOf(call)).toContain("cache-diagnosis-2026-04-07");
+      for (const call of sameAccount) expect(betasOf(call)).not.toContain("thinking-token-count-2026-05-13");
+      for (const call of otherAccount) expect(betasOf(call)).toContain("thinking-token-count-2026-05-13");
     });
 
     // The one-shot latch retry must land on the account that was rejected: the
     // latch is keyed per account, so a rotating strategy moving the retry to
     // another account would resend the beta and burn the only retry.
     describe.each(["round-robin", "hybrid"])("latch retry account pinning (%s)", (strategy) => {
-      const target = "cache-diagnosis-2026-04-07";
+      const target = "thinking-token-count-2026-05-13";
       const authOf = (call) => call[1].headers.get("authorization");
       const twoAccounts = (custom = []) => {
         const far = Date.now() + 3_600_000;

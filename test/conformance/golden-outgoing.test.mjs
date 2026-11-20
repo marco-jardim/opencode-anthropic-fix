@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getStainlessArch, getStainlessOs } from "../../lib/mimicry/headers.mjs";
+import { WIRE_PROFILE } from "../../lib/mimicry/wire-compat.mjs";
 
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
@@ -69,7 +70,20 @@ const golden = JSON.parse(readFileSync(goldenPath, "utf8"));
 // Host-derived Stainless headers are normalized separately after their presence
 // and live-process values are asserted. Other mimicry-critical headers and
 // request body fields remain literal in the golden so any drift fails this test.
-const GENERATED_PATHS = ["body.metadata.user_id", "headers.x-claude-code-session-id", "headers.x-client-request-id"];
+//
+// 2.1.329 adds one more per-request random value:
+// - headers.x-claude-code-prompt-id is a fresh prompt UUID (session correlation starts
+//   a new prompt for each independent request).
+// The same UUID is repeated inside the billing block (`cc_prompt_id=<uuid>` in
+// body.system[0].text). That text is otherwise literal and must stay compared, so the
+// uuid alone is scrubbed in `captureOutgoing` rather than normalizing the whole block.
+const GENERATED_PATHS = [
+  "body.metadata.user_id",
+  "headers.x-claude-code-prompt-id",
+  "headers.x-claude-code-session-id",
+  "headers.x-client-request-id",
+];
+const BILLING_PROMPT_ID = /cc_prompt_id=[^;]*/;
 const HOST_DERIVED_PATHS = [
   "headers.x-stainless-arch",
   "headers.x-stainless-os",
@@ -136,9 +150,14 @@ function captureOutgoing([_input, init]) {
     throw new TypeError("Expected the interceptor to send a JSON request body");
   }
 
+  const body = JSON.parse(init.body);
+  const billing = body.system?.[0];
+  if (billing && typeof billing.text === "string") {
+    billing.text = billing.text.replace(BILLING_PROMPT_ID, "cc_prompt_id=<normalized>");
+  }
   return {
     headers: Object.fromEntries(new Headers(init.headers).entries()),
-    body: JSON.parse(init.body),
+    body,
   };
 }
 
@@ -181,7 +200,8 @@ function expectHostDerivedHeaders(outgoing) {
   expect(headers).toHaveProperty("x-stainless-os");
   expect(headers["x-stainless-os"]).toBe(getStainlessOs(process.platform));
   expect(headers).toHaveProperty("x-stainless-runtime-version");
-  expect(headers["x-stainless-runtime-version"]).toBe(process.version);
+  // The profile records the runtime version the genuine binary reported.
+  expect(headers["x-stainless-runtime-version"]).toBe(WIRE_PROFILE.runtimeVersion);
   expect(headers["x-stainless-runtime-version"]).toMatch(/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
 }
 

@@ -192,7 +192,7 @@ it("guard: console and max authorize with the same scope union and no project sc
   const consoleScope = new URL((await authorize("console")).url).searchParams.get("scope");
   expect(consoleScope).toBe(max);
   expect(max).toBe(
-    "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins",
+    "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins user:privacy_consents:write org:desktop_config",
   );
   expect(max).not.toContain("projects");
 });

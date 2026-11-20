@@ -73,6 +73,7 @@ vi.stubGlobal("fetch", mockFetch);
 import { AnthropicAuthPlugin } from "../../index.mjs";
 import { saveAccounts, loadAccounts } from "../../lib/storage.mjs";
 import { loadConfig } from "../../lib/config.mjs";
+import { WIRE_PROFILE } from "../../lib/mimicry/wire-compat.mjs";
 
 const { authorize, refreshToken } = await import("../../lib/oauth.mjs");
 
@@ -1183,7 +1184,8 @@ describe("E2E: Full header set on a standard request", () => {
     expect(headers.get("anthropic-version")).toBe("2023-06-01");
     expect(headers.get("x-stainless-lang")).toBe("js");
     expect(headers.get("x-stainless-runtime")).toBe("node");
-    expect(headers.get("x-stainless-runtime-version")).toBe(process.version);
+    // The profile records the runtime version the genuine binary reported.
+    expect(headers.get("x-stainless-runtime-version")).toBe(WIRE_PROFILE.runtimeVersion);
     // x-stainless-package-version: passthrough from host SDK (or fallback "0.208.0")
     expect(headers.get("x-stainless-retry-count")).toBe("0");
     expect(headers.get("x-app")).toBe("cli");
@@ -1650,7 +1652,7 @@ describe("context_management body field — field ⊆ beta invariant", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("emits the beta by default but omits the body field unless opted in", async () => {
+  it("emits the beta and, under 2.1.329, the genuine default context_management body field", async () => {
     const { body, headers } = await sendRequest(fetchFn, {
       model: "claude-opus-4-6",
       messages: [{ role: "user", content: "hi" }],
@@ -1659,12 +1661,14 @@ describe("context_management body field — field ⊆ beta invariant", () => {
     expect(body.thinking?.type).toBe("adaptive");
     // v2.1.195: beta is default-on for first-party non-claude-3 models.
     expect(headers.get("anthropic-beta") || "").toContain("context-management-2025-06-27");
-    // Field stays opt-in → absent by default (keeps field ⊆ beta; no 400).
-    expect(body.context_management).toBeUndefined();
+    // 2.1.329: the genuine client sends the field by default (LIVE capture), and
+    // the package now composes it together with the beta, so the field ⊆ beta
+    // invariant holds by construction. The plugin does not suppress it.
+    expect(body.context_management).toEqual({ edits: [{ type: "clear_thinking_20251015", keep: "all" }] });
   });
 });
 
-describe("E2E: Version is 2.1.280", () => {
+describe("E2E: Version is the pinned profile's", () => {
   let client, fetchFn;
 
   beforeEach(async () => {
@@ -1673,17 +1677,17 @@ describe("E2E: Version is 2.1.280", () => {
     fetchFn = await setupFetchFn(client);
   });
 
-  it("User-Agent contains 2.1.280", async () => {
+  it("User-Agent carries the pinned profile version", async () => {
     const { headers } = await sendRequest(fetchFn);
-    expect(headers.get("user-agent")).toContain("2.1.280");
+    expect(headers.get("user-agent")).toContain(WIRE_PROFILE.cliVersion);
   });
 
-  it("billing header contains 2.1.280", async () => {
+  it("billing header carries the pinned profile version", async () => {
     const { body } = await sendRequest(fetchFn, {
       system: [{ type: "text", text: "test" }],
     });
 
-    expect(body.system[0].text).toContain("2.1.280");
+    expect(body.system[0].text).toContain(WIRE_PROFILE.cliVersion);
   });
 });
 

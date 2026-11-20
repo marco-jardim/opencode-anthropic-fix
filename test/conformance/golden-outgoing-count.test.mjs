@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getStainlessArch, getStainlessOs } from "../../lib/mimicry/headers.mjs";
+import { WIRE_PROFILE } from "../../lib/mimicry/wire-compat.mjs";
 
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
@@ -176,7 +177,8 @@ function expectHostDerivedHeaders(outgoing) {
   expect(headers).toHaveProperty("x-stainless-os");
   expect(headers["x-stainless-os"]).toBe(getStainlessOs(process.platform));
   expect(headers).toHaveProperty("x-stainless-runtime-version");
-  expect(headers["x-stainless-runtime-version"]).toBe(process.version);
+  // The profile records the runtime version the genuine binary reported.
+  expect(headers["x-stainless-runtime-version"]).toBe(WIRE_PROFILE.runtimeVersion);
   expect(headers["x-stainless-runtime-version"]).toMatch(/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
 }
 

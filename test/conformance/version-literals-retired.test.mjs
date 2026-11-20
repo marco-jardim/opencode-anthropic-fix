@@ -212,9 +212,9 @@ describe("Claude Code version literals are retired from production code", () => 
     expect(scanProduction(CC_VERSION_LITERAL)).toEqual(ALLOWED_VERSION_LITERALS);
   });
 
-  it("still emulates the profile version it always did — the value moved, not changed", () => {
-    expect(WIRE_PROFILE.cliVersion).toBe("2.1.280");
-    expect(WIRE_PROFILE.userAgent).toBe("claude-cli/2.1.280 (external, cli)");
+  it("emulates the profile the plugin is deliberately pinned to", () => {
+    expect(WIRE_PROFILE.cliVersion).toBe("2.1.329");
+    expect(WIRE_PROFILE.userAgent).toBe("claude-cli/2.1.329 (external, cli)");
   });
 });
 

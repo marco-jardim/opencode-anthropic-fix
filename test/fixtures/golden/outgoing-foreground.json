@@ -1,21 +1,26 @@
 {
   "headers": {
-    "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07,web-search-2025-03-05,advisor-tool-2026-03-01",
+    "accept": "application/json",
+    "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07,web-search-2025-03-05,advisor-tool-2026-03-01",
     "anthropic-dangerous-direct-browser-access": "true",
     "anthropic-version": "2023-06-01",
     "authorization": "Bearer test-access",
     "content-type": "application/json",
-    "user-agent": "claude-cli/2.1.280 (external, cli)",
+    "user-agent": "claude-cli/2.1.329 (external, cli)",
     "x-app": "cli",
+    "x-claude-1p-request-class": "main",
+    "x-claude-code-prompt-id": "<normalized>",
+    "x-claude-code-request-class": "main",
+    "x-claude-code-sandy-plover": "[]",
     "x-claude-code-session-id": "<normalized>",
     "x-client-request-id": "<normalized>",
     "x-stainless-arch": "x64",
     "x-stainless-lang": "js",
     "x-stainless-os": "Windows",
-    "x-stainless-package-version": "0.112.1",
+    "x-stainless-package-version": "0.128.0",
     "x-stainless-retry-count": "0",
     "x-stainless-runtime": "node",
-    "x-stainless-runtime-version": "v24.15.0",
+    "x-stainless-runtime-version": "v26.12.1",
     "x-stainless-timeout": "600"
   },
   "body": {
@@ -24,7 +29,7 @@
     "system": [
       {
         "type": "text",
-        "text": "x-anthropic-billing-header: cc_version=2.1.280.790; cc_entrypoint=cli; cch=00000;"
+        "text": "x-anthropic-billing-header: cc_version=2.1.329.e8c; cc_entrypoint=cli; cch=00000; cc_prompt_id=<normalized>; cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;"
       },
       {
         "type": "text",
@@ -44,6 +49,9 @@
     "temperature": 1,
     "metadata": {
       "user_id": "<normalized>"
+    },
+    "diagnostics": {
+      "previous_message_id": null
     }
   }
 }
